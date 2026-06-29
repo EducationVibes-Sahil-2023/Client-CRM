@@ -34,7 +34,7 @@ class Cors extends BaseConfig
          */
         'allowedOrigins' => [
             'http://localhost:3001',
-            'client.educationvibes.in',
+            'https://client.educationvibes.in',
         ],
 
         /**
