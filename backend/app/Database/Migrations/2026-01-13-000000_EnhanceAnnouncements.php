@@ -38,10 +38,8 @@ class EnhanceAnnouncements extends Migration
         if (! $this->db->fieldExists('require_ack', 'announcements')) {
             $cols['require_ack'] = ['type' => 'TINYINT', 'constraint' => 1, 'default' => 0, 'null' => false, 'after' => 'attachments'];
         }
-        // Soft-delete marker (project policy: deletes are never hard removals).
-        if (! $this->db->fieldExists('deleted_at', 'announcements')) {
-            $cols['deleted_at'] = ['type' => 'DATETIME', 'null' => true];
-        }
+        // Note: the soft-delete `deleted_at` column is added by the dedicated
+        // AddAnnouncementSoftDelete migration (runs immediately after this one).
         if ($cols) {
             $this->forge->addColumn('announcements', $cols);
         }
