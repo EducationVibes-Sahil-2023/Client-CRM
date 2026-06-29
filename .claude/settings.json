@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php -l app/Controllers/SuperAdmin.php)",
+      "Bash(php -l app/Models/CalendarEventModel.php)",
+      "Bash(php -l \"app/Database/Migrations/2026-01-01-000000_CreateCalendarEvents.php\")",
+      "Bash(php spark *)",
+      "Bash(grep -viE \"openssl|^$\")",
+      "Bash(php -r ' *)",
+      "Bash(grep -viE \"openssl|^Warning|^$\")",
+      "Bash(php -l app/Database/Migrations/2026-01-05-000000_CreateClientCrmTables.php)",
+      "Bash(grep -ivE \"openssl|^$\")",
+      "Bash(php -l app/Controllers/ClientController.php)",
+      "Bash(php -r 'foreach\\([\"crm_main\",\"crm_education_vibes\"] as $db\\){$m=new mysqli\\(\"localhost\",\"root\",\"\",$db,3306\\); $r=$m->query\\(\"SHOW COLUMNS FROM client_staff LIKE \\\\\"deleted_at\\\\\"\"\\); echo \"$db.client_staff.deleted_at: \".\\($r->num_rows?\"OK\":\"MISSING\"\\).\"\\\\n\";}')",
+      "Bash(\"C:/xampp/mysql/bin/mysql\" -uroot crm_education_vibes -e \"SHOW COLUMNS FROM lead_statuses LIKE 'deleted_at'; SHOW COLUMNS FROM conversion_types LIKE 'deleted_at'; SHOW COLUMNS FROM marketing_types LIKE 'deleted_at'; SHOW COLUMNS FROM lead_sources LIKE 'deleted_at'; SHOW COLUMNS FROM lead_types LIKE 'deleted_at';\")",
+      "Bash(/c/xampp/php/php.exe -r '$mysqli=@new mysqli\\(\"127.0.0.1\",\"root\",\"\",\"crm_main\"\\); if\\($mysqli->connect_errno\\){echo \"noconn\\\\n\";exit;} $r=$mysqli->query\\(\"SHOW COLUMNS FROM announcements\"\\); while\\($c=$r->fetch_assoc\\(\\)\\){echo $c[\"Field\"].\"\\\\n\";} echo \"---reads---\\\\n\"; $r2=$mysqli->query\\(\"SHOW TABLES LIKE \\\\\"announcement_reads\\\\\"\"\\); echo \\($r2 && $r2->num_rows\\)?\"announcement_reads EXISTS\\\\n\":\"MISSING\\\\n\";')",
+      "Bash(/c/xampp/mysql/bin/mysql.exe -u root -e \"SELECT version, class FROM crm_main.migrations WHERE class LIKE '%SoftDelete%' OR class LIKE '%AddTask%' OR class LIKE '%AddAsset%';\")",
+      "Bash(/c/xampp/php/php.exe -r '$m=@new mysqli\\(\"127.0.0.1\",\"root\",\"\",\"crm_main\"\\); if\\($m->connect_errno\\){echo \"noconn\";exit;} $r=$m->query\\(\"SHOW COLUMNS FROM announcements LIKE \\\\\"deleted_at\\\\\"\"\\); echo \\($r&&$r->num_rows\\)?\"main.deleted_at OK\\\\n\":\"main.deleted_at MISSING\\\\n\"; $r=$m->query\\(\"SELECT id FROM clients LIMIT 1\"\\); if\\($r&&$row=$r->fetch_assoc\\(\\)\\){echo \"client #\".$row[\"id\"].\" exists\\\\n\";}')",
+      "Bash(/c/xampp/php/php.exe -r ' *)",
+      "Bash(/c/xampp/mysql/bin/mysql -u root -e \"SELECT 'main' AS db, COUNT\\(*\\) AS has_deleted_at FROM information_schema.columns WHERE table_schema='crm_main' AND table_name='client_tasks' AND column_name='deleted_at' UNION ALL SELECT 'tenant', COUNT\\(*\\) FROM information_schema.columns WHERE table_schema='crm_education_vibes' AND table_name='client_tasks' AND column_name='deleted_at';\")"
+    ]
+  }
+}

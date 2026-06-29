@@ -1,0 +1,15 @@
+# Node
+node_modules/
+.next/
+.DS_Store
+
+# PHP
+vendor/
+.env
+backend/vendor/
+backend/writable/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
