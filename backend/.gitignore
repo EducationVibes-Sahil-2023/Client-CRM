@@ -63,6 +63,13 @@ Vagrantfile
 /writable/debugbar/*
 !/writable/debugbar/index.html
 
+# Public uploads (user-uploaded images/attachments). Keep the directory and its
+# security guards under version control, but never track the uploaded files
+# themselves — they belong on the server/disk, not in the repo.
+/public/uploads/*
+!/public/uploads/.htaccess
+!/public/uploads/index.html
+
 php_errors.log
 
 #-------------------------
