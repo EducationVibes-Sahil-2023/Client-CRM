@@ -6,9 +6,13 @@ import {
   type FollowupDashboard, type FollowupRep, type FollowupOverview, type FollowupBucket, type GhostedLead, type LeadStatus, type LeadSource, type Staff, type LookupItem,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, PageHeader, Spinner, EmptyState } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+import { Card, PageHeader, EmptyState, SkeletonStats, SkeletonBlock } from "../../admin/ui";
+import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { DataTable, type Column } from "../../admin/DataTable";
 import { DonutChart } from "../../admin/Charts";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
+import { DateRangeFilter, resolveDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 
 // ---- colour helpers ----
 const HEX: Record<string, string> = {
@@ -291,7 +295,12 @@ function repHealth(pct: number) {
 
 /** Counsellor follow-up workload & accountability — per-rep, with pending split
  *  by top-level status and an On track / At risk / Critical classification. */
+const numPill = (n: number) => (
+  <span className={`inline-flex min-w-7 justify-center rounded-full px-2 py-0.5 text-xs font-medium ${n > 0 ? "bg-slate-100 text-slate-600" : "text-slate-300"}`}>{n}</span>
+);
+
 function AccountabilityTable({ reps, topStatuses }: { reps: FollowupRep[]; topStatuses: { id: number; name: string; color: string }[] }) {
+  const { defaultPageSize, isAdmin } = useClient();
   const [filter, setFilter] = useState<"all" | "on" | "risk" | "crit">("all");
 
   const rows = useMemo(() => reps
@@ -310,6 +319,18 @@ function AccountabilityTable({ reps, topStatuses }: { reps: FollowupRep[]; topSt
   }), [rows]);
   const shown = filter === "all" ? rows : rows.filter((r) => r.health.key === filter);
 
+  type Row = (typeof rows)[number];
+  const columns = useMemo<Column<Row>[]>(() => [
+    { key: "name", header: "Counsellor", lockVisible: true, width: 180, render: (x) => <span className="font-semibold text-slate-800">{x.name}</span> },
+    { key: "total", header: "Assigned", align: "right", width: 100, render: (x) => <span className="font-semibold tabular-nums text-slate-800">{nf(x.total)}</span> },
+    { key: "done", header: "Completed", align: "right", width: 110, render: (x) => <span className="tabular-nums text-emerald-600">{nf(x.done)}</span> },
+    { key: "pending", header: "Pending", align: "right", width: 100, render: (x) => <span className={`tabular-nums ${x.pending > 0 ? "text-rose-500" : "text-slate-300"}`}>{nf(x.pending)}</span> },
+    { key: "overdue", header: "Overdue", align: "center", width: 100, render: (x) => <span className={`inline-flex min-w-7 justify-center rounded-md px-2 py-0.5 text-xs font-semibold ${x.overdue > 0 ? "bg-amber-100 text-amber-700" : "bg-emerald-50 text-emerald-600"}`}>{x.overdue}</span> },
+    ...topStatuses.map((t) => ({ key: `st_${t.id}`, header: t.name, align: "center" as const, width: 110, render: (x: Row) => numPill(x.buckets?.[String(t.id)] ?? 0) })),
+    { key: "pct", header: "Completed %", align: "center", width: 120, render: (x) => <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${pctChip(x.pct)}`}>{x.pct}%</span> },
+    { key: "health", header: "Status", width: 110, render: (x) => <span className={`inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold ${x.health.chip}`}>{x.health.label}</span> },
+  ], [topStatuses]);
+
   const chip = (key: typeof filter, label: string, n: number, tone: string) => (
     <button
       onClick={() => setFilter(key)}
@@ -318,61 +339,31 @@ function AccountabilityTable({ reps, topStatuses }: { reps: FollowupRep[]; topSt
       {label} {n}
     </button>
   );
-  const numPill = (n: number) => (
-    <span className={`inline-flex min-w-7 justify-center rounded-full px-2 py-0.5 text-xs font-medium ${n > 0 ? "bg-slate-100 text-slate-600" : "text-slate-300"}`}>{n}</span>
-  );
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Counsellor follow-up workload &amp; accountability</h3>
-        <div className="flex items-center gap-1.5">
+    <DataTable
+      tableKey="followups"
+      canRenameColumns={isAdmin}
+      paginate
+      defaultPageSize={defaultPageSize}
+      columns={columns}
+      rows={shown}
+      getKey={(x) => x.id}
+      nowrap
+      pageAlign="right"
+      searchKeys={(x) => [x.name]}
+      searchPlaceholder="Search counsellors…"
+      emptyTitle="No counsellors in this group"
+      emptyHint="Try a different health filter."
+      toolbar={
+        <div className="flex flex-wrap items-center gap-1.5">
           {chip("all", "All", counts.all, "bg-slate-700 text-white")}
           {chip("on", "On track", counts.on, "bg-emerald-100 text-emerald-700")}
           {chip("risk", "At risk", counts.risk, "bg-amber-100 text-amber-700")}
           {chip("crit", "Critical", counts.crit, "bg-rose-100 text-rose-700")}
         </div>
-      </div>
-      <div className="max-h-[640px] overflow-auto">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
-            <tr>
-              <th className="whitespace-nowrap px-3 py-2.5 text-left font-medium">Counsellor</th>
-              <th className="whitespace-nowrap px-3 py-2.5 text-right font-medium">Assigned</th>
-              <th className="whitespace-nowrap px-3 py-2.5 text-right font-medium">Completed</th>
-              <th className="whitespace-nowrap px-3 py-2.5 text-right font-medium">Pending</th>
-              <th className="whitespace-nowrap px-3 py-2.5 text-center font-medium">Overdue</th>
-              {topStatuses.map((t) => <th key={t.id} className="whitespace-nowrap px-3 py-2.5 text-center font-medium">{t.name}</th>)}
-              <th className="whitespace-nowrap px-3 py-2.5 text-center font-medium">Completed %</th>
-              <th className="whitespace-nowrap px-3 py-2.5 text-left font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {shown.map((x) => (
-              <tr key={x.id} className="hover:bg-slate-50/60">
-                <td className="whitespace-nowrap px-3 py-2.5 font-semibold text-slate-800">{x.name}</td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-right font-semibold tabular-nums text-slate-800">{nf(x.total)}</td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums text-emerald-600">{nf(x.done)}</td>
-                <td className={`whitespace-nowrap px-3 py-2.5 text-right tabular-nums ${x.pending > 0 ? "text-rose-500" : "text-slate-300"}`}>{nf(x.pending)}</td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-center">
-                  <span className={`inline-flex min-w-7 justify-center rounded-md px-2 py-0.5 text-xs font-semibold ${x.overdue > 0 ? "bg-amber-100 text-amber-700" : "bg-emerald-50 text-emerald-600"}`}>{x.overdue}</span>
-                </td>
-                {topStatuses.map((t) => <td key={t.id} className="whitespace-nowrap px-3 py-2.5 text-center">{numPill(x.buckets?.[String(t.id)] ?? 0)}</td>)}
-                <td className="whitespace-nowrap px-3 py-2.5 text-center">
-                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${pctChip(x.pct)}`}>{x.pct}%</span>
-                </td>
-                <td className="whitespace-nowrap px-3 py-2.5">
-                  <span className={`inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold ${x.health.chip}`}>{x.health.label}</span>
-                </td>
-              </tr>
-            ))}
-            {shown.length === 0 && (
-              <tr><td colSpan={6 + topStatuses.length} className="px-3 py-10 text-center text-sm text-slate-400">No counsellors in this group.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+      }
+    />
   );
 }
 
@@ -401,15 +392,15 @@ export default function ClientFollowups() {
   const [loading, setLoading] = useState(true);
   // Draft filters (what the user is editing) only take effect on "Apply" →
   // `applied`. The dashboard always fetches from `applied`.
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [range, setRange] = useState<DateRange>(EMPTY_RANGE);
   const [fStatus, setFStatus] = useState<string[]>([]);
   const [fSource, setFSource] = useState<string[]>([]);
   const [fDept, setFDept] = useState<string[]>([]);
   const [fOffice, setFOffice] = useState<string[]>([]);
   const [fAssign, setFAssign] = useState<string[]>([]);
-  const BLANK = { from: "", to: "", status: [] as string[], source: [] as string[], dept: [] as string[], office: [] as string[], assign: [] as string[] };
+  const BLANK = { range: EMPTY_RANGE as DateRange, status: [] as string[], source: [] as string[], dept: [] as string[], office: [] as string[], assign: [] as string[] };
   const [applied, setApplied] = useState(BLANK);
+  const [filterOpen, setFilterOpen] = useState(false);
 
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
@@ -424,9 +415,10 @@ export default function ClientFollowups() {
   }, []);
 
   const load = useCallback(() => {
+    const { from, to } = resolveDateRange(applied.range);
     const params: Record<string, string | undefined> = {
-      from: applied.from || undefined,
-      to: applied.to || undefined,
+      from: from || undefined,
+      to: to || undefined,
       assign: applied.assign.join(",") || undefined,
       lead_status: applied.status.join(",") || undefined,
       lead_source: applied.source.join(",") || undefined,
@@ -448,16 +440,26 @@ export default function ClientFollowups() {
 
   // Any draft filter set (to show Reset); whether applied filters are active
   // (the "Active" pill); and whether the draft differs from what's applied.
-  const draftSet = !!(from || to || fStatus.length || fSource.length || fDept.length || fOffice.length || fAssign.length);
-  const appliedActive = !!(applied.from || applied.to || applied.status.length || applied.source.length || applied.dept.length || applied.office.length || applied.assign.length);
-  const dirty = useMemo(() => JSON.stringify({ from, to, status: fStatus, source: fSource, dept: fDept, office: fOffice, assign: fAssign }) !== JSON.stringify(applied), [from, to, fStatus, fSource, fDept, fOffice, fAssign, applied]);
+  const draftSet = !!(rangeActive(range) || fStatus.length || fSource.length || fDept.length || fOffice.length || fAssign.length);
+  const appliedActive = !!(rangeActive(applied.range) || applied.status.length || applied.source.length || applied.dept.length || applied.office.length || applied.assign.length);
+  const dirty = useMemo(() => JSON.stringify({ range, status: fStatus, source: fSource, dept: fDept, office: fOffice, assign: fAssign }) !== JSON.stringify(applied), [range, fStatus, fSource, fDept, fOffice, fAssign, applied]);
+  // How many applied filter groups are active — drives the badge on the Filters button.
+  const appliedCount = [rangeActive(applied.range), applied.status.length, applied.source.length, applied.dept.length, applied.office.length, applied.assign.length].filter(Boolean).length;
 
+  // Sync the draft inputs to what's applied, then open the drawer (so reopening
+  // never shows stale, unapplied edits).
+  function openFilters() {
+    setRange(applied.range); setFStatus(applied.status); setFSource(applied.source);
+    setFDept(applied.dept); setFOffice(applied.office); setFAssign(applied.assign);
+    setFilterOpen(true);
+  }
   function applyFilters() {
     setLoading(true);
-    setApplied({ from, to, status: fStatus, source: fSource, dept: fDept, office: fOffice, assign: fAssign });
+    setApplied({ range, status: fStatus, source: fSource, dept: fDept, office: fOffice, assign: fAssign });
+    setFilterOpen(false);
   }
   function resetFilters() {
-    setFrom(""); setTo(""); setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]);
+    setRange(EMPTY_RANGE); setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]);
     if (appliedActive) { setLoading(true); setApplied(BLANK); }
   }
   const k = dash?.kpis;
@@ -479,54 +481,49 @@ export default function ClientFollowups() {
   const completionCards = useMemo(() => statusVolume.map((s) => ({ label: s.label, color: s.color, sub: `${nf(s.completed)}/${nf(s.count)} done`, muted: s.count === 0 })), [statusVolume]);
   const overdueCards = useMemo(() => statusVolume.map((s) => { const open = s.due_today + s.overdue; return { label: s.label, color: s.color, sub: `${nf(s.overdue)}/${nf(open)} overdue`, muted: open === 0 }; }), [statusVolume]);
 
-  const selCls = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
-  const fLabel = "text-[11px] font-medium uppercase tracking-wide text-slate-400";
-
   return (
     <>
       <PageHeader title="Follow Up Tracker" subtitle="Stay on top of every lead follow-up — upcoming, due today, overdue and completed." />
 
-      <div className="space-y-6">
-        {/* Filters */}
-        <Card>
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-              <svg className="h-4 w-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 4h18M6 12h12M10 20h4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              Filters
-            </h3>
-            {appliedActive && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">Active</span>}
-            {dirty && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-600">Unapplied changes</span>}
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="flex items-end gap-2 rounded-lg bg-slate-50 p-2">
-              <label className="flex flex-col gap-1"><span className={fLabel}>From</span><input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} className={selCls} /></label>
-              <span className="pb-2 text-slate-300">→</span>
-              <label className="flex flex-col gap-1"><span className={fLabel}>To</span><input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} className={selCls} /></label>
-            </div>
-            <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Lead source</span><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></label>
-            <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Lead status</span><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></label>
-            <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Department</span><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></label>
-            <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Office</span><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></label>
-            <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Assign</span><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></label>
+      <div className={`space-y-6 ${filterRailPad(filterOpen)}`}>
+        {/* Filters — a Filters toggle opens the right-side rail; nothing applies
+            until “Apply”, mirroring the Announcements section. */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <FilterToggle open={filterOpen} count={appliedCount} onClick={() => { if (!filterOpen) openFilters(); else setFilterOpen(false); }} />
+          {(draftSet || appliedActive) && (
+            <button onClick={resetFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>
+          )}
+        </div>
 
-            {/* Apply / Reset — sit at the end of the filter row, after Assign */}
-            <button onClick={applyFilters} disabled={loading || !dirty} className="flex h-[38px] items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">
-              {loading
-                ? <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" /></svg>
-                : <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>}
-              Apply filters
-            </button>
-            {(draftSet || appliedActive) && (
-              <button onClick={resetFilters} className="flex h-[38px] items-center gap-1.5 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-600 hover:bg-slate-50">
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8m0-6v6h6" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                Reset
-              </button>
-            )}
+        <FilterRail
+          open={filterOpen}
+          onClose={() => setFilterOpen(false)}
+          dirty={dirty}
+          onReset={() => { setRange(EMPTY_RANGE); setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]); }}
+          resetDisabled={!draftSet}
+          onApply={applyFilters}
+          applyDisabled={loading}
+          applying={loading}
+        >
+          <div className="space-y-1.5">
+            <FilterLabel>Follow-up date</FilterLabel>
+            <DateRangeFilter ariaLabel="Follow-up date range" value={range} onChange={setRange} future />
           </div>
-        </Card>
+          <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
+          <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
+          <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
+          <div className="space-y-1.5"><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>
+          <div className="space-y-1.5"><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>
+        </FilterRail>
 
         {loading && !dash ? (
-          <Card><Spinner /></Card>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {Array.from({ length: 6 }).map((_, i) => <SkeletonBlock key={i} className="h-24" />)}
+            </div>
+            <SkeletonStats count={4} />
+            <SkeletonBlock className="h-72" />
+          </div>
         ) : !k ? (
           <Card><EmptyState title="No follow-ups" hint="No leads have a follow-up date for these filters." /></Card>
         ) : (

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { getLanding, saveLanding, type PricingPlan } from "../../lib/admin";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, PageHeader, Spinner } from "../ui";
+import { Card, PageHeader, SkeletonCards } from "../ui";
 
 export default function PlansPage() {
   const toast = useToast();
@@ -36,7 +36,7 @@ export default function PlansPage() {
     }
   }
 
-  if (!plans) return (<><PageHeader title="Plans & Subscription" /><Card><Spinner /></Card></>);
+  if (!plans) return (<><PageHeader title="Plans & Subscription" /><SkeletonCards count={3} /></>);
 
   return (
     <>

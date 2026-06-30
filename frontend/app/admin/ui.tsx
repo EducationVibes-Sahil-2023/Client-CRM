@@ -1,5 +1,8 @@
 "use client";
 
+import { Inbox } from "lucide-react";
+import { AnimatedIcon } from "../components/AnimatedIcon";
+
 export function PageHeader({
   title,
   subtitle,
@@ -59,7 +62,7 @@ export function EmptyState({ title, hint }: { title: string; hint?: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
       <span className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-100 text-slate-400">
-        <svg className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h12" strokeLinecap="round" /></svg>
+        <AnimatedIcon icon={Inbox} animation="float-loop" size={28} strokeWidth={1.6} />
       </span>
       <p className="font-medium text-slate-600">{title}</p>
       {hint && <p className="text-sm text-slate-400">{hint}</p>}
@@ -74,6 +77,76 @@ export function Spinner() {
         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
       </svg>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton loaders — shimmering content placeholders shown while data loads,
+// so the UI keeps its shape instead of flashing a spinner then reflowing.
+// Compose `Skeleton` with width/height classes, or use the prebuilt shapes.
+// ---------------------------------------------------------------------------
+
+/** A single shimmering placeholder block. Pass size via className (h-/w-). */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <div className={`animate-pulse rounded-md bg-slate-200/80 ${className}`} />;
+}
+
+/** A stack of placeholder text lines (the last one shorter, like real copy). */
+export function SkeletonText({ lines = 3, className = "" }: { lines?: number; className?: string }) {
+  return (
+    <div className={`space-y-2.5 ${className}`}>
+      {Array.from({ length: lines }).map((_, i) => (
+        <Skeleton key={i} className={`h-3.5 ${i === lines - 1 ? "w-2/3" : "w-full"}`} />
+      ))}
+    </div>
+  );
+}
+
+/** A row of KPI/stat-card placeholders (dashboards). */
+export function SkeletonStats({ count = 4, className = "" }: { count?: number; className?: string }) {
+  return (
+    <div className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-4 ${className}`}>
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <Skeleton className="h-3 w-20" />
+          <Skeleton className="mt-3 h-7 w-16" />
+          <Skeleton className="mt-3 h-2.5 w-24" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** A single placeholder card for grid/details views. */
+export function SkeletonCard() {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-col items-center">
+        <Skeleton className="h-16 w-16 rounded-full" />
+        <Skeleton className="mt-3 h-4 w-24" />
+        <Skeleton className="mt-2 h-3 w-32" />
+        <Skeleton className="mt-3 h-5 w-16 rounded-full" />
+      </div>
+    </div>
+  );
+}
+
+/** A grid of placeholder cards. */
+export function SkeletonCards({ count = 8, className = "" }: { count?: number; className?: string }) {
+  return (
+    <div className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 ${className}`}>
+      {Array.from({ length: count }).map((_, i) => <SkeletonCard key={i} />)}
+    </div>
+  );
+}
+
+/** A boxed placeholder block — for charts, panels and large content areas. */
+export function SkeletonBlock({ className = "h-64", children }: { className?: string; children?: React.ReactNode }) {
+  return (
+    <div className={`flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm ${className}`}>
+      <Skeleton className="h-4 w-32" />
+      {children ?? <Skeleton className="flex-1" />}
     </div>
   );
 }

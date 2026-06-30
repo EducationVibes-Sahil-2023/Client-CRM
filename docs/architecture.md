@@ -28,6 +28,10 @@
 - One central `crm_main` database stores tenant metadata, users, permissions, and feature entitlement.
 - Each client gets a dedicated tenant database for their CRM data, while the product remains the same.
 - Backend resolves the correct client database by client identifier and routes tenant data accordingly.
+- Schema changes live in CodeIgniter migrations against the main DB; the tenant-sync step
+  (`TenantSchema::apply`) mirrors new tables/columns/indexes into every tenant DB additively.
+  On production, apply changes with `php spark db:upgrade` — never `db:setup --fresh` or a
+  migration rollback. See **Database & migrations** in `docs/setup.md`.
 
 ## Documentation
 

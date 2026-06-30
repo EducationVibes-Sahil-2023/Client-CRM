@@ -11,6 +11,7 @@ import {
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
+import { useClient } from "../ClientContext";
 import { Drawer, PageHeader } from "../../admin/ui";
 import { DataTable, EntityCard, IconButton, type Column } from "../../admin/DataTable";
 
@@ -51,6 +52,7 @@ function gmapsLink(o: { latitude?: string | null; longitude?: string | null; map
 export default function OfficeLocationsPage() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { defaultPageSize, isAdmin, can } = useClient();
   const [offices, setOffices] = useState<OfficeLocation[] | null>(null);
   const [archived, setArchived] = useState<OfficeLocation[]>([]);
   const [showArchived, setShowArchived] = useState(false);
@@ -142,14 +144,20 @@ export default function OfficeLocationsPage() {
                 {showArchived ? "Hide" : "Show"} archived ({archived.length})
               </button>
             )}
-            <button onClick={() => setDraft({ ...blank })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>Add office
-            </button>
+            {can("team", "create") && (
+              <button onClick={() => setDraft({ ...blank })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>Add office
+              </button>
+            )}
           </div>
         }
       />
 
       <DataTable
+        tableKey="office_locations"
+        canRenameColumns={isAdmin}
+        paginate
+        defaultPageSize={defaultPageSize}
         columns={columns}
         rows={offices ?? []}
         getKey={(o) => o.id}
@@ -164,12 +172,16 @@ export default function OfficeLocationsPage() {
             <IconButton title="View details" onClick={() => setSelected(o)}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
             </IconButton>
-            <IconButton title="Edit" onClick={() => setDraft(toDraft(o))}>
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </IconButton>
-            <IconButton title="Archive" danger onClick={() => remove(o)}>
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </IconButton>
+            {can("team", "update") && (
+              <IconButton title="Edit" onClick={() => setDraft(toDraft(o))}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
+            {can("team", "delete") && (
+              <IconButton title="Archive" danger onClick={() => remove(o)}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
           </>
         )}
         card={(o) => (

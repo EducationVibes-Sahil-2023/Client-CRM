@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useStaff } from "./StaffContext";
 import { MODULE_META, moduleLabel } from "./modules";
 import { getStaffDashboard, type StaffDashboard } from "../lib/staff";
-import { Badge, Card, PageHeader, Spinner, fmtDate } from "../admin/ui";
+import { Badge, Card, PageHeader, SkeletonStats, SkeletonCards, fmtDate } from "../admin/ui";
 
 const toneClasses: Record<string, string> = {
   sky: "bg-sky-100 text-sky-600",
@@ -48,7 +48,10 @@ export default function StaffDashboardPage() {
       <PageHeader title={`Hello, ${me.user.name} 👋`} subtitle={me.client ? `${me.client.name} · Staff portal` : "Staff portal"} />
 
       {loading ? (
-        <Spinner />
+        <div className="space-y-6">
+          <SkeletonStats count={4} />
+          <SkeletonCards count={6} />
+        </div>
       ) : allowed.length === 0 ? (
         <Card>
           <div className="flex flex-col items-center gap-2 py-12 text-center">

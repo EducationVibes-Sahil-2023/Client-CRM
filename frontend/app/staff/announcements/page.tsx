@@ -10,7 +10,7 @@ import {
 } from "../../lib/staff";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
-import { PageHeader, Card, EmptyState, Spinner, timeAgo } from "../../admin/ui";
+import { PageHeader, Card, EmptyState, SkeletonBlock, timeAgo } from "../../admin/ui";
 
 function fmtSize(n: number): string {
   if (!n) return "";
@@ -84,7 +84,9 @@ export default function StaffAnnouncementsPage() {
       <PageHeader title="Announcements" subtitle="Updates from your team — read and acknowledge where asked." />
 
       {loading ? (
-        <Spinner />
+        <div className="space-y-3">
+          {Array.from({ length: 5 }).map((_, i) => <SkeletonBlock key={i} className="h-24" />)}
+        </div>
       ) : items.length === 0 ? (
         <Card><EmptyState title="No announcements" hint="Announcements addressed to you will appear here." /></Card>
       ) : (

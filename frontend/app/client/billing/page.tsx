@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getBilling, type Billing } from "../../lib/client";
-import { Card, PageHeader, Spinner, ValidityBadge, planValidity, fmtDate } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+import { Card, PageHeader, SkeletonStats, SkeletonBlock, ValidityBadge, planValidity, fmtDate } from "../../admin/ui";
+import { DataTable, type Column } from "../../admin/DataTable";
 import { parseServer } from "../../lib/datetime";
 
 const money = (currency: string, n: number) => (n <= 0 ? "Free" : `${currency}${n.toLocaleString("en-IN")}`);
@@ -64,6 +66,7 @@ const invoiceStatus: Record<Invoice["status"], { label: string; cls: string }> =
 };
 
 export default function BillingPage() {
+  const { defaultPageSize, isAdmin } = useClient();
   const [data, setData] = useState<Billing | null>(null);
   const [loading, setLoading] = useState(true);
   const [nowTs] = useState(() => Date.now());
@@ -79,11 +82,26 @@ export default function BillingPage() {
     [data, nowTs],
   );
 
-  if (loading) return <Spinner />;
+  if (loading) return (
+    <div className="space-y-6">
+      <SkeletonStats count={3} />
+      <div className="grid gap-6 lg:grid-cols-2">
+        <SkeletonBlock className="h-64" />
+        <SkeletonBlock className="h-64" />
+      </div>
+    </div>
+  );
   if (!data) return <Card><p className="py-10 text-center text-sm text-slate-400">Could not load billing details.</p></Card>;
 
   const { client, plan, catalog, features, currency } = data;
   const validity = planValidity(client.plan_start, client.plan_end);
+
+  const invoiceColumns: Column<Invoice>[] = [
+    { key: "number", header: "Invoice", lockVisible: true, width: 150, render: (inv) => <span className="font-mono text-xs text-slate-600">{inv.number}</span> },
+    { key: "period", header: "Period", width: 220, render: (inv) => <span className="text-slate-600">{fmtDate(inv.start)} – {fmtDate(inv.end)}</span> },
+    { key: "amount", header: "Amount", width: 130, render: (inv) => <span className="font-medium text-slate-800">{money(currency, inv.amount)}</span> },
+    { key: "status", header: "Status", width: 130, render: (inv) => <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${invoiceStatus[inv.status].cls}`}>{invoiceStatus[inv.status].label}</span> },
+  ];
 
   return (
     <>
@@ -192,8 +210,8 @@ export default function BillingPage() {
         </Card>
 
         {/* Invoices */}
-        <Card className="!p-0">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
             <h3 className="font-semibold text-slate-900">Invoices</h3>
             <button onClick={() => window.print()} className="flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6z" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -201,34 +219,22 @@ export default function BillingPage() {
             </button>
           </div>
           {invoices.length === 0 ? (
-            <p className="px-5 py-10 text-center text-sm text-slate-400">{plan.price <= 0 ? "You’re on the free plan — no invoices." : "No invoices yet. They’ll appear here once your billing period starts."}</p>
+            <Card><p className="py-10 text-center text-sm text-slate-400">{plan.price <= 0 ? "You’re on the free plan — no invoices." : "No invoices yet. They’ll appear here once your billing period starts."}</p></Card>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-100 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                    <th className="px-5 py-2.5">Invoice</th>
-                    <th className="px-5 py-2.5">Period</th>
-                    <th className="px-5 py-2.5">Amount</th>
-                    <th className="px-5 py-2.5">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {invoices.map((inv, i) => (
-                    <tr key={`${inv.number}-${i}`} className="border-b border-slate-50 last:border-0">
-                      <td className="px-5 py-2.5 font-mono text-xs text-slate-600">{inv.number}</td>
-                      <td className="px-5 py-2.5 text-slate-600">{fmtDate(inv.start)} – {fmtDate(inv.end)}</td>
-                      <td className="px-5 py-2.5 font-medium text-slate-800">{money(currency, inv.amount)}</td>
-                      <td className="px-5 py-2.5">
-                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${invoiceStatus[inv.status].cls}`}>{invoiceStatus[inv.status].label}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable<Invoice>
+              tableKey="billing"
+              canRenameColumns={isAdmin}
+              paginate
+              defaultPageSize={defaultPageSize}
+              columns={invoiceColumns}
+              rows={invoices}
+              getKey={(inv) => `${inv.number}-${inv.start}`}
+              searchKeys={(inv) => [inv.number, fmtDate(inv.start), fmtDate(inv.end), invoiceStatus[inv.status].label]}
+              searchPlaceholder="Search invoices…"
+              emptyTitle="No invoices"
+            />
           )}
-        </Card>
+        </div>
       </div>
     </>
   );

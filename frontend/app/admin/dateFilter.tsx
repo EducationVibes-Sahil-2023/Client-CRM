@@ -9,7 +9,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
  */
 
 export type DatePreset =
-  | "all" | "today" | "yesterday" | "7d" | "30d" | "this_month" | "last_month" | "custom";
+  | "all" | "today" | "yesterday" | "7d" | "30d"
+  | "next7" | "next15" | "this_month" | "last_month" | "custom";
 
 export interface DateRange {
   preset: DatePreset;
@@ -30,6 +31,13 @@ export const DATE_PRESETS: { value: DatePreset; label: string }[] = [
   { value: "this_month", label: "This month" },
   { value: "last_month", label: "Last month" },
   { value: "custom", label: "Custom range" },
+];
+
+// Forward-looking presets (e.g. upcoming follow-ups). Opt in per-filter via the
+// DateRangeFilter `future` prop; they sit just before "Custom range".
+export const FUTURE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: "next7", label: "Next 7 days" },
+  { value: "next15", label: "Next 15 days" },
 ];
 
 /** Does a date string fall within the given range? "all" always matches. */
@@ -62,7 +70,10 @@ export function inDateRange(dateStr: string | null | undefined, range: DateRange
   if (preset === "today") return diff === 0;
   if (preset === "yesterday") return diff === 1;
   if (preset === "7d") return diff >= 0 && diff <= 7;
-  return diff >= 0 && diff <= 30; // 30d
+  if (preset === "30d") return diff >= 0 && diff <= 30;
+  // Forward-looking: today through today+N (diff is negative for future dates).
+  if (preset === "next7") return diff <= 0 && diff >= -7;
+  return diff <= 0 && diff >= -15; // next15
 }
 
 /** True when a range would actually narrow the result set. */
@@ -70,6 +81,34 @@ export function rangeActive(range: DateRange): boolean {
   if (range.preset === "all") return false;
   if (range.preset === "custom") return !!(range.from || range.to);
   return true;
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+const isoOf = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+/**
+ * Resolve a range to concrete inclusive { from, to } YYYY-MM-DD bounds for
+ * server-side filtering (e.g. the follow-up / call dashboards that take from/to
+ * query params). "all" returns empty bounds.
+ */
+export function resolveDateRange(range: DateRange): { from?: string; to?: string } {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const shift = (n: number) => { const d = new Date(today); d.setDate(d.getDate() + n); return d; };
+
+  switch (range.preset) {
+    case "all":        return {};
+    case "custom":     return { from: range.from || undefined, to: range.to || undefined };
+    case "today":      return { from: isoOf(today), to: isoOf(today) };
+    case "yesterday":  return { from: isoOf(shift(-1)), to: isoOf(shift(-1)) };
+    case "7d":         return { from: isoOf(shift(-7)), to: isoOf(today) };
+    case "30d":        return { from: isoOf(shift(-30)), to: isoOf(today) };
+    case "next7":      return { from: isoOf(today), to: isoOf(shift(7)) };
+    case "next15":     return { from: isoOf(today), to: isoOf(shift(15)) };
+    case "this_month": return { from: isoOf(new Date(today.getFullYear(), today.getMonth(), 1)), to: isoOf(new Date(today.getFullYear(), today.getMonth() + 1, 0)) };
+    case "last_month": return { from: isoOf(new Date(today.getFullYear(), today.getMonth() - 1, 1)), to: isoOf(new Date(today.getFullYear(), today.getMonth(), 0)) };
+    default:           return {};
+  }
 }
 
 const selCls =
@@ -80,11 +119,18 @@ export function DateRangeFilter({
   value,
   onChange,
   ariaLabel,
+  future = false,
 }: {
   value: DateRange;
   onChange: (range: DateRange) => void;
   ariaLabel?: string;
+  /** Include the forward-looking "Next 7 / 15 days" presets (e.g. follow-ups). */
+  future?: boolean;
 }) {
+  // Insert the future presets just before "Custom range" when enabled.
+  const presets = future
+    ? [...DATE_PRESETS.slice(0, -1), ...FUTURE_PRESETS, DATE_PRESETS[DATE_PRESETS.length - 1]]
+    : DATE_PRESETS;
   return (
     <div className="space-y-1.5">
       <select
@@ -96,7 +142,7 @@ export function DateRangeFilter({
         }}
         className={selCls}
       >
-        {DATE_PRESETS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+        {presets.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
       </select>
       {value.preset === "custom" && (
         <RangeCalendar

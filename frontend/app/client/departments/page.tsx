@@ -11,7 +11,8 @@ import {
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
-import { PageHeader, Card, Modal, Spinner } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+import { PageHeader, Card, Modal, SkeletonText } from "../../admin/ui";
 
 const field = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
 
@@ -23,6 +24,7 @@ interface Draft {
 export default function DepartmentsPage() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { can } = useClient();
   const [departments, setDepartments] = useState<Department[]>([]);
   const [archived, setArchived] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
@@ -84,7 +86,7 @@ export default function DepartmentsPage() {
       <PageHeader
         title="Departments"
         subtitle="Organise your team into departments. Archived departments can be restored anytime."
-        action={<button onClick={() => setDraft({ name: "" })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>Add department</button>}
+        action={can("team", "create") ? <button onClick={() => setDraft({ name: "" })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>Add department</button> : undefined}
       />
 
       <Card>
@@ -98,7 +100,7 @@ export default function DepartmentsPage() {
         </div>
 
         {loading ? (
-          <Spinner />
+          <SkeletonText lines={6} className="py-2" />
         ) : departments.length === 0 ? (
           <div className="py-12 text-center text-sm text-slate-400">No departments yet. Click “Add department” to create one.</div>
         ) : (
@@ -109,12 +111,16 @@ export default function DepartmentsPage() {
                   <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01" strokeLinecap="round" strokeLinejoin="round" /></svg>
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800">{d.name}</span>
-                <button onClick={() => setDraft({ id: d.id, name: d.name })} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Edit">
-                  <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                </button>
-                <button onClick={() => archive(d)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-500" aria-label="Archive">
-                  <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                </button>
+                {can("team", "update") && (
+                  <button onClick={() => setDraft({ id: d.id, name: d.name })} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Edit">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
+                {can("team", "delete") && (
+                  <button onClick={() => archive(d)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-500" aria-label="Archive">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
               </li>
             ))}
           </ul>

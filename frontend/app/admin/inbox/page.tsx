@@ -13,7 +13,7 @@ import {
 } from "../../lib/admin";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
-import { Modal, Spinner } from "../ui";
+import { Modal, SkeletonText } from "../ui";
 import { APP_TZ, parseServer } from "../../lib/datetime";
 
 const PER_PAGE = 12;
@@ -320,7 +320,7 @@ export default function InboxPage() {
           <div className="flex-1 overflow-y-auto">
             {folder === "inbox" ? (
               loadingInbox ? (
-                <Spinner />
+                <SkeletonText lines={4} />
               ) : !configured ? (
                 <SetupNotice />
               ) : inboxError ? (
@@ -346,7 +346,7 @@ export default function InboxPage() {
                 ))
               )
             ) : loadingSent ? (
-              <Spinner />
+              <SkeletonText lines={4} />
             ) : sent.length === 0 ? (
               <div className="py-16 text-center text-sm text-slate-400">No sent messages</div>
             ) : (
@@ -400,7 +400,7 @@ export default function InboxPage() {
                 )}
               </div>
               {loadingMsg || !message ? (
-                <Spinner />
+                <SkeletonText lines={4} />
               ) : (
                 <>
                   <div className="flex items-center gap-3 border-b border-slate-100 px-6 py-4">

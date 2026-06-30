@@ -4,7 +4,10 @@ namespace App\Controllers;
 
 use App\Libraries\GmailService;
 use App\Libraries\GoogleCalendarService;
+use App\Libraries\HtmlSanitizer;
 use App\Libraries\MailerService;
+use App\Libraries\PasswordPolicy;
+use App\Libraries\PushService;
 use App\Models\ActivityLogModel;
 use App\Models\AnnouncementModel;
 use App\Models\AnnouncementReadModel;
@@ -13,6 +16,7 @@ use App\Models\AssetAllocationModel;
 use App\Models\AssetLogModel;
 use App\Models\AssetModel;
 use App\Models\CallLogModel;
+use App\Models\CityModel;
 use App\Models\ClientFeatureModel;
 use App\Models\ClientLookupModel;
 use App\Models\ClientModel;
@@ -28,13 +32,20 @@ use App\Models\LeadNoteModel;
 use App\Models\LeadReminderModel;
 use App\Models\LeadSourceModel;
 use App\Models\LeadStatusModel;
+use App\Models\LeadTransferModel;
 use App\Models\LeadTypeModel;
 use App\Models\MarketingTypeModel;
 use App\Models\OfficeLocationModel;
+use App\Models\PushSubscriptionModel;
 use App\Models\SettingsModel;
 use App\Models\StaffAccountModel;
+use App\Models\StateModel;
 use App\Models\TaskCommentModel;
+use App\Models\UserModel;
 use App\Models\UserTablePrefModel;
+use App\Models\VisitorModel;
+use App\Models\VisitorStatusModel;
+use App\Models\VisitorTypeModel;
 
 /**
  * Client-admin endpoints. The whole group is protected by the
@@ -45,8 +56,8 @@ class ClientController extends ApiController
 {
     /** Modules that roles can be granted CRUD permissions on. */
     public const MODULES = [
-        'dashboard', 'leads', 'leads_setup', 'team', 'roles', 'tasks', 'assets',
-        'chat', 'notifications', 'email_config', 'settings',
+        'dashboard', 'leads', 'leads_setup', 'followups', 'lead_transfer', 'visitors', 'team', 'roles', 'tasks', 'assets',
+        'calls', 'reports', 'chat', 'notifications', 'email_config', 'settings',
     ];
 
     /**
@@ -59,11 +70,29 @@ class ClientController extends ApiController
         'app_name'      => 'My CRM',
         'app_tagline'   => 'Client Panel',
         'logo_url'      => '',
+        'favicon_url'   => '',             // browser tab icon (separate from logo)
+        'logo_width'    => '40',           // sidebar logo box width in px
+        'logo_height'   => '40',           // sidebar logo box height in px
         'theme_mode'    => 'light',        // light | dark | system
         'density'       => 'comfortable',  // comfortable | compact
         'sidebar_style' => 'subtle',       // subtle | solid
         'menu_order'    => '',             // JSON array of nav keys
+        'menu_labels'   => '',             // JSON map navKey => custom label
+        'menu_icons'    => '',             // JSON map navKey => icon name
+        'default_page_size' => '15',       // default rows-per-page for every table
+        'font_family'   => 'inter',        // inter | poppins | slab | mono | system
+        'font_size'     => 'base',         // sm | base | lg
     ];
+
+    /**
+     * Branding keys that may be saved blank on purpose. For these, an empty saved
+     * value is kept (not replaced by the default) — the default only applies when
+     * the client has never set the key at all.
+     */
+    public const BRANDING_BLANK_ALLOWED = ['app_name', 'app_tagline'];
+
+    /** Allowed "rows per page" values for the default_page_size setting. */
+    public const PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100];
 
     /** Subscription plans the client can be on, with monthly pricing (INR). */
     public const PLAN_CATALOG = [
@@ -185,17 +214,487 @@ class ClientController extends ApiController
     /** GET /client/me — current user, whether they're an admin, and their permissions. */
     public function me()
     {
+        $u = $this->currentUser();
+
         return $this->respond([
-            'user'        => $this->currentUser(),
+            'user'        => $u,
             'is_admin'    => $this->isAdmin(),
             'role'        => $this->role(),
             'permissions' => $this->effectivePermissions(),
             'modules'     => self::MODULES,
+            // Super-admin "login as client" banner: surface the impersonation state.
+            'impersonating'    => ! empty($u['impersonated_by']),
+            'impersonator_name' => $u['impersonated_by'] ?? null,
+            'client_name'      => $u['client_name'] ?? null,
         ]);
     }
 
+    /** Allowed backup frequencies for the client schedule. */
+    private const BACKUP_FREQUENCIES = ['daily', 'weekly', 'monthly'];
+
+    /** This client's auto-backup schedule (from their settings, with defaults). */
+    private function backupScheduleData(): array
+    {
+        $m    = $this->settingsMap();
+        $freq = $m['backup_frequency'] ?? 'daily';
+
+        return [
+            'enabled'        => ($m['backup_enabled'] ?? '0') === '1',
+            'frequency'      => in_array($freq, self::BACKUP_FREQUENCIES, true) ? $freq : 'daily',
+            'hour'           => max(0, min(23, (int) ($m['backup_hour'] ?? 2))),
+            'retention_days' => max(1, (int) ($m['backup_retention_days'] ?? 14)),
+            'last_run'       => $m['backup_last_run'] ?? null,
+            'last_status'    => $m['backup_last_status'] ?? null,
+        ];
+    }
+
+    /**
+     * GET /client/backup-schedule — the workspace's automatic-backup schedule.
+     * Clients can set when their database is backed up (the backups themselves
+     * run on the server and are managed by the platform admin — no client download).
+     */
+    public function backupSchedule()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only the workspace admin can manage backups.');
+        }
+
+        return $this->respond([
+            'schedule'    => $this->backupScheduleData(),
+            'frequencies' => self::BACKUP_FREQUENCIES,
+        ]);
+    }
+
+    /** POST /client/backup-schedule — save the schedule (frequency, time, retention). */
+    public function saveBackupSchedule()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only the workspace admin can manage backups.');
+        }
+        $in   = (array) $this->input();
+        $freq = $in['frequency'] ?? '';
+
+        $this->setSetting('backup_enabled', ! empty($in['enabled']) && $in['enabled'] !== '0' ? '1' : '0');
+        $this->setSetting('backup_frequency', in_array($freq, self::BACKUP_FREQUENCIES, true) ? $freq : 'daily');
+        $this->setSetting('backup_hour', (string) max(0, min(23, (int) ($in['hour'] ?? 2))));
+        $this->setSetting('backup_retention_days', (string) max(1, min(365, (int) ($in['retention_days'] ?? 14))));
+
+        $this->logActivity('updated', 'settings', null, 'Updated database backup schedule', $this->clientId());
+
+        return $this->respond(['schedule' => $this->backupScheduleData()]);
+    }
+
+    /**
+     * GET /client/search?q=... — global search across the modules the current
+     * user can reach. Returns a few best matches per entity type, each with a
+     * link into the relevant section. Respects feature gating, per-module
+     * permissions and row visibility (staff see only their own / their reports').
+     */
+    public function search()
+    {
+        $q = trim((string) ($this->request->getGet('q') ?? ''));
+        if (mb_strlen($q) < 2) {
+            return $this->respond(['query' => $q, 'groups' => []]);
+        }
+
+        $cid    = $this->clientId();
+        $scope  = $this->visibleStaffIds(); // null = admin (sees everything)
+        $feat   = new \App\Libraries\FeatureService();
+        $limit  = 6;
+        $groups = [];
+
+        // ---- Leads (name / phone / alt phone / email) ----
+        if ($feat->isEnabled($cid, 'leads') && $this->can('leads', 'view')) {
+            $b = (new LeadModel())->where('client_id', $cid)
+                ->groupStart()
+                    ->like('name', $q)->orLike('phone', $q)->orLike('alt_phone', $q)->orLike('email', $q)
+                ->groupEnd();
+            if ($scope !== null) {
+                $b->whereIn('assigned_to', $scope ?: [0]);
+            }
+            $items = [];
+            foreach ($b->orderBy('id', 'DESC')->findAll($limit) as $r) {
+                $sub = $r['phone'] ?? '';
+                if (! empty($r['email'])) {
+                    $sub = $sub !== '' ? $sub . ' · ' . $r['email'] : $r['email'];
+                }
+                $items[] = [
+                    'id'       => (int) $r['id'],
+                    'title'    => $r['name'] ?: ($r['phone'] ?? 'Lead'),
+                    'subtitle' => $sub,
+                    'href'     => '/client/leads?q=' . rawurlencode((string) ($r['phone'] ?: $r['name'] ?: '')),
+                ];
+            }
+            if ($items) {
+                $groups[] = ['key' => 'leads', 'label' => 'Leads', 'items' => $items];
+            }
+        }
+
+        // ---- Team (name / email / phone) ----
+        if ($feat->isEnabled($cid, 'team') && $this->can('team', 'view')) {
+            $b = (new ClientStaffModel())->where('client_id', $cid)
+                ->groupStart()
+                    ->like('name', $q)->orLike('email', $q)->orLike('phone', $q)
+                ->groupEnd();
+            if ($scope !== null) {
+                $b->whereIn('id', $scope ?: [0]);
+            }
+            $items = [];
+            foreach ($b->orderBy('name', 'ASC')->findAll($limit) as $r) {
+                $items[] = [
+                    'id'       => (int) $r['id'],
+                    'title'    => $r['name'],
+                    'subtitle' => trim((string) ($r['designation'] ?? '')) ?: (string) ($r['email'] ?? ''),
+                    'href'     => '/client/team?q=' . rawurlencode((string) ($r['name'] ?? '')),
+                ];
+            }
+            if ($items) {
+                $groups[] = ['key' => 'team', 'label' => 'Team', 'items' => $items];
+            }
+        }
+
+        // ---- Tasks (title) ----
+        if ($feat->isEnabled($cid, 'tasks') && $this->can('tasks', 'view')) {
+            $b = (new ClientTaskModel())->where('client_id', $cid)->like('title', $q);
+            if ($scope !== null) {
+                $b->whereIn('assigned_to', $scope ?: [0]);
+            }
+            $items = [];
+            foreach ($b->orderBy('id', 'DESC')->findAll($limit) as $r) {
+                $items[] = [
+                    'id'       => (int) $r['id'],
+                    'title'    => $r['title'],
+                    'subtitle' => ucfirst(str_replace('_', ' ', (string) ($r['status'] ?? ''))),
+                    'href'     => '/client/tasks?q=' . rawurlencode((string) ($r['title'] ?? '')),
+                ];
+            }
+            if ($items) {
+                $groups[] = ['key' => 'tasks', 'label' => 'Tasks', 'items' => $items];
+            }
+        }
+
+        // ---- Assets (name / code) — admins & staff with the module ----
+        if ($feat->isEnabled($cid, 'assets') && $this->can('assets', 'view')) {
+            $rows = (new AssetModel())->where('client_id', $cid)
+                ->groupStart()->like('name', $q)->orLike('asset_code', $q)->groupEnd()
+                ->orderBy('id', 'DESC')->findAll($limit);
+            $items = [];
+            foreach ($rows as $r) {
+                $items[] = [
+                    'id'       => (int) $r['id'],
+                    'title'    => $r['name'],
+                    'subtitle' => trim((string) ($r['asset_code'] ?? '')),
+                    'href'     => '/client/assets?q=' . rawurlencode((string) ($r['name'] ?? '')),
+                ];
+            }
+            if ($items) {
+                $groups[] = ['key' => 'assets', 'label' => 'Assets', 'items' => $items];
+            }
+        }
+
+        return $this->respond(['query' => $q, 'groups' => $groups]);
+    }
+
+    // ------------------------------------------------------------- MY PROFILE
+    //
+    // The signed-in user's own account. The client panel serves two kinds of
+    // users, so each profile action branches on who's acting:
+    //   - client admin: their record lives in the main-DB `users` table.
+    //   - staff: their profile lives in the client's `client_staff` table; their
+    //     login (email + password) lives in the main-DB `staff_accounts` index.
+
+    /** GET /client/profile — the signed-in user's own profile. */
+    public function profile()
+    {
+        if ($this->isAdmin()) {
+            $user = (new UserModel())->find($this->userId());
+            if (! $user) {
+                return $this->failNotFound('Profile not found');
+            }
+
+            return $this->respond(['profile' => [
+                'name'        => $user['name'] ?? '',
+                'email'       => $user['email'] ?? '',
+                'avatar'      => $user['avatar'] ?? '',
+                'phone'       => '',
+                'designation' => '',
+                'is_admin'    => true,
+            ]]);
+        }
+
+        $staff = (new ClientStaffModel())->where('client_id', $this->clientId())->find($this->staffId());
+        if (! $staff) {
+            return $this->failNotFound('Profile not found');
+        }
+
+        return $this->respond(['profile' => [
+            'name'        => $staff['name'] ?? '',
+            'email'       => $staff['email'] ?? '',
+            'avatar'      => $staff['avatar'] ?? '',
+            'phone'       => $staff['phone'] ?? '',
+            'designation' => $staff['designation'] ?? '',
+            'is_admin'    => false,
+        ]]);
+    }
+
+    /**
+     * POST /client/profile — update the signed-in user's own details.
+     * Body (all optional): { name, email, phone, avatar }. Staff may also edit
+     * their phone; designation is admin-managed and not editable here.
+     */
+    public function updateProfile()
+    {
+        $name   = $this->input('name');
+        $email  = $this->input('email');
+        $phone  = $this->input('phone');
+        $avatar = $this->input('avatar');
+
+        // ----- Client admin (main-DB users row) -----
+        if ($this->isAdmin()) {
+            $userModel = new UserModel();
+            $id        = $this->userId();
+            $data      = [];
+
+            if ($name !== null) {
+                $data['name'] = trim((string) $name);
+            }
+            if ($avatar !== null) {
+                $data['avatar'] = trim((string) $avatar) ?: null;
+            }
+            if ($email !== null) {
+                $email = trim((string) $email);
+                if ($email === '' || ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                    return $this->failValidationErrors(['email' => 'Please enter a valid email address.']);
+                }
+                if ($userModel->where('email', $email)->where('id !=', $id)->first()) {
+                    return $this->failValidationErrors(['email' => 'That email address is already registered.']);
+                }
+                $data['email'] = $email;
+            }
+
+            if (! $data) {
+                return $this->failValidationErrors('Nothing to update');
+            }
+            if (! $userModel->skipValidation(true)->update($id, $data)) {
+                return $this->failValidationErrors($userModel->errors());
+            }
+
+            $this->syncSessionUser($data);
+            $this->logActivity('updated', 'profile', $id, 'Updated their profile (' . implode(', ', array_keys($data)) . ')');
+
+            return $this->profile();
+        }
+
+        // ----- Staff (client_staff profile + staff_accounts login index) -----
+        $cid        = $this->clientId();
+        $sid        = $this->staffId();
+        $staffModel = new ClientStaffModel();
+        if (! $staffModel->where('client_id', $cid)->find($sid)) {
+            return $this->failNotFound('Profile not found');
+        }
+
+        $data = [];
+        if ($name !== null) {
+            $data['name'] = trim((string) $name);
+        }
+        if ($phone !== null) {
+            $data['phone'] = trim((string) $phone) ?: null;
+        }
+        if ($avatar !== null) {
+            $data['avatar'] = trim((string) $avatar) ?: null;
+        }
+        if ($email !== null) {
+            $email = trim((string) $email);
+            if ($email === '' || ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                return $this->failValidationErrors(['email' => 'Please enter a valid email address.']);
+            }
+            if ($this->staffEmailTaken($email, $cid, $sid)) {
+                return $this->failValidationErrors(['email' => 'That email address is already registered.']);
+            }
+            $data['email'] = $email;
+        }
+
+        if (! $data) {
+            return $this->failValidationErrors('Nothing to update');
+        }
+
+        $staffModel->skipValidation(true)->update($sid, $data);
+        // Keep the main-DB login index in step with any email change.
+        if (array_key_exists('email', $data)) {
+            $this->syncStaffAccount($cid, $sid, ['email' => $data['email']]);
+        }
+
+        $this->syncSessionUser($data);
+        $this->logActivity('updated', 'profile', $sid, 'Updated their profile (' . implode(', ', array_keys($data)) . ')');
+
+        return $this->profile();
+    }
+
+    /**
+     * POST /client/password — change the signed-in user's password. The stored
+     * hash lives in `users` for admins and in `staff_accounts` for staff.
+     * Body: { current_password, new_password }.
+     */
+    public function changePassword()
+    {
+        $current = (string) $this->input('current_password');
+        $next    = (string) $this->input('new_password');
+
+        if ($current === '' || $next === '') {
+            return $this->failValidationErrors('Current and new password are required');
+        }
+        $email = (string) ($this->currentUser()['email'] ?? '');
+        if ($problems = PasswordPolicy::problems($next, $email)) {
+            return $this->failValidationErrors(['new_password' => 'Password must: ' . implode('; ', $problems) . '.']);
+        }
+
+        // ----- Client admin -----
+        if ($this->isAdmin()) {
+            $userModel = new UserModel();
+            $id        = $this->userId();
+            $user      = $userModel->find($id);
+
+            if (! $user || ! password_verify($current, (string) $user['password'])) {
+                return $this->failValidationErrors(['current_password' => 'Current password is incorrect.']);
+            }
+            // UserModel::hashPassword() hashes this automatically on update.
+            if (! $userModel->skipValidation(true)->update($id, ['password' => $next])) {
+                return $this->failValidationErrors($userModel->errors());
+            }
+            $this->clearMustChangePassword();
+            $this->logActivity('updated', 'profile', $id, 'Changed their password');
+
+            return $this->respond(['message' => 'Password changed']);
+        }
+
+        // ----- Staff (login lives in staff_accounts; client_staff keeps a copy) -----
+        $cid = $this->clientId();
+        $sid = $this->staffId();
+        $acc = new StaffAccountModel();
+        $row = $acc->where('client_id', $cid)->where('staff_id', $sid)->first();
+
+        if (! $row || empty($row['password']) || ! password_verify($current, (string) $row['password'])) {
+            return $this->failValidationErrors(['current_password' => 'Current password is incorrect.']);
+        }
+
+        $hash = password_hash($next, PASSWORD_DEFAULT);
+        $acc->update($row['id'], ['password' => $hash]);
+        (new ClientStaffModel())->skipValidation(true)->update($sid, ['password' => $hash]);
+        $this->clearMustChangePassword();
+        $this->logActivity('updated', 'profile', $sid, 'Changed their password');
+
+        return $this->respond(['message' => 'Password changed']);
+    }
+
+    /** Clear the "weak password — must change" session flag after a strong reset. */
+    private function clearMustChangePassword(): void
+    {
+        $u = $this->currentUser();
+        if (is_array($u)) {
+            $u['must_change_password'] = false;
+            $this->session->set('user', $u);
+        }
+    }
+
+    /** Whether $email is used by another staff account or platform user. */
+    private function staffEmailTaken(string $email, int $cid, int $sid): bool
+    {
+        foreach ((new StaffAccountModel())->where('email', $email)->findAll() as $r) {
+            if (! ((int) $r['client_id'] === $cid && (int) $r['staff_id'] === $sid)) {
+                return true;
+            }
+        }
+
+        return (new UserModel())->where('email', $email)->first() !== null;
+    }
+
+    /** Mirror just-saved name/email onto the session user (drives the greeting/avatar). */
+    private function syncSessionUser(array $data): void
+    {
+        $u = $this->currentUser();
+        if (isset($data['name'])) {
+            $u['name'] = $data['name'];
+        }
+        if (isset($data['email'])) {
+            $u['email'] = $data['email'];
+        }
+        $this->session->set('user', $u);
+    }
+
+    // ------------------------------------------------------------- WEB PUSH
+    //
+    // Browser Web Push subscriptions for the signed-in user (client admin or
+    // staff). Gated by the per-client `web_push` feature (super-admin toggle).
+
+    /** The push recipient for the current session: ['staff'|'user', id]. */
+    private function pushRecipient(): array
+    {
+        if ($this->role() === 'staff') {
+            return ['staff', $this->staffId()];
+        }
+
+        return ['user', (int) ($this->currentUser()['id'] ?? 0)];
+    }
+
+    /** GET /client/push/public-key — VAPID public key + whether push is on. */
+    public function pushPublicKey()
+    {
+        $cid = $this->clientId();
+
+        return $this->respond([
+            'key'     => PushService::publicKey(),
+            'enabled' => PushService::enabledFor($cid),
+        ]);
+    }
+
+    /** POST /client/push/subscribe — save this browser's push subscription. */
+    public function pushSubscribe()
+    {
+        $cid = $this->clientId();
+        if (! PushService::enabledFor($cid)) {
+            return $this->failForbidden('Web push is not enabled for this account.');
+        }
+
+        $sub      = $this->input('subscription');
+        $endpoint = is_array($sub) ? (string) ($sub['endpoint'] ?? '') : '';
+        $keys     = is_array($sub) && isset($sub['keys']) && is_array($sub['keys']) ? $sub['keys'] : [];
+        $p256dh   = (string) ($keys['p256dh'] ?? '');
+        $auth     = (string) ($keys['auth'] ?? '');
+
+        if ($endpoint === '' || $p256dh === '' || $auth === '') {
+            return $this->failValidationErrors('A valid push subscription is required.');
+        }
+
+        [$type, $id] = $this->pushRecipient();
+        (new PushSubscriptionModel())->upsertByEndpoint([
+            'client_id'      => $cid,
+            'recipient_type' => $type,
+            'recipient_id'   => $id,
+            'endpoint'       => $endpoint,
+            'p256dh'         => $p256dh,
+            'auth'           => $auth,
+            'user_agent'     => mb_substr($this->request->getHeaderLine('User-Agent'), 0, 255),
+        ]);
+
+        return $this->respond(['message' => 'Push notifications enabled.']);
+    }
+
+    /** POST /client/push/unsubscribe — forget this browser's subscription. */
+    public function pushUnsubscribe()
+    {
+        $endpoint = (string) $this->input('endpoint');
+        if ($endpoint !== '') {
+            (new PushSubscriptionModel())->where('endpoint_hash', hash('sha256', $endpoint))->delete();
+        }
+
+        return $this->respond(['message' => 'Push notifications disabled.']);
+    }
+
     /** Logical tables a user may save a layout for. Guards the table_key param. */
-    private const TABLE_PREF_KEYS = ['leads', 'leads_filters', 'calls'];
+    private const TABLE_PREF_KEYS = [
+        'leads', 'leads_filters', 'calls',
+        'team', 'office_locations', 'assets', 'followups', 'billing',
+    ];
 
     /** The signed-in user's own auth id — the per-user key for saved layouts. */
     private function userId(): int
@@ -448,8 +947,24 @@ class ClientController extends ApiController
 
             if ($key === 'menu_order') {
                 $value = json_encode(is_array($value) ? array_values(array_map('strval', $value)) : []);
+            } elseif ($key === 'menu_labels' || $key === 'menu_icons') {
+                // JSON map of navKey => string (custom label / icon name).
+                $clean = [];
+                if (is_array($value)) {
+                    foreach ($value as $k => $v) {
+                        $k = preg_replace('/[^a-z0-9_-]/i', '', (string) $k);
+                        $v = mb_substr(trim((string) $v), 0, 40);
+                        if ($k !== '' && $v !== '') {
+                            $clean[$k] = $v;
+                        }
+                    }
+                }
+                $value = json_encode($clean);
             } elseif ($key === 'brand_color') {
                 $value = $this->sanitizeHexColor((string) $value);
+            } elseif ($key === 'default_page_size') {
+                $n     = (int) $value;
+                $value = (string) (in_array($n, self::PAGE_SIZE_OPTIONS, true) ? $n : self::BRANDING_DEFAULTS['default_page_size']);
             } else {
                 $value = mb_substr(trim((string) $value), 0, 255);
             }
@@ -477,12 +992,26 @@ class ClientController extends ApiController
 
         $out = [];
         foreach (self::BRANDING_DEFAULTS as $key => $default) {
-            $out[$key] = ($saved[$key] ?? '') !== '' ? $saved[$key] : $default;
+            if (in_array($key, self::BRANDING_BLANK_ALLOWED, true)) {
+                // These may be intentionally left blank — only fall back to the
+                // default when the client has never set them (no saved row), not
+                // when they've explicitly cleared the field to "".
+                $out[$key] = array_key_exists($key, $saved) ? $saved[$key] : $default;
+            } else {
+                $out[$key] = ($saved[$key] ?? '') !== '' ? $saved[$key] : $default;
+            }
         }
 
         // menu_order is stored as JSON; hand it back as an array.
         $order             = json_decode((string) ($saved['menu_order'] ?? ''), true);
         $out['menu_order'] = is_array($order) ? array_values($order) : [];
+
+        // menu_labels / menu_icons are stored as JSON maps; hand back as objects
+        // ((object) so an empty map serialises as {} rather than []).
+        foreach (['menu_labels', 'menu_icons'] as $jsonKey) {
+            $decoded       = json_decode((string) ($saved[$jsonKey] ?? ''), true);
+            $out[$jsonKey] = (object) (is_array($decoded) ? $decoded : []);
+        }
 
         return $out;
     }
@@ -661,6 +1190,9 @@ class ClientController extends ApiController
      */
     public function saveGmailSettings()
     {
+        if ($resp = $this->requirePermission('email_config', 'update')) {
+            return $resp;
+        }
         $user     = trim((string) $this->input('user'));
         $password = (string) $this->input('app_password');
         $mailbox  = trim((string) $this->input('mailbox'));
@@ -839,6 +1371,9 @@ class ClientController extends ApiController
      */
     public function saveGoogleCalendarSettings()
     {
+        if ($resp = $this->requirePermission('settings', 'update')) {
+            return $resp;
+        }
         $calendarId = trim((string) $this->input('calendar_id'));
         $sa         = $this->input('service_account');
 
@@ -921,6 +1456,9 @@ class ClientController extends ApiController
     /** POST /client/roles */
     public function createRole()
     {
+        if ($resp = $this->requirePermission('roles', 'create')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new ClientRoleModel();
         $id    = $model->insert([
@@ -942,6 +1480,9 @@ class ClientController extends ApiController
     /** POST /client/roles/{id} */
     public function updateRole(int $id)
     {
+        if ($resp = $this->requirePermission('roles', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new ClientRoleModel();
         $role  = $model->where('client_id', $cid)->find($id);
@@ -971,6 +1512,9 @@ class ClientController extends ApiController
     /** POST /client/roles/{id}/delete — soft delete, blocked while staff use it. */
     public function deleteRole(int $id)
     {
+        if ($resp = $this->requirePermission('roles', 'delete')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $role = (new ClientRoleModel())->where('client_id', $cid)->find($id);
         if (! $role) {
@@ -1036,8 +1580,14 @@ class ClientController extends ApiController
     /** GET /client/leads — this client's leads, newest first, name-decorated. */
     public function leads()
     {
+        if ($resp = $this->requirePermission('leads')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         $q   = (new LeadModel())->where('client_id', $cid);
+
+        // Hide leads that are mid-transfer awaiting admin approval (from everyone).
+        $q->where('(pending_transfer IS NULL OR pending_transfer = 0)');
 
         // Staff see only leads assigned to themselves (or anyone reporting to them).
         $scope = $this->visibleStaffIds();
@@ -1086,6 +1636,7 @@ class ClientController extends ApiController
             $r['follow_flag']      = $this->followFlag($r['follow_date'], $rem, $notesByLead[(int) $r['id']] ?? [], $today);
             $r['last_call_at']     = $callByPhone[(string) ($r['phone'] ?? '')]
                 ?? (($r['alt_phone'] ?? '') !== '' ? ($callByPhone[(string) $r['alt_phone']] ?? null) : null);
+            $r['custom_fields']    = $this->decodeCustom($r['custom_fields'] ?? null);
         }
         unset($r);
 
@@ -1272,12 +1823,709 @@ class ClientController extends ApiController
         return $out;
     }
 
+    // ============================================================ REPORTS
+    //
+    // The Reports hub aggregates the tenant data into exportable tables. Every
+    // report is permission-gated on the `reports` module and staff-scoped via
+    // visibleStaffIds, so a staff member only ever sees their own data.
+
+    /**
+     * Base leads query for reports: client + soft-delete + staff visibility +
+     * the shared report filters (created-date range, status/source/type/assign).
+     * Returns a fresh query builder each call.
+     */
+    private function reportLeadQuery(int $cid)
+    {
+        $b = (new LeadModel())->builder()
+            ->where('client_id', $cid)
+            ->where('deleted_at', null);
+
+        $scope = $this->visibleStaffIds();
+        if ($scope !== null) {
+            $b->whereIn('assigned_to', $scope ?: [0]);
+        }
+
+        $from = trim((string) $this->request->getGet('from'));
+        $to   = trim((string) $this->request->getGet('to'));
+        if ($from !== '') {
+            $b->where('created_date >=', $from);
+        }
+        if ($to !== '') {
+            $b->where('created_date <=', $to);
+        }
+
+        $ids = fn (string $k) => array_values(array_filter(array_map('intval', explode(',', (string) $this->request->getGet($k)))));
+        if ($s = $ids('lead_status')) {
+            $b->whereIn('status_id', $s);
+        }
+        if ($s = $ids('lead_source')) {
+            $b->whereIn('source_id', $s);
+        }
+        if ($s = $ids('lead_type')) {
+            $b->whereIn('lead_type_id', $s);
+        }
+        if ($s = $ids('assign')) {
+            $b->whereIn('assigned_to', $s);
+        }
+
+        return $b;
+    }
+
+    /**
+     * GET /client/reports/leads-by?group=source|status|type|assigned|month
+     * Lead counts grouped by one dimension, with each row's share of the total.
+     */
+    public function reportLeadsBy()
+    {
+        if ($resp = $this->requirePermission('reports')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $group = (string) ($this->request->getGet('group') ?: 'source');
+
+        // Label + colour lookup for the chosen dimension.
+        $meta = [];
+        if ($group === 'source') {
+            foreach ($this->decorateSources($cid) as $s) {
+                $meta[(int) $s['id']] = ['label' => $s['marketing_type'] ? "{$s['name']} · {$s['marketing_type']}" : $s['name'], 'color' => $s['color']];
+            }
+        } elseif ($group === 'status') {
+            foreach ($this->lookupRows(LeadStatusModel::class, $cid) as $s) {
+                $meta[(int) $s['id']] = ['label' => $s['name'], 'color' => $s['color']];
+            }
+        } elseif ($group === 'type') {
+            foreach ($this->lookupRows(LeadTypeModel::class, $cid) as $t) {
+                $meta[(int) $t['id']] = ['label' => $t['name'], 'color' => $t['color']];
+            }
+        } elseif ($group === 'assigned') {
+            foreach ((new ClientStaffModel())->where('client_id', $cid)->findAll() as $st) {
+                $meta[(int) $st['id']] = ['label' => $st['name'], 'color' => 'slate'];
+            }
+        }
+
+        $rows  = [];
+        $total = 0;
+
+        if ($group === 'month') {
+            $res = $this->reportLeadQuery($cid)
+                ->select("DATE_FORMAT(created_date, '%Y-%m') AS k, COUNT(*) AS c")
+                ->where('created_date IS NOT NULL')
+                ->groupBy('k')->orderBy('k', 'ASC')->get()->getResultArray();
+            foreach ($res as $r) {
+                $total += (int) $r['c'];
+                $rows[] = ['id' => $r['k'], 'label' => $r['k'], 'color' => 'indigo', 'count' => (int) $r['c']];
+            }
+        } else {
+            $col = ['source' => 'source_id', 'status' => 'status_id', 'type' => 'lead_type_id', 'assigned' => 'assigned_to'][$group] ?? 'source_id';
+            $res = $this->reportLeadQuery($cid)->select("{$col} AS k, COUNT(*) AS c")->groupBy($col)->get()->getResultArray();
+            foreach ($res as $r) {
+                $count = (int) $r['c'];
+                $total += $count;
+                if ($r['k'] === null || (int) $r['k'] === 0) {
+                    $rows[] = ['id' => 0, 'label' => $group === 'assigned' ? 'Unassigned' : 'Unspecified', 'color' => 'slate', 'count' => $count];
+                } else {
+                    $m      = $meta[(int) $r['k']] ?? null;
+                    $rows[] = ['id' => (int) $r['k'], 'label' => $m['label'] ?? "#{$r['k']}", 'color' => $m['color'] ?? 'slate', 'count' => $count];
+                }
+            }
+        }
+
+        foreach ($rows as &$r) {
+            $r['pct'] = $total > 0 ? round($r['count'] / $total * 100, 1) : 0;
+        }
+        unset($r);
+        if ($group !== 'month') {
+            usort($rows, static fn ($a, $b) => $b['count'] <=> $a['count']);
+        }
+
+        return $this->respond(['group' => $group, 'total' => $total, 'rows' => $rows]);
+    }
+
+    /**
+     * GET /client/reports/pipeline — leads per conversion stage, each stage's
+     * share of the total, its win % and the weighted (count × win%) value.
+     */
+    public function reportPipeline()
+    {
+        if ($resp = $this->requirePermission('reports')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        $res          = $this->reportLeadQuery($cid)
+            ->select('status_id AS k, COUNT(*) AS c')
+            ->where('status_id IS NOT NULL')->where('status_id >', 0)
+            ->groupBy('status_id')->get()->getResultArray();
+        $statusCounts = [];
+        $total        = 0;
+        foreach ($res as $r) {
+            $statusCounts[(int) $r['k']] = (int) $r['c'];
+            $total += (int) $r['c'];
+        }
+
+        $rows          = [];
+        $weightedTotal = 0.0;
+        foreach ($this->decorateConversions($cid) as $stage) {
+            $count = 0;
+            foreach ($stage['lead_status_ids'] as $sid) {
+                $count += $statusCounts[$sid] ?? 0;
+            }
+            $win           = (int) $stage['percentage'];
+            $weighted      = round($count * $win / 100, 1);
+            $weightedTotal += $weighted;
+            $rows[]        = [
+                'id'       => (int) $stage['id'],
+                'label'    => $stage['name'],
+                'color'    => $stage['color'] ?: 'slate',
+                'statuses' => implode(', ', array_map(static fn ($s) => $s['name'], $stage['lead_statuses'])),
+                'count'    => $count,
+                'pct'      => $total > 0 ? round($count / $total * 100, 1) : 0,
+                'win_pct'  => $win,
+                'weighted' => $weighted,
+            ];
+        }
+
+        return $this->respond(['total' => $total, 'weighted_total' => round($weightedTotal, 1), 'rows' => $rows]);
+    }
+
+    /**
+     * GET /client/reports/rep-performance — per-rep total leads, "won" leads
+     * (statuses in the highest win-% conversion stage) and the conversion rate.
+     */
+    public function reportRepPerformance()
+    {
+        if ($resp = $this->requirePermission('reports')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        // "Won" = statuses belonging to the highest win-% conversion stage(s).
+        $stages = $this->decorateConversions($cid);
+        $maxPct = 0;
+        foreach ($stages as $stage) {
+            $maxPct = max($maxPct, (int) $stage['percentage']);
+        }
+        $wonIds = [];
+        if ($maxPct > 0) {
+            foreach ($stages as $stage) {
+                if ((int) $stage['percentage'] === $maxPct) {
+                    $wonIds = array_merge($wonIds, $stage['lead_status_ids']);
+                }
+            }
+        }
+        $wonIds = array_values(array_unique(array_map('intval', $wonIds)));
+
+        $totals = [];
+        foreach ($this->reportLeadQuery($cid)->select('assigned_to AS k, COUNT(*) AS c')->groupBy('assigned_to')->get()->getResultArray() as $r) {
+            $totals[(int) $r['k']] = (int) $r['c'];
+        }
+        $wons = [];
+        if ($wonIds) {
+            foreach ($this->reportLeadQuery($cid)->select('assigned_to AS k, COUNT(*) AS c')->whereIn('status_id', $wonIds)->groupBy('assigned_to')->get()->getResultArray() as $r) {
+                $wons[(int) $r['k']] = (int) $r['c'];
+            }
+        }
+
+        $scope     = $this->visibleStaffIds();
+        $staffQ    = (new ClientStaffModel())->where('client_id', $cid);
+        if ($scope !== null) {
+            $staffQ->whereIn('id', $scope ?: [0]);
+        }
+        $rows = [];
+        foreach ($staffQ->orderBy('name', 'ASC')->findAll() as $st) {
+            $sid     = (int) $st['id'];
+            $total   = $totals[$sid] ?? 0;
+            $won     = $wons[$sid] ?? 0;
+            $rows[]  = ['id' => $sid, 'name' => $st['name'], 'total' => $total, 'won' => $won, 'won_pct' => $total > 0 ? round($won / $total * 100, 1) : 0];
+        }
+        if (($totals[0] ?? 0) > 0) {
+            $rows[] = ['id' => 0, 'name' => 'Unassigned', 'total' => $totals[0], 'won' => $wons[0] ?? 0, 'won_pct' => 0];
+        }
+        usort($rows, static fn ($a, $b) => $b['total'] <=> $a['total']);
+
+        return $this->respond(['win_pct' => $maxPct, 'rows' => $rows]);
+    }
+
+    // ============================================================ LEAD TRANSFER
+    //
+    // A rep hands a lead to another rep. The client's `lead_transfer_mode` setting
+    // decides the flow: 'direct' reassigns immediately (logged); 'approval' parks
+    // the lead (hidden from every list via leads.pending_transfer) until an admin
+    // approves or rejects. Every step is logged + notified (in-app + push).
+
+    /** The client's transfer flow: 'approval' (default) or 'direct'. */
+    private function leadTransferMode(): string
+    {
+        $m = $this->settingsMap()['lead_transfer_mode'] ?? 'approval';
+
+        return in_array($m, ['direct', 'approval'], true) ? $m : 'approval';
+    }
+
+    /** Display label (name or phone) for a lead, for notifications/logs. */
+    private function leadLabel(int $cid, int $leadId): string
+    {
+        $l = (new LeadModel())->select('name, phone')->where('client_id', $cid)->find($leadId);
+        if (! $l) {
+            return "Lead #{$leadId}";
+        }
+
+        return ($l['name'] ?? '') !== '' ? $l['name'] : ($l['phone'] ?? "Lead #{$leadId}");
+    }
+
+    /** In-app + push notification to every client-admin of this client. */
+    private function notifyClientAdmins(string $type, string $title, ?string $body, ?string $link): void
+    {
+        try {
+            foreach ((new UserModel())->where('client_id', $this->clientId())->where('role', 'client_admin')->findAll() as $a) {
+                (new AppNotificationModel())->insert([
+                    'recipient_type' => 'user',
+                    'recipient_id'   => (int) $a['id'],
+                    'type'           => $type,
+                    'title'          => mb_substr($title, 0, 255),
+                    'body'           => $body !== null ? mb_substr($body, 0, 500) : null,
+                    'link'           => $link,
+                ]);
+                PushService::sendToRecipient($this->clientId(), 'user', (int) $a['id'], $title, $body, $link);
+            }
+        } catch (\Throwable $e) {
+            log_message('error', 'Admin notification failed: ' . $e->getMessage());
+        }
+    }
+
+    /** GET /client/lead-transfers — transfer requests + the current mode. */
+    public function leadTransfers()
+    {
+        if ($resp = $this->requirePermission('lead_transfer')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+        $q   = (new LeadTransferModel())->where('client_id', $cid);
+
+        // Staff see transfers they requested, that target them, or that move one of
+        // their (or their reports') leads. Admins see everything.
+        $scope = $this->visibleStaffIds();
+        if ($scope !== null) {
+            $ids = $scope ?: [0];
+            $q->groupStart()
+              ->whereIn('to_staff_id', $ids)
+              ->orWhereIn('from_staff_id', $ids)
+              ->orWhereIn('requested_by', $ids)
+              ->groupEnd();
+        }
+        $rows = $q->orderBy('id', 'DESC')->findAll();
+
+        $staffNames = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        $leadNames  = [];
+        foreach ((new LeadModel())->select('id, name, phone')->where('client_id', $cid)->findAll() as $l) {
+            $leadNames[(int) $l['id']] = ($l['name'] ?? '') !== '' ? $l['name'] : $l['phone'];
+        }
+        foreach ($rows as &$r) {
+            $r['lead_name']      = $leadNames[(int) $r['lead_id']] ?? null;
+            $r['from_name']      = $r['from_staff_id'] ? ($staffNames[(int) $r['from_staff_id']] ?? null) : 'Unassigned';
+            $r['to_name']        = $staffNames[(int) $r['to_staff_id']] ?? null;
+            $r['requested_name'] = $r['requested_by'] ? ($staffNames[(int) $r['requested_by']] ?? null) : 'Admin';
+        }
+        unset($r);
+
+        return $this->respond([
+            'transfers'   => $rows,
+            'mode'        => $this->leadTransferMode(),
+            'can_decide'  => $this->isAdmin(),
+            'my_staff_id' => $this->staffId(),
+        ]);
+    }
+
+    /** POST /client/lead-transfers — request (or, in direct mode, perform) a transfer. */
+    public function createLeadTransfer()
+    {
+        if ($resp = $this->denyUnlessPerm('lead_transfer', 'create')) {
+            return $resp;
+        }
+        $cid    = $this->clientId();
+        $leadId = (int) $this->input('lead_id');
+        $toId   = (int) $this->input('to_staff_id');
+        $reason = trim((string) $this->input('reason')) ?: null;
+
+        $lead = (new LeadModel())->where('client_id', $cid)->find($leadId);
+        if (! $lead) {
+            return $this->failNotFound('Lead not found');
+        }
+        $scope = $this->visibleStaffIds();
+        if ($scope !== null && ! in_array((int) $lead['assigned_to'], $scope ?: [0], true)) {
+            return $this->failForbidden('You can only transfer your own leads.');
+        }
+        if ($toId <= 0) {
+            return $this->failValidationErrors(['to_staff_id' => 'Choose a team member to transfer to.']);
+        }
+        if ($toId === (int) $lead['assigned_to']) {
+            return $this->failValidationErrors(['to_staff_id' => 'This lead is already assigned to that member.']);
+        }
+        $target = (new ClientStaffModel())->where('client_id', $cid)->find($toId);
+        if (! $target) {
+            return $this->failValidationErrors(['to_staff_id' => 'Unknown team member.']);
+        }
+        if (! empty($lead['pending_transfer'])) {
+            return $this->failValidationErrors(['lead_id' => 'This lead already has a transfer pending approval.']);
+        }
+
+        $model    = new LeadTransferModel();
+        $mode     = $this->leadTransferMode();
+        $leadName = ($lead['name'] ?? '') !== '' ? $lead['name'] : $lead['phone'];
+        $toName   = $target['name'];
+        $row      = [
+            'client_id'     => $cid,
+            'lead_id'       => $leadId,
+            'from_staff_id' => (int) $lead['assigned_to'] ?: null,
+            'to_staff_id'   => $toId,
+            'requested_by'  => $this->staffId() ?: null,
+            'reason'        => $reason,
+        ];
+
+        if ($mode === 'direct') {
+            $row['status']     = 'approved';
+            $row['decided_by'] = $this->actorId() ?: null;
+            $row['decided_at'] = date('Y-m-d H:i:s');
+            $id                = $model->insert($row);
+
+            (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d')]);
+            $this->logActivity('transferred', 'lead', $leadId, "Lead transferred to {$toName}");
+            $this->notifyStaff($toId, 'lead_transfer', 'Lead assigned to you', "{$leadName} was transferred to you.", '/client/leads');
+
+            return $this->respondCreated(['message' => 'Lead transferred', 'id' => $id, 'status' => 'approved']);
+        }
+
+        // Approval mode — park the lead (hidden) until an admin decides.
+        $row['status'] = 'pending';
+        $id            = $model->insert($row);
+        (new LeadModel())->update($leadId, ['pending_transfer' => 1]);
+        $this->logActivity('transfer_requested', 'lead', $leadId, "Transfer requested → {$toName}");
+        $this->notifyClientAdmins('lead_transfer', 'Lead transfer needs approval', "{$leadName} → {$toName}.", '/client/leads?tab=transfers');
+        $this->notifyStaff($toId, 'lead_transfer', 'Incoming lead (pending approval)', "{$leadName} is being transferred to you, pending admin approval.", '/client/leads?tab=transfers');
+
+        return $this->respondCreated(['message' => 'Transfer request submitted for approval', 'id' => $id, 'status' => 'pending']);
+    }
+
+    /** POST /client/lead-transfers/{id}/approve — admin approves a pending transfer. */
+    public function approveLeadTransfer(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can approve transfers.');
+        }
+        $cid   = $this->clientId();
+        $model = new LeadTransferModel();
+        $t     = $model->where('client_id', $cid)->find($id);
+        if (! $t || $t['status'] !== 'pending') {
+            return $this->failNotFound('Pending transfer not found');
+        }
+        $model->update($id, ['status' => 'approved', 'decided_by' => $this->actorId() ?: null, 'decided_at' => date('Y-m-d H:i:s'), 'decision_note' => trim((string) $this->input('note')) ?: null]);
+        (new LeadModel())->update((int) $t['lead_id'], ['assigned_to' => (int) $t['to_staff_id'], 'assigned_date' => date('Y-m-d'), 'pending_transfer' => 0]);
+
+        $leadName = $this->leadLabel($cid, (int) $t['lead_id']);
+        $this->logActivity('transfer_approved', 'lead', (int) $t['lead_id'], 'Transfer approved');
+        $this->notifyStaff((int) $t['to_staff_id'], 'lead_transfer', 'Lead assigned to you', "{$leadName}'s transfer was approved.", '/client/leads');
+        if ($t['requested_by']) {
+            $this->notifyStaff((int) $t['requested_by'], 'lead_transfer', 'Transfer approved', "Your transfer of {$leadName} was approved.", '/client/leads');
+        }
+
+        return $this->respond(['message' => 'Transfer approved']);
+    }
+
+    /** POST /client/lead-transfers/{id}/reject — admin rejects a pending transfer. */
+    public function rejectLeadTransfer(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can reject transfers.');
+        }
+        $cid   = $this->clientId();
+        $model = new LeadTransferModel();
+        $t     = $model->where('client_id', $cid)->find($id);
+        if (! $t || $t['status'] !== 'pending') {
+            return $this->failNotFound('Pending transfer not found');
+        }
+        $model->update($id, ['status' => 'rejected', 'decided_by' => $this->actorId() ?: null, 'decided_at' => date('Y-m-d H:i:s'), 'decision_note' => trim((string) $this->input('note')) ?: null]);
+        (new LeadModel())->update((int) $t['lead_id'], ['pending_transfer' => 0]); // lead stays with its owner
+
+        $leadName = $this->leadLabel($cid, (int) $t['lead_id']);
+        $this->logActivity('transfer_rejected', 'lead', (int) $t['lead_id'], 'Transfer rejected');
+        if ($t['requested_by']) {
+            $this->notifyStaff((int) $t['requested_by'], 'lead_transfer', 'Transfer rejected', "Your transfer of {$leadName} was rejected.", '/client/leads?tab=transfers');
+        }
+
+        return $this->respond(['message' => 'Transfer rejected']);
+    }
+
+    /** POST /client/lead-transfers/{id}/cancel — requester (or admin) cancels a pending request. */
+    public function cancelLeadTransfer(int $id)
+    {
+        if ($resp = $this->denyUnlessPerm('lead_transfer', 'create')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new LeadTransferModel();
+        $t     = $model->where('client_id', $cid)->find($id);
+        if (! $t || $t['status'] !== 'pending') {
+            return $this->failNotFound('Pending transfer not found');
+        }
+        if (! $this->isAdmin() && (int) $t['requested_by'] !== $this->staffId()) {
+            return $this->failForbidden('You can only cancel your own request.');
+        }
+        $model->update($id, ['status' => 'cancelled', 'decided_by' => $this->actorId() ?: null, 'decided_at' => date('Y-m-d H:i:s')]);
+        (new LeadModel())->update((int) $t['lead_id'], ['pending_transfer' => 0]);
+        $this->logActivity('transfer_cancelled', 'lead', (int) $t['lead_id'], 'Transfer cancelled');
+
+        return $this->respond(['message' => 'Transfer cancelled']);
+    }
+
+    /** POST /client/lead-transfer-mode — admin sets 'direct' | 'approval'. */
+    public function saveLeadTransferMode()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can change the transfer mode.');
+        }
+        $mode = (string) $this->input('mode');
+        if (! in_array($mode, ['direct', 'approval'], true)) {
+            return $this->failValidationErrors(['mode' => 'Mode must be direct or approval.']);
+        }
+        $this->setSetting('lead_transfer_mode', $mode);
+        $this->logActivity('updated', 'settings', null, "Lead transfer mode set to {$mode}");
+
+        return $this->respond(['message' => 'Saved', 'mode' => $mode]);
+    }
+
+    // ============================================================ VISITORS
+    //
+    // A log of people who visit (office / seminar / other). Type & status are
+    // admin-defined lookups; a status flagged `is_final` (e.g. Completed) can only
+    // be changed away from by an admin. Visitors are standalone but may link a lead.
+
+    /** Seed sensible default types/statuses the first time a client opens Visitors. */
+    private function seedVisitorDefaults(int $cid): void
+    {
+        $tm = new VisitorTypeModel();
+        if ($tm->where('client_id', $cid)->countAllResults() === 0) {
+            $i = 0;
+            foreach ([['Office', 'indigo'], ['Seminar', 'violet'], ['Other', 'slate']] as [$n, $c]) {
+                $tm->insert(['client_id' => $cid, 'name' => $n, 'color' => $c, 'sequence' => $i++]);
+            }
+        }
+        $sm = new VisitorStatusModel();
+        if ($sm->where('client_id', $cid)->countAllResults() === 0) {
+            $i = 0;
+            foreach ([['Pending', 'amber', 0], ['Rescheduled', 'sky', 0], ['Completed', 'emerald', 1], ['Cancelled', 'rose', 1]] as [$n, $c, $f]) {
+                $sm->insert(['client_id' => $cid, 'name' => $n, 'color' => $c, 'is_final' => $f, 'sequence' => $i++]);
+            }
+        }
+    }
+
+    /** GET /client/visitor-setup — the admin-defined types & statuses (auto-seeded). */
+    public function visitorSetup()
+    {
+        if ($resp = $this->requirePermission('visitors')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+        $this->seedVisitorDefaults($cid);
+
+        return $this->respond([
+            'types'      => $this->lookupRows(VisitorTypeModel::class, $cid),
+            'statuses'   => $this->lookupRows(VisitorStatusModel::class, $cid),
+            'can_manage' => $this->isAdmin(),
+        ]);
+    }
+
+    /** Build a visitor row from the request body. */
+    private function visitorData(int $cid): array
+    {
+        $vd = trim((string) $this->input('visit_date'));
+
+        return [
+            'client_id'   => $cid,
+            'name'        => trim((string) $this->input('name')),
+            'phone'       => trim((string) $this->input('phone')) ?: null,
+            'email'       => trim((string) $this->input('email')) ?: null,
+            'type_id'     => (int) $this->input('type_id') ?: null,
+            'status_id'   => (int) $this->input('status_id') ?: null,
+            'lead_id'     => (int) $this->input('lead_id') ?: null,
+            'assigned_to' => (int) $this->input('assigned_to') ?: null,
+            'purpose'     => trim((string) $this->input('purpose')) ?: null,
+            'visit_date'  => $vd !== '' ? date('Y-m-d H:i:s', strtotime($vd)) : null,
+            'notes'       => trim((string) $this->input('notes')) ?: null,
+        ];
+    }
+
+    /** GET /client/visitors — this client's visitor log, decorated. */
+    public function visitors()
+    {
+        if ($resp = $this->requirePermission('visitors')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+        $q   = (new VisitorModel())->where('client_id', $cid);
+
+        // Staff see visitors they created or are assigned to; admins see all.
+        $scope = $this->visibleStaffIds();
+        if ($scope !== null) {
+            $ids = $scope ?: [0];
+            $q->groupStart()->whereIn('assigned_to', $ids)->orWhereIn('created_by', $ids)->groupEnd();
+        }
+        $rows = $q->orderBy('id', 'DESC')->findAll();
+
+        $typeMap = [];
+        foreach ($this->lookupRows(VisitorTypeModel::class, $cid) as $t) {
+            $typeMap[(int) $t['id']] = $t;
+        }
+        $statusMap = [];
+        foreach ($this->lookupRows(VisitorStatusModel::class, $cid) as $s) {
+            $statusMap[(int) $s['id']] = $s;
+        }
+        $staffNames = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        $leadNames  = [];
+        foreach ((new LeadModel())->select('id, name, phone')->where('client_id', $cid)->findAll() as $l) {
+            $leadNames[(int) $l['id']] = ($l['name'] ?? '') !== '' ? $l['name'] : $l['phone'];
+        }
+        foreach ($rows as &$r) {
+            $t                  = $typeMap[(int) $r['type_id']] ?? null;
+            $s                  = $statusMap[(int) $r['status_id']] ?? null;
+            $r['type_name']     = $t['name'] ?? null;
+            $r['type_color']    = $t['color'] ?? 'slate';
+            $r['status_name']   = $s['name'] ?? null;
+            $r['status_color']  = $s['color'] ?? 'slate';
+            $r['status_final']  = (bool) ($s['is_final'] ?? false);
+            $r['assigned_name'] = $r['assigned_to'] ? ($staffNames[(int) $r['assigned_to']] ?? null) : null;
+            $r['lead_name']     = $r['lead_id'] ? ($leadNames[(int) $r['lead_id']] ?? null) : null;
+            $r['custom_fields'] = $this->decodeCustom($r['custom_fields'] ?? null);
+        }
+        unset($r);
+
+        return $this->respond(['visitors' => $rows, 'can_manage' => $this->isAdmin()]);
+    }
+
+    /** POST /client/visitors — log a visitor. */
+    public function createVisitor()
+    {
+        if ($resp = $this->denyUnlessPerm('visitors', 'create')) {
+            return $resp;
+        }
+        $cid    = $this->clientId();
+        $data   = $this->visitorData($cid);
+        $custom = $this->formCustomValues('visitor', (array) $this->input());
+        if ($errs = $this->formFieldErrors('visitor', $data, $custom)) {
+            return $this->failValidationErrors($errs);
+        }
+        $data['custom_fields'] = json_encode($custom);
+        $data['created_by']    = $this->actorId() ?: null;
+        if (! $data['assigned_to'] && $this->staffId()) {
+            $data['assigned_to'] = $this->staffId(); // staff default to themselves
+        }
+        $model = new VisitorModel();
+        $id    = $model->insert($data);
+        if ($id === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('created', 'visitor', (int) $id, 'Logged visitor ' . $data['name']);
+
+        return $this->respondCreated(['message' => 'Visitor logged', 'id' => $id]);
+    }
+
+    /** POST /client/visitors/{id} — update a visitor (with the finalised-status lock). */
+    public function updateVisitor(int $id)
+    {
+        if ($resp = $this->denyUnlessPerm('visitors', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new VisitorModel();
+        $old   = $model->where('client_id', $cid)->find($id);
+        if (! $old) {
+            return $this->failNotFound('Visitor not found');
+        }
+        $data   = $this->visitorData($cid);
+        $custom = $this->formCustomValues('visitor', (array) $this->input());
+        if ($errs = $this->formFieldErrors('visitor', $data, $custom)) {
+            return $this->failValidationErrors($errs);
+        }
+        $data['custom_fields'] = json_encode($custom);
+
+        // Once the current status is final (e.g. Completed), only an admin may
+        // change the status. Staff can still edit other details.
+        if (! $this->isAdmin() && (int) $data['status_id'] !== (int) $old['status_id']) {
+            $cur = $old['status_id'] ? (new VisitorStatusModel())->where('client_id', $cid)->find((int) $old['status_id']) : null;
+            if ($cur && ! empty($cur['is_final'])) {
+                return $this->failForbidden('This visit is finalised — only an admin can change its status.');
+            }
+        }
+        unset($data['created_by']);
+        if ($model->update($id, $data) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('updated', 'visitor', $id, 'Updated visitor ' . $data['name']);
+
+        return $this->respond(['message' => 'Updated']);
+    }
+
+    /** POST /client/visitors/{id}/delete — soft-delete a visitor. */
+    public function deleteVisitor(int $id)
+    {
+        if ($resp = $this->denyUnlessPerm('visitors', 'delete')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new VisitorModel();
+        if (! $model->where('client_id', $cid)->find($id)) {
+            return $this->failNotFound('Visitor not found');
+        }
+        $model->delete($id);
+        $this->logActivity('deleted', 'visitor', $id, 'Deleted visitor');
+
+        return $this->respond(['message' => 'Deleted']);
+    }
+
+    // --- Visitor types & statuses (admin-defined lookups) ---------------
+
+    public function createVisitorType()
+    {
+        return $this->isAdmin() ? $this->saveLookup(VisitorTypeModel::class, 'visitor type', fn () => []) : $this->failForbidden('Admins only.');
+    }
+
+    public function updateVisitorType(int $id)
+    {
+        return $this->isAdmin() ? $this->saveLookup(VisitorTypeModel::class, 'visitor type', fn () => [], $id) : $this->failForbidden('Admins only.');
+    }
+
+    public function deleteVisitorType(int $id)
+    {
+        return $this->isAdmin() ? $this->deleteLookup(VisitorTypeModel::class, 'visitor type', $id) : $this->failForbidden('Admins only.');
+    }
+
+    public function createVisitorStatus()
+    {
+        return $this->isAdmin() ? $this->saveLookup(VisitorStatusModel::class, 'visitor status', fn () => ['is_final' => (int) ! empty($this->input('is_final'))]) : $this->failForbidden('Admins only.');
+    }
+
+    public function updateVisitorStatus(int $id)
+    {
+        return $this->isAdmin() ? $this->saveLookup(VisitorStatusModel::class, 'visitor status', fn () => ['is_final' => (int) ! empty($this->input('is_final'))], $id) : $this->failForbidden('Admins only.');
+    }
+
+    public function deleteVisitorStatus(int $id)
+    {
+        return $this->isAdmin() ? $this->deleteLookup(VisitorStatusModel::class, 'visitor status', $id) : $this->failForbidden('Admins only.');
+    }
+
     /** POST /client/leads — create one lead. */
     public function createLead()
     {
-        $cid   = $this->clientId();
-        $model = new LeadModel();
-        $data  = $this->leadData($cid);
+        if ($resp = $this->requirePermission('leads', 'create')) {
+            return $resp;
+        }
+        $cid    = $this->clientId();
+        $model  = new LeadModel();
+        $data   = $this->leadData($cid);
+        $custom = $this->formCustomValues('lead', (array) $this->input());
+        if ($errs = $this->formFieldErrors('lead', $data, $custom)) {
+            return $this->failValidationErrors($errs);
+        }
+        $data['custom_fields'] = json_encode($custom);
         // Stamp who captured the lead (used by the team-member leads view).
         $data['created_by'] = $this->actorId() ?: null;
 
@@ -1295,12 +2543,23 @@ class ClientController extends ApiController
         }
         $this->logActivity('created', 'lead', (int) $id, 'Added lead ' . ($data['name'] ?: $data['phone']));
 
+        // Notify the assignee (in-app + web push) when a lead is created already
+        // assigned to someone other than the person creating it.
+        $assignedId = (int) ($data['assigned_to'] ?? 0);
+        if ($assignedId > 0 && $assignedId !== $this->staffId()) {
+            $who = (string) ($data['name'] ?: $data['phone']);
+            $this->notifyStaff($assignedId, 'lead_assigned', 'New lead assigned to you', $who, '/client/leads');
+        }
+
         return $this->respondCreated(['message' => 'Created', 'id' => $id]);
     }
 
     /** POST /client/leads/{id} — update one lead. */
     public function updateLead(int $id)
     {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new LeadModel();
         $old   = $model->where('client_id', $cid)->find($id);
@@ -1308,7 +2567,12 @@ class ClientController extends ApiController
             return $this->failNotFound('Lead not found');
         }
 
-        $data = $this->leadData($cid);
+        $data   = $this->leadData($cid);
+        $custom = $this->formCustomValues('lead', (array) $this->input());
+        if ($errs = $this->formFieldErrors('lead', $data, $custom)) {
+            return $this->failValidationErrors($errs);
+        }
+        $data['custom_fields'] = json_encode($custom);
 
         // System-managed dates — not editable from the lead form. Preserve the
         // stored created/follow-up dates, and re-stamp the assigned date only
@@ -1346,6 +2610,14 @@ class ClientController extends ApiController
             $to    = $data['assigned_to'] ? ($staff[(int) $data['assigned_to']] ?? '—') : 'Unassigned';
             $this->logActivity('updated', 'lead', $id, "Reassigned: {$from} → {$to}");
             $logged = true;
+
+            // Notify the new assignee (in-app + web push), unless they assigned
+            // the lead to themselves.
+            $newAssignedId = (int) ($data['assigned_to'] ?? 0);
+            if ($newAssignedId > 0 && $newAssignedId !== $this->staffId()) {
+                $who = (string) ($data['name'] ?: ($data['phone'] ?? $old['phone'] ?? ''));
+                $this->notifyStaff($newAssignedId, 'lead_assigned', 'Lead assigned to you', $who, '/client/leads');
+            }
         }
 
         if ((int) ($old['source_id'] ?? 0) !== (int) ($data['source_id'] ?? 0)) {
@@ -1353,6 +2625,30 @@ class ClientController extends ApiController
             $from  = $old['source_id'] ? ($names[(int) $old['source_id']] ?? '—') : 'None';
             $to    = $data['source_id'] ? ($names[(int) $data['source_id']] ?? '—') : 'None';
             $this->logActivity('updated', 'lead', $id, "Source changed: {$from} → {$to}");
+            $logged = true;
+        }
+
+        // Sub-status (lives in the lead_statuses table, same as statuses).
+        if ((int) ($old['sub_status_id'] ?? 0) !== (int) ($data['sub_status_id'] ?? 0)) {
+            $names = $this->idNameMap($this->lookupRows(LeadStatusModel::class, $cid));
+            $from  = $old['sub_status_id'] ? ($names[(int) $old['sub_status_id']] ?? '—') : 'None';
+            $to    = $data['sub_status_id'] ? ($names[(int) $data['sub_status_id']] ?? '—') : 'None';
+            $this->logActivity('updated', 'lead', $id, "Sub status changed: {$from} → {$to}");
+            $logged = true;
+        }
+
+        if ((int) ($old['lead_type_id'] ?? 0) !== (int) ($data['lead_type_id'] ?? 0)) {
+            $names = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
+            $from  = $old['lead_type_id'] ? ($names[(int) $old['lead_type_id']] ?? '—') : 'None';
+            $to    = $data['lead_type_id'] ? ($names[(int) $data['lead_type_id']] ?? '—') : 'None';
+            $this->logActivity('updated', 'lead', $id, "Lead type changed: {$from} → {$to}");
+            $logged = true;
+        }
+
+        if (trim((string) ($old['reference_name'] ?? '')) !== trim((string) ($data['reference_name'] ?? ''))) {
+            $from = trim((string) ($old['reference_name'] ?? '')) ?: 'None';
+            $to   = trim((string) ($data['reference_name'] ?? '')) ?: 'None';
+            $this->logActivity('updated', 'lead', $id, "Reference name changed: {$from} → {$to}");
             $logged = true;
         }
 
@@ -1366,6 +2662,9 @@ class ClientController extends ApiController
     /** POST /client/leads/{id}/delete — soft-delete one lead. */
     public function deleteLead(int $id)
     {
+        if ($resp = $this->requirePermission('leads', 'delete')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new LeadModel();
         $row   = $model->where('client_id', $cid)->find($id);
@@ -1379,6 +2678,106 @@ class ClientController extends ApiController
     }
 
     /**
+     * POST /client/leads/bulk — bulk-update the selected leads. Each `change_*`
+     * flag enables one field: status / sub-status / source / type / created date /
+     * assignee. Assignment is single (everyone → one member) or round-robin
+     * (split evenly across the chosen members, in order). Optionally notifies the
+     * newly-assigned members (in-app + web-push).
+     */
+    public function bulkUpdateLeads()
+    {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+        $in  = (array) $this->input();
+        $ids = array_values(array_unique(array_filter(array_map('intval', (array) ($in['ids'] ?? [])), static fn ($v) => $v > 0)));
+        if (! $ids) {
+            return $this->fail('No leads selected.', 422);
+        }
+
+        $model = new LeadModel();
+        $q     = $model->where('client_id', $cid)->whereIn('id', $ids);
+        // Staff can only bulk-edit leads they can see.
+        $scope = $this->visibleStaffIds();
+        if ($scope !== null) {
+            $q->whereIn('assigned_to', $scope ?: [0]);
+        }
+        $leads = $q->orderBy('id', 'ASC')->findAll();
+        if (! $leads) {
+            return $this->fail('No matching leads.', 404);
+        }
+
+        // Field changes — only the boxes the admin ticked.
+        $common = [];
+        if (! empty($in['change_status']) && (int) ($in['status_id'] ?? 0) > 0) {
+            $common['status_id'] = (int) $in['status_id'];
+        }
+        if (! empty($in['change_sub_status'])) {
+            $common['sub_status_id'] = (int) ($in['sub_status_id'] ?? 0) ?: null;
+        }
+        if (! empty($in['change_source'])) {
+            $common['source_id'] = (int) ($in['source_id'] ?? 0) ?: null;
+        }
+        if (! empty($in['change_type'])) {
+            $common['lead_type_id'] = (int) ($in['lead_type_id'] ?? 0) ?: null;
+        }
+        if (! empty($in['change_created']) && trim((string) ($in['created_date'] ?? '')) !== '') {
+            $common['created_date'] = substr(trim((string) $in['created_date']), 0, 10);
+        }
+
+        // Assignment: single (one member) or round-robin across many.
+        $changeAssign = ! empty($in['change_assignee']);
+        $mode         = ($in['assign_mode'] ?? 'single') === 'robin' ? 'robin' : 'single';
+        $assignees    = array_values(array_unique(array_filter(array_map('intval', (array) ($in['assignees'] ?? [])), static fn ($v) => $v > 0)));
+        if ($assignees) {
+            $valid = [];
+            foreach ((new ClientStaffModel())->where('client_id', $cid)->findAll() as $st) {
+                $valid[(int) $st['id']] = true;
+            }
+            $assignees = array_values(array_filter($assignees, static fn ($id) => isset($valid[$id])));
+        }
+        if ($mode === 'single') {
+            $assignees = array_slice($assignees, 0, 1);
+        }
+
+        if (! $common && ! $changeAssign) {
+            return $this->fail('Choose at least one field to change.', 422);
+        }
+
+        $notify      = ! empty($in['notify']);
+        $today       = date('Y-m-d');
+        $updated     = 0;
+        $cursor      = 0; // round-robin position
+        $perAssignee = [];
+
+        foreach ($leads as $lead) {
+            $data = $common;
+            if ($changeAssign) {
+                $assignTo = $assignees ? $assignees[$cursor % count($assignees)] : null;
+                $cursor++;
+                $data['assigned_to']   = $assignTo;
+                $data['assigned_date'] = $assignTo ? $today : null;
+                if ($assignTo && $assignTo !== (int) ($lead['assigned_to'] ?? 0)) {
+                    $perAssignee[$assignTo] = ($perAssignee[$assignTo] ?? 0) + 1;
+                }
+            }
+            $model->skipValidation(true)->update((int) $lead['id'], $data);
+            $updated++;
+        }
+
+        if ($notify && $perAssignee) {
+            foreach ($perAssignee as $sid => $cnt) {
+                $this->notifyStaff((int) $sid, 'lead_assigned', 'New leads assigned', "{$cnt} lead(s) assigned to you", '/client/leads');
+            }
+        }
+
+        $this->logActivity('updated', 'leads', null, "Bulk-updated {$updated} lead(s)", $cid);
+
+        return $this->respond(['message' => "Updated {$updated} lead(s)", 'updated' => $updated, 'assigned' => $perAssignee]);
+    }
+
+    /**
      * POST /client/leads/import — bulk-create leads from parsed CSV rows.
      * Body: { rows: [{ name, phone, status, ... }] }. Each row is validated
      * independently (phone 10 digits, status resolvable, email valid); valid
@@ -1386,70 +2785,116 @@ class ClientController extends ApiController
      */
     public function importLeads()
     {
+        if ($resp = $this->requirePermission('leads', 'create')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $rows = $this->input('rows');
         if (! is_array($rows) || $rows === []) {
             return $this->failValidationErrors(['rows' => 'No rows to import.']);
         }
 
-        // Resolve statuses by name and staff by email-or-name, once.
-        $statusByName = [];
-        foreach ($this->lookupRows(LeadStatusModel::class, $cid) as $s) {
-            $statusByName[mb_strtolower(trim((string) $s['name']))] = (int) $s['id'];
+        // ---- Batch selections (chosen once at upload, applied to every row) ----
+        $opt      = (array) ($this->input('options') ?? []);
+        $statusId = (int) ($opt['status_id'] ?? 0);
+        $status   = $statusId ? (new LeadStatusModel())->where('client_id', $cid)->find($statusId) : null;
+        if (! $status) {
+            return $this->failValidationErrors(['status_id' => 'Pick a status to apply to the imported leads.']);
         }
-        $staffByKey = [];
-        foreach ((new ClientStaffModel())->where('client_id', $cid)->findAll() as $st) {
-            if (! empty($st['email'])) {
-                $staffByKey[mb_strtolower(trim((string) $st['email']))] = (int) $st['id'];
-            }
-            $staffByKey[mb_strtolower(trim((string) $st['name']))] = (int) $st['id'];
-        }
+        $validId  = function (string $modelClass, int $id) use ($cid): ?int {
+            return $id > 0 && (new $modelClass())->where('client_id', $cid)->find($id) ? $id : null;
+        };
+        $subId    = $validId(LeadStatusModel::class, (int) ($opt['sub_status_id'] ?? 0));
+        $sourceId = $validId(LeadSourceModel::class, (int) ($opt['source_id'] ?? 0));
+        $typeId   = $validId(LeadTypeModel::class, (int) ($opt['lead_type_id'] ?? 0));
 
-        $model    = new LeadModel();
-        $inserted = 0;
-        $errors   = [];
+        // Assignees: 'single' uses one, 'robin' round-robins across many. Keep
+        // only real staff of this client.
+        $mode      = ($opt['assign_mode'] ?? 'single') === 'robin' ? 'robin' : 'single';
+        $assignees = array_values(array_unique(array_filter(array_map('intval', (array) ($opt['assignees'] ?? [])), static fn ($v) => $v > 0)));
+        if ($assignees) {
+            $valid = [];
+            foreach ((new ClientStaffModel())->where('client_id', $cid)->findAll() as $st) {
+                $valid[(int) $st['id']] = true;
+            }
+            $assignees = array_values(array_filter($assignees, static fn ($id) => isset($valid[$id])));
+        }
+        if ($mode === 'single') {
+            $assignees = array_slice($assignees, 0, 1);
+        }
+        $notify = ! empty($opt['notify']);
+
+        // Admin-configured mandatory columns + the lead's custom-field defs.
+        $mandatory  = array_values(array_filter($this->leadImportColumns(), static fn ($c) => ! empty($c['required']) && $c['key'] !== 'phone'));
+        $customDefs = $this->formCustomFields('lead');
+
+        $model       = new LeadModel();
+        $inserted    = 0;
+        $errors      = [];
+        $perAssignee = [];
+        $n           = 0; // round-robin cursor (advances per inserted lead)
+        $today       = date('Y-m-d');
 
         foreach ($rows as $i => $row) {
-            $line  = (int) $i + 2; // +1 for the header row, +1 to be 1-based
+            $line  = (int) $i + 2; // +1 header, +1 to be 1-based
             $row   = is_array($row) ? $row : [];
             $phone = preg_replace('/\D/', '', (string) ($row['phone'] ?? ''));
+            if ($phone === '') {
+                $errors[] = ['row' => $line, 'message' => 'Contact (phone) is required.'];
+                continue;
+            }
             if (strlen((string) $phone) !== 10) {
                 $errors[] = ['row' => $line, 'message' => 'Phone must be exactly 10 digits.'];
                 continue;
             }
-
-            $statusKey = mb_strtolower(trim((string) ($row['status'] ?? '')));
-            if ($statusKey === '' || ! isset($statusByName[$statusKey])) {
-                $errors[] = ['row' => $line, 'message' => 'Status is required and must match an existing lead status.'];
-                continue;
-            }
-
             $email = trim((string) ($row['email'] ?? ''));
             if ($email !== '' && ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 $errors[] = ['row' => $line, 'message' => 'Invalid email address.'];
                 continue;
             }
 
-            $subKey    = mb_strtolower(trim((string) ($row['sub_status'] ?? '')));
-            $assignKey = mb_strtolower(trim((string) ($row['assigned'] ?? '')));
-            $altPhone  = preg_replace('/\D/', '', (string) ($row['alt_phone'] ?? ''));
+            // Enforce the admin's mandatory columns (built-in + custom).
+            $missing = [];
+            foreach ($mandatory as $c) {
+                if (trim((string) ($row[$c['key']] ?? '')) === '') {
+                    $missing[] = $c['label'];
+                }
+            }
+            if ($missing) {
+                $errors[] = ['row' => $line, 'message' => implode(', ', $missing) . (count($missing) > 1 ? ' are required.' : ' is required.')];
+                continue;
+            }
+
+            $altPhone = preg_replace('/\D/', '', (string) ($row['alt_phone'] ?? ''));
+            $custom   = [];
+            foreach ($customDefs as $f) {
+                if (array_key_exists($f['key'], $row)) {
+                    $v                 = $row[$f['key']];
+                    $custom[$f['key']] = $f['type'] === 'number'
+                        ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                        : trim((string) $v);
+                }
+            }
+
+            $assignTo = $assignees ? $assignees[$n % count($assignees)] : null;
 
             $data = [
                 'client_id'      => $cid,
                 'name'           => trim((string) ($row['name'] ?? '')),
                 'phone'          => $phone,
                 'alt_phone'      => $altPhone !== '' ? $altPhone : null,
-                'status_id'      => $statusByName[$statusKey],
-                'sub_status_id'  => $subKey !== '' && isset($statusByName[$subKey]) ? $statusByName[$subKey] : null,
+                'status_id'      => $statusId,
+                'sub_status_id'  => $subId,
+                'lead_type_id'   => $typeId,
+                'source_id'      => $sourceId,
                 'reference_name' => trim((string) ($row['reference_name'] ?? '')) ?: null,
                 'email'          => $email !== '' ? $email : null,
-                'assigned_to'    => $assignKey !== '' && isset($staffByKey[$assignKey]) ? $staffByKey[$assignKey] : null,
-                'assigned_date'  => $this->normalizeDate($row['assigned_date'] ?? null),
+                'assigned_to'    => $assignTo,
+                'assigned_date'  => $assignTo ? $today : null,
                 'city'           => trim((string) ($row['city'] ?? '')) ?: null,
                 'state'          => trim((string) ($row['state'] ?? '')) ?: null,
-                'follow_date'    => $this->normalizeDate($row['follow_date'] ?? null),
-                'created_date'   => $this->normalizeDate($row['created_date'] ?? null),
                 'created_by'     => $this->actorId() ?: null,
+                'custom_fields'  => json_encode($custom),
             ];
 
             if ($model->insert($data) === false) {
@@ -1458,15 +2903,109 @@ class ClientController extends ApiController
                 continue;
             }
             $inserted++;
+            $n++;
+            if ($assignTo) {
+                $perAssignee[$assignTo] = ($perAssignee[$assignTo] ?? 0) + 1;
+            }
         }
 
-        $this->logActivity('created', 'lead', null, "Imported {$inserted} lead(s)" . ($errors ? ', ' . count($errors) . ' skipped' : ''));
+        // Notify each assignee (in-app + web-push) about their new leads, if asked.
+        if ($notify && $perAssignee) {
+            foreach ($perAssignee as $sid => $cnt) {
+                $this->notifyStaff((int) $sid, 'lead_assigned', 'New leads assigned', "{$cnt} new lead(s) assigned to you", '/client/leads');
+            }
+        }
+
+        $this->logActivity('created', 'lead', null,
+            "Imported {$inserted} lead(s)"
+            . ($errors ? ', ' . count($errors) . ' skipped' : '')
+            . ($perAssignee ? '; assigned across ' . count($perAssignee) . ' member(s)' . ($mode === 'robin' ? ' (round-robin)' : '') : '')
+            . ($notify && $perAssignee ? '; notified' : ''));
 
         return $this->respond([
             'inserted' => $inserted,
             'failed'   => count($errors),
             'errors'   => array_slice($errors, 0, 50),
+            'assigned' => $perAssignee,
         ]);
+    }
+
+    /** Importable lead data columns merged with the admin's saved include/mandatory config. */
+    private const LEAD_IMPORT_COLUMNS = [
+        'name'           => 'Name',
+        'alt_phone'      => 'Alternative phone',
+        'email'          => 'Email',
+        'reference_name' => 'Reference name',
+        'city'           => 'City',
+        'state'          => 'State',
+    ];
+
+    /**
+     * The lead import template columns: phone (always on/required) + the fixed
+     * data columns + the lead custom fields, each carrying the client's saved
+     * include/required flags (settings key `lead_import_fields`).
+     */
+    private function leadImportColumns(): array
+    {
+        $cfg   = [];
+        $saved = json_decode((string) ($this->settingsMap()['lead_import_fields'] ?? '[]'), true);
+        if (is_array($saved)) {
+            foreach ($saved as $c) {
+                if (is_array($c) && isset($c['key'])) {
+                    $cfg[(string) $c['key']] = ['include' => ! empty($c['include']), 'required' => ! empty($c['required'])];
+                }
+            }
+        }
+
+        $cols = [['key' => 'phone', 'label' => 'Phone (contact)', 'include' => true, 'required' => true, 'custom' => false, 'locked' => true]];
+        foreach (self::LEAD_IMPORT_COLUMNS as $k => $label) {
+            $cols[] = ['key' => $k, 'label' => $label, 'include' => $cfg[$k]['include'] ?? true, 'required' => $cfg[$k]['required'] ?? false, 'custom' => false, 'locked' => false];
+        }
+        foreach ($this->formCustomFields('lead') as $f) {
+            $k      = $f['key'];
+            $cols[] = ['key' => $k, 'label' => $f['label'], 'include' => $cfg[$k]['include'] ?? true, 'required' => $cfg[$k]['required'] ?? ! empty($f['required']), 'custom' => true, 'locked' => false];
+        }
+
+        return $cols;
+    }
+
+    /** GET /client/lead-import-setup — template columns + flags (readable for leads or leads_setup). */
+    public function leadImportSetup()
+    {
+        if (! $this->can('leads') && ! $this->can('leads_setup')) {
+            return $this->failForbidden('You do not have permission to view the import setup.');
+        }
+
+        return $this->respond([
+            'columns'    => $this->leadImportColumns(),
+            'can_manage' => $this->isAdmin() || $this->can('leads_setup', 'update'),
+        ]);
+    }
+
+    /** POST /client/lead-import-setup — save which columns appear + are mandatory (admin). */
+    public function saveLeadImportSetup()
+    {
+        if ($resp = $this->denyUnlessPerm('leads_setup', 'update')) {
+            return $resp;
+        }
+        $cols  = $this->input('columns');
+        $clean = [];
+        if (is_array($cols)) {
+            foreach ($cols as $c) {
+                if (! is_array($c) || ! isset($c['key'])) {
+                    continue;
+                }
+                $k = (string) $c['key'];
+                if ($k === 'phone') {
+                    continue; // phone is locked on + required
+                }
+                $clean[] = ['key' => $k, 'include' => ! empty($c['include']), 'required' => ! empty($c['required'])];
+            }
+        }
+        $this->setSetting('lead_import_fields', json_encode($clean));
+        $this->logActivity('updated', 'settings', null, 'Updated lead import columns', $this->clientId());
+
+        return $this->respond(['message' => 'Saved', 'columns' => $this->leadImportColumns()]);
     }
 
     /** Build a lead row from the request body, sanitising phones and dates. */
@@ -1562,14 +3101,18 @@ class ClientController extends ApiController
             ->where('client_id', $cid)->where('entity_type', 'lead')->where('entity_id', $id)
             ->orderBy('id', 'DESC')->findAll(100);
 
-        // Call logs matched to this lead (by phone), newest first.
-        $calls = (new CallLogModel())->where('client_id', $cid)->where('lead_id', $id)
-            ->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll();
-        foreach ($calls as &$c) {
-            $c['staff_name'] = $c['staff_id'] ? ($staffNames[(int) $c['staff_id']] ?? null) : null;
-            $c['connected']  = (bool) $c['connected'];
+        // Call logs matched to this lead, newest first — only for users granted the
+        // call-tracking permission (others get an empty list and no Calls tab).
+        $calls = [];
+        if ($this->can('calls')) {
+            $calls = (new CallLogModel())->where('client_id', $cid)->where('lead_id', $id)
+                ->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll();
+            foreach ($calls as &$c) {
+                $c['staff_name'] = $c['staff_id'] ? ($staffNames[(int) $c['staff_id']] ?? null) : null;
+                $c['connected']  = (bool) $c['connected'];
+            }
+            unset($c);
         }
-        unset($c);
 
         return $this->respond([
             'lead'      => $lead,
@@ -1758,6 +3301,9 @@ class ClientController extends ApiController
      */
     public function calls()
     {
+        if ($resp = $this->requirePermission('calls')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         $q   = (new CallLogModel())->where('client_id', $cid);
 
@@ -1792,6 +3338,9 @@ class ClientController extends ApiController
      */
     public function callDashboard()
     {
+        if ($resp = $this->requirePermission('calls')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $date = (string) ($this->request->getGet('date') ?: date('Y-m-d'));
         if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
@@ -2023,6 +3572,9 @@ class ClientController extends ApiController
      */
     public function followupDashboard()
     {
+        if ($resp = $this->requirePermission('followups')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $date = (string) ($this->request->getGet('date') ?: date('Y-m-d'));
         if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
@@ -2402,6 +3954,9 @@ class ClientController extends ApiController
     /** POST /client/leads/{id}/reminders — schedule a future reminder. */
     public function createReminder(int $id)
     {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $lead = (new LeadModel())->where('client_id', $cid)->find($id);
         if (! $lead) {
@@ -2435,6 +3990,9 @@ class ClientController extends ApiController
     /** POST /client/lead-reminders/{id}/delete — soft-delete a reminder. */
     public function deleteReminder(int $rid)
     {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new LeadReminderModel();
         $row   = $model->where('client_id', $cid)->find($rid);
@@ -2450,6 +4008,9 @@ class ClientController extends ApiController
     /** POST /client/leads/{id}/notes — add a note to a lead. */
     public function createNote(int $id)
     {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $lead = (new LeadModel())->where('client_id', $cid)->find($id);
         if (! $lead) {
@@ -2481,6 +4042,9 @@ class ClientController extends ApiController
     /** POST /client/lead-notes/{id}/delete — soft-delete a note. */
     public function deleteNote(int $nid)
     {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new LeadNoteModel();
         $row   = $model->where('client_id', $cid)->find($nid);
@@ -2519,15 +4083,18 @@ class ClientController extends ApiController
         $leadNames = $this->idNameMap((new LeadModel())->where('client_id', $cid)->findAll());
         $notif     = new AppNotificationModel();
         foreach ($due as $r) {
-            $lead = $leadNames[(int) $r['lead_id']] ?? ('Lead #' . $r['lead_id']);
+            $lead  = $leadNames[(int) $r['lead_id']] ?? ('Lead #' . $r['lead_id']);
+            $title = 'Lead reminder: ' . ($lead !== '' ? $lead : ('Lead #' . $r['lead_id']));
+            $body  = $r['note'] ?: 'You set a reminder for this lead.';
             $notif->insert([
                 'recipient_type' => 'user',
                 'recipient_id'   => $userId,
                 'type'           => 'lead_reminder',
-                'title'          => 'Lead reminder: ' . ($lead !== '' ? $lead : ('Lead #' . $r['lead_id'])),
-                'body'           => $r['note'] ?: 'You set a reminder for this lead.',
+                'title'          => $title,
+                'body'           => $body,
                 'link'           => '/client/leads',
             ]);
+            PushService::sendToRecipient($cid, 'user', $userId, $title, $body, '/client/leads');
             $model->update($r['id'], ['notified_at' => date('Y-m-d H:i:s')]);
         }
 
@@ -2544,8 +4111,10 @@ class ClientController extends ApiController
     /** GET /client/leads-setup — every lookup list in one payload. */
     public function leadsSetup()
     {
-        if ($resp = $this->requirePermission('leads_setup')) {
-            return $resp;
+        // Read-only reference data: anyone who can view leads needs it to render
+        // the leads list, filters and form — not just the Leads Setup editors.
+        if (! $this->can('leads') && ! $this->can('leads_setup')) {
+            return $this->failForbidden('You do not have permission to view leads setup.');
         }
         $cid = $this->clientId();
 
@@ -2556,7 +4125,265 @@ class ClientController extends ApiController
             'lead_types'       => $this->lookupRows(LeadTypeModel::class, $cid),
             'conversion_types' => $this->decorateConversions($cid),
             'followup_groups'  => $this->decorateFollowupGroups($cid),
+            'states'           => $this->lookupRows(StateModel::class, $cid),
+            'cities'           => $this->decorateCities($cid),
+            'required_fields'  => $this->requiredLeadFields(),
         ]);
+    }
+
+    // --- Mandatory lead-form fields -------------------------------------
+
+    /**
+     * Lead-form fields an admin may mark mandatory. `phone` and `status_id` are
+     * always required (enforced by LeadModel) so they aren't configurable here.
+     */
+    private const CONFIGURABLE_REQUIRED_FIELDS = [
+        'name', 'reference_name', 'alt_phone', 'sub_status_id', 'source_id',
+        'lead_type_id', 'email', 'assigned_to', 'city', 'state',
+    ];
+
+    /** Human labels for the configurable fields, used in validation messages. */
+    private const REQUIRED_FIELD_LABELS = [
+        'name'           => 'Name',
+        'reference_name' => 'Reference name',
+        'alt_phone'      => 'Alternative phone',
+        'sub_status_id'  => 'Sub status',
+        'source_id'      => 'Lead source',
+        'lead_type_id'   => 'Lead type',
+        'email'          => 'Email',
+        'assigned_to'    => 'Assigned to',
+        'city'           => 'City',
+        'state'          => 'State',
+    ];
+
+    /** Field keys this client has marked mandatory on the lead form. */
+    private function requiredLeadFields(): array
+    {
+        $keys = json_decode((string) ($this->settingsMap()['lead_required_fields'] ?? '[]'), true);
+
+        return is_array($keys)
+            ? array_values(array_intersect($keys, self::CONFIGURABLE_REQUIRED_FIELDS))
+            : [];
+    }
+
+    /** Validate the configured-mandatory fields against a built lead row; key => message. */
+    private function requiredFieldErrors(array $data): array
+    {
+        $errors = [];
+        foreach ($this->requiredLeadFields() as $key) {
+            $val = $data[$key] ?? null;
+            if ($val === null || $val === '' || $val === 0) {
+                $errors[$key] = (self::REQUIRED_FIELD_LABELS[$key] ?? $key) . ' is required.';
+            }
+        }
+
+        return $errors;
+    }
+
+    /** POST /client/lead-field-settings — set which lead-form fields are mandatory. */
+    public function saveLeadRequiredFields()
+    {
+        if ($resp = $this->denyUnlessPerm('leads_setup', 'update')) {
+            return $resp;
+        }
+        $fields = $this->input('fields');
+        $clean  = is_array($fields)
+            ? array_values(array_intersect(array_map('strval', $fields), self::CONFIGURABLE_REQUIRED_FIELDS))
+            : [];
+
+        $this->setSetting('lead_required_fields', json_encode($clean));
+        $this->logActivity('updated', 'settings', null, 'Updated mandatory lead fields', $this->clientId());
+
+        return $this->respond(['message' => 'Saved', 'required_fields' => $clean]);
+    }
+
+    // ===================================================== GENERIC FORM FIELDS
+    //
+    // A unified "form setup": per form, which built-in fields are mandatory + any
+    // admin-defined custom fields. Definitions live in the per-client `settings`
+    // table as `<form>_required_fields` / `<form>_custom_fields` JSON; custom
+    // *values* live in each record's `custom_fields` JSON column. Powers the
+    // central Form Setup hub and per-form rendering for every entity.
+
+    private const CUSTOM_FIELD_TYPES = ['text', 'textarea', 'number', 'date', 'select'];
+
+    /** Built-in fields each form may mark mandatory (the always-required key is omitted). */
+    private const FORM_REQUIRABLE = [
+        'lead'    => ['name', 'reference_name', 'alt_phone', 'sub_status_id', 'source_id', 'lead_type_id', 'email', 'assigned_to', 'city', 'state'],
+        'task'    => ['description', 'assigned_to', 'due_date', 'start_date', 'priority', 'type'],
+        'asset'   => ['series_model', 'asset_group', 'managed_by', 'asset_location', 'purchase_date', 'warranty_months', 'unit_price', 'supplier_name'],
+        'visitor' => ['phone', 'email', 'type_id', 'status_id', 'assigned_to', 'purpose', 'visit_date'],
+        'staff'   => ['phone', 'alt_phone', 'emp_code', 'designation', 'role_id', 'reports_to', 'department_id', 'office_location_id'],
+    ];
+
+    /** Human labels for each form's requirable fields. */
+    private const FORM_LABELS = [
+        'lead'    => ['name' => 'Name', 'reference_name' => 'Reference name', 'alt_phone' => 'Alternative phone', 'sub_status_id' => 'Sub status', 'source_id' => 'Lead source', 'lead_type_id' => 'Lead type', 'email' => 'Email', 'assigned_to' => 'Assigned to', 'city' => 'City', 'state' => 'State'],
+        'task'    => ['description' => 'Description', 'assigned_to' => 'Assignee', 'due_date' => 'Due date', 'start_date' => 'Start date', 'priority' => 'Priority', 'type' => 'Type'],
+        'asset'   => ['series_model' => 'Series / model', 'asset_group' => 'Asset group', 'managed_by' => 'Managed by', 'asset_location' => 'Location', 'purchase_date' => 'Purchase date', 'warranty_months' => 'Warranty (months)', 'unit_price' => 'Unit price', 'supplier_name' => 'Supplier name'],
+        'visitor' => ['phone' => 'Phone', 'email' => 'Email', 'type_id' => 'Type', 'status_id' => 'Status', 'assigned_to' => 'Assigned to', 'purpose' => 'Purpose', 'visit_date' => 'Visit date'],
+        'staff'   => ['phone' => 'Phone', 'alt_phone' => 'Alternative phone', 'emp_code' => 'Employee code', 'designation' => 'Designation', 'role_id' => 'Role', 'reports_to' => 'Reports to', 'department_id' => 'Department', 'office_location_id' => 'Office'],
+    ];
+
+    /** Built-in fields the client has marked mandatory on $form. */
+    private function formRequiredFields(string $form): array
+    {
+        $allowed = self::FORM_REQUIRABLE[$form] ?? [];
+        $keys    = json_decode((string) ($this->settingsMap()[$form . '_required_fields'] ?? '[]'), true);
+
+        return is_array($keys) ? array_values(array_intersect(array_map('strval', $keys), $allowed)) : [];
+    }
+
+    /** The client's admin-defined custom fields for $form (sanitized definitions). */
+    private function formCustomFields(string $form): array
+    {
+        $defs = json_decode((string) ($this->settingsMap()[$form . '_custom_fields'] ?? '[]'), true);
+        if (! is_array($defs)) {
+            return [];
+        }
+        $out = [];
+        foreach ($defs as $d) {
+            if (! is_array($d) || trim((string) ($d['label'] ?? '')) === '') {
+                continue;
+            }
+            $type = in_array($d['type'] ?? 'text', self::CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $key  = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($d['key'] ?? '')));
+            if ($key === '') {
+                continue;
+            }
+            $out[] = [
+                'key'      => $key,
+                'label'    => (string) $d['label'],
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        return $out;
+    }
+
+    /** Pull + sanitize custom-field values from request input, keyed by field key. */
+    private function formCustomValues(string $form, array $in): array
+    {
+        $raw = $in['custom_fields'] ?? [];
+        if (is_string($raw)) {
+            $raw = json_decode($raw, true) ?: [];
+        }
+        if (! is_array($raw)) {
+            $raw = [];
+        }
+        $out = [];
+        foreach ($this->formCustomFields($form) as $f) {
+            if (! array_key_exists($f['key'], $raw)) {
+                continue;
+            }
+            $v              = $raw[$f['key']];
+            $out[$f['key']] = $f['type'] === 'number'
+                ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                : trim((string) $v);
+        }
+
+        return $out;
+    }
+
+    /** Validation errors for $form's mandatory built-in + custom fields. */
+    private function formFieldErrors(string $form, array $data, array $customValues): array
+    {
+        $errors = [];
+        $labels = self::FORM_LABELS[$form] ?? [];
+        foreach ($this->formRequiredFields($form) as $key) {
+            $val = $data[$key] ?? null;
+            if ($val === null || $val === '' || $val === 0) {
+                $errors[$key] = ($labels[$key] ?? $key) . ' is required.';
+            }
+        }
+        foreach ($this->formCustomFields($form) as $f) {
+            if (! empty($f['required'])) {
+                $v = $customValues[$f['key']] ?? null;
+                if ($v === null || $v === '') {
+                    $errors['custom_' . $f['key']] = $f['label'] . ' is required.';
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /** Decode a stored custom_fields JSON column to an object (for list/detail responses). */
+    private function decodeCustom($raw): object
+    {
+        $v = json_decode((string) ($raw ?? ''), true);
+
+        return (object) (is_array($v) ? $v : []);
+    }
+
+    /** GET /client/form-setup/{form} — requirable fields + current required + custom defs. */
+    public function formSetup(string $form)
+    {
+        if (! isset(self::FORM_REQUIRABLE[$form])) {
+            return $this->failNotFound('Unknown form');
+        }
+
+        return $this->respond([
+            'form'            => $form,
+            'requirable'      => array_map(fn ($k) => ['key' => $k, 'label' => self::FORM_LABELS[$form][$k] ?? $k], self::FORM_REQUIRABLE[$form]),
+            'required_fields' => $this->formRequiredFields($form),
+            'custom_fields'   => $this->formCustomFields($form),
+            'can_manage'      => $this->isAdmin(),
+        ]);
+    }
+
+    /** POST /client/form-field-settings/{form} — save mandatory flags + custom defs (admin). */
+    public function saveFormFieldSettings(string $form)
+    {
+        if (! isset(self::FORM_REQUIRABLE[$form])) {
+            return $this->failNotFound('Unknown form');
+        }
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can change form fields.');
+        }
+        $in       = (array) $this->input();
+        $allowed  = self::FORM_REQUIRABLE[$form];
+        $required = is_array($in['required_fields'] ?? null)
+            ? array_values(array_intersect(array_map('strval', $in['required_fields']), $allowed))
+            : [];
+
+        $custom = [];
+        $seen   = [];
+        foreach ((array) ($in['custom_fields'] ?? []) as $d) {
+            if (! is_array($d)) {
+                continue;
+            }
+            $label = trim((string) ($d['label'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $base = preg_replace('/[^a-z0-9_]/', '', strtolower(str_replace([' ', '-'], '_', (string) (($d['key'] ?? '') ?: $label))));
+            $key  = $base !== '' ? $base : 'field';
+            while (isset($seen[$key])) {
+                $key .= '_';
+            }
+            $seen[$key] = true;
+            $type       = in_array($d['type'] ?? 'text', self::CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $custom[]   = [
+                'key'      => $key,
+                'label'    => $label,
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        $this->setSetting($form . '_required_fields', json_encode($required));
+        $this->setSetting($form . '_custom_fields', json_encode($custom));
+        $this->logActivity('updated', 'settings', null, "Updated {$form} form fields");
+
+        return $this->respond(['message' => 'Saved', 'required_fields' => $required, 'custom_fields' => $custom]);
     }
 
     // --- Lead statuses ---------------------------------------------------
@@ -2716,6 +4543,82 @@ class ClientController extends ApiController
     public function reorderLeadTypes()
     {
         return $this->reorderLookup(LeadTypeModel::class);
+    }
+
+    // --- States ----------------------------------------------------------
+
+    public function states()
+    {
+        return $this->respond(['states' => $this->lookupRows(StateModel::class, $this->clientId())]);
+    }
+
+    public function createState()
+    {
+        return $this->saveLookup(StateModel::class, 'state', fn () => []);
+    }
+
+    public function updateState(int $id)
+    {
+        return $this->saveLookup(StateModel::class, 'state', fn () => [], $id);
+    }
+
+    public function deleteState(int $id)
+    {
+        return $this->deleteLookup(StateModel::class, 'state', $id);
+    }
+
+    public function reorderStates()
+    {
+        return $this->reorderLookup(StateModel::class);
+    }
+
+    // --- Cities (each belongs to a state) --------------------------------
+
+    public function cities()
+    {
+        return $this->respond(['cities' => $this->decorateCities($this->clientId())]);
+    }
+
+    public function createCity()
+    {
+        return $this->saveLookup(CityModel::class, 'city', fn () => $this->cityExtra());
+    }
+
+    public function updateCity(int $id)
+    {
+        return $this->saveLookup(CityModel::class, 'city', fn () => $this->cityExtra(), $id);
+    }
+
+    public function deleteCity(int $id)
+    {
+        return $this->deleteLookup(CityModel::class, 'city', $id);
+    }
+
+    public function reorderCities()
+    {
+        return $this->reorderLookup(CityModel::class);
+    }
+
+    private function cityExtra(): array
+    {
+        $st = $this->input('state_id');
+
+        return ['state_id' => $st ? (int) $st : null];
+    }
+
+    /** Cities with their parent state name resolved (for the setup UI). */
+    private function decorateCities(int $cid): array
+    {
+        $cities = $this->lookupRows(CityModel::class, $cid);
+        $states = $this->idNameMap($this->lookupRows(StateModel::class, $cid));
+        foreach ($cities as &$c) {
+            $stId          = $c['state_id'] !== null ? (int) $c['state_id'] : null;
+            $c['state_id'] = $stId;
+            $c['state']    = $stId ? ($states[$stId] ?? null) : null;
+        }
+        unset($c);
+
+        return $cities;
     }
 
     // --- Conversion types ------------------------------------------------
@@ -2883,6 +4786,9 @@ class ClientController extends ApiController
      */
     private function saveLookup(string $modelClass, string $entity, callable $extra, ?int $id = null)
     {
+        if ($resp = $this->requirePermission('leads_setup', $id === null ? 'create' : 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new $modelClass();
 
@@ -2916,6 +4822,9 @@ class ClientController extends ApiController
 
     private function deleteLookup(string $modelClass, string $entity, int $id)
     {
+        if ($resp = $this->requirePermission('leads_setup', 'delete')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new $modelClass();
         $row   = $model->where('client_id', $cid)->find($id);
@@ -2931,6 +4840,9 @@ class ClientController extends ApiController
     /** Persist a new ordering: the request's `order` array is row ids in sequence. */
     private function reorderLookup(string $modelClass)
     {
+        if ($resp = $this->requirePermission('leads_setup', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $order = (array) ($this->input('order') ?? []);
         $model = new $modelClass();
@@ -3003,6 +4915,9 @@ class ClientController extends ApiController
     /** POST /client/departments */
     public function createDepartment()
     {
+        if ($resp = $this->requirePermission('team', 'create')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new DepartmentModel();
         $id    = $model->insert([
@@ -3020,6 +4935,9 @@ class ClientController extends ApiController
     /** POST /client/departments/{id} */
     public function updateDepartment(int $id)
     {
+        if ($resp = $this->requirePermission('team', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new DepartmentModel();
         if (! $model->where('client_id', $cid)->find($id)) {
@@ -3036,6 +4954,9 @@ class ClientController extends ApiController
     /** POST /client/departments/{id}/delete — soft delete (archive). */
     public function deleteDepartment(int $id)
     {
+        if ($resp = $this->requirePermission('team', 'delete')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new DepartmentModel();
         $row   = $model->where('client_id', $cid)->find($id);
@@ -3051,6 +4972,9 @@ class ClientController extends ApiController
     /** POST /client/departments/{id}/restore — bring an archived department back. */
     public function restoreDepartment(int $id)
     {
+        if ($resp = $this->requirePermission('team', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new DepartmentModel();
         $row   = $model->onlyDeleted()->where('client_id', $cid)->find($id);
@@ -3086,6 +5010,9 @@ class ClientController extends ApiController
     /** POST /client/office-locations */
     public function createOfficeLocation()
     {
+        if ($resp = $this->requirePermission('team', 'create')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new OfficeLocationModel();
         $id    = $model->insert($this->officeData($cid));
@@ -3100,6 +5027,9 @@ class ClientController extends ApiController
     /** POST /client/office-locations/{id} */
     public function updateOfficeLocation(int $id)
     {
+        if ($resp = $this->requirePermission('team', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new OfficeLocationModel();
         if (! $model->where('client_id', $cid)->find($id)) {
@@ -3116,6 +5046,9 @@ class ClientController extends ApiController
     /** POST /client/office-locations/{id}/delete — soft delete (archive). */
     public function deleteOfficeLocation(int $id)
     {
+        if ($resp = $this->requirePermission('team', 'delete')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new OfficeLocationModel();
         $row   = $model->where('client_id', $cid)->find($id);
@@ -3131,6 +5064,9 @@ class ClientController extends ApiController
     /** POST /client/office-locations/{id}/restore — bring an archived office back. */
     public function restoreOfficeLocation(int $id)
     {
+        if ($resp = $this->requirePermission('team', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new OfficeLocationModel();
         $row   = $model->onlyDeleted()->where('client_id', $cid)->find($id);
@@ -3220,6 +5156,7 @@ class ClientController extends ApiController
             $s['lead_type']         = $s['lead_type_id'] ? ($leadTypes[$s['lead_type_id']] ?? null) : null;
             $extra                  = json_decode((string) ($s['extra_permissions'] ?? ''), true);
             $s['extra_permissions'] = is_array($extra) ? $extra : [];
+            $s['custom_fields']     = $this->decodeCustom($s['custom_fields'] ?? null);
         }
 
         return $this->respond(['staff' => $staff, 'modules' => self::MODULES]);
@@ -3340,9 +5277,14 @@ class ClientController extends ApiController
             return $over;
         }
 
-        $data  = $this->staffData($cid);
-        $model = new ClientStaffModel();
-        $id    = $model->insert($data);
+        $data   = $this->staffData($cid);
+        $custom = $this->formCustomValues('staff', (array) $this->input());
+        if ($errs = $this->formFieldErrors('staff', $data, $custom)) {
+            return $this->failValidationErrors($errs);
+        }
+        $data['custom_fields'] = json_encode($custom);
+        $model                 = new ClientStaffModel();
+        $id                    = $model->insert($data);
 
         if ($id === false) {
             return $this->failValidationErrors($model->errors());
@@ -3350,7 +5292,27 @@ class ClientController extends ApiController
         $this->syncStaffAccount($cid, (int) $id, $data);
         $this->logActivity('created', 'staff', (int) $id, 'Added staff ' . $this->input('name'));
 
-        return $this->respondCreated(['message' => 'Staff added', 'id' => $id]);
+        // Optionally email the new member their credentials, from the CLIENT's own
+        // Gmail (Email Setup). Skipped (not fatal) when the client hasn't set it up.
+        $emailSent  = false;
+        $emailError = null;
+        $plainPw    = (string) ($this->input('password') ?? '');
+        if ($this->input('email_credentials') && $plainPw !== '') {
+            $r          = \App\Libraries\CredentialMailer::send($this->gmailOverride(), (string) $data['name'], (string) ($data['email'] ?? ''), $plainPw, $this->loginUrl());
+            $emailSent  = $r['sent'];
+            $emailError = $r['error'];
+        }
+
+        return $this->respondCreated(['message' => 'Staff added', 'id' => $id, 'email_sent' => $emailSent, 'email_error' => $emailError]);
+    }
+
+    /** The app's login page URL — from the request origin, falling back to config. */
+    private function loginUrl(): string
+    {
+        $origin = $this->request->getHeaderLine('Origin');
+        $base   = $origin !== '' ? $origin : rtrim((string) (env('app.baseURL') ?: site_url()), '/');
+
+        return rtrim($base, '/') . '/login';
     }
 
     /** POST /client/staff/{id} */
@@ -3364,7 +5326,12 @@ class ClientController extends ApiController
         if (! $model->where('client_id', $cid)->find($id)) {
             return $this->failNotFound('Staff not found');
         }
-        $data = $this->staffData($cid, true);
+        $data   = $this->staffData($cid, true);
+        $custom = $this->formCustomValues('staff', (array) $this->input());
+        if ($errs = $this->formFieldErrors('staff', $data, $custom)) {
+            return $this->failValidationErrors($errs);
+        }
+        $data['custom_fields'] = json_encode($custom);
         $model->skipValidation(true)->update($id, $data);
         $this->syncStaffAccount($cid, $id, $data);
         $this->logActivity('updated', 'staff', $id, 'Updated staff');
@@ -3373,20 +5340,155 @@ class ClientController extends ApiController
     }
 
     /** POST /client/staff/{id}/delete */
+    /**
+     * GET /client/staff/{id}/lead-load — how many active leads are assigned to
+     * this member. Drives the delete guard: a member holding leads can't be
+     * deleted until those leads are reassigned to someone else.
+     */
+    public function staffLeadLoad(int $id)
+    {
+        if ($resp = $this->requirePermission('team')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        return $this->respond([
+            'assigned_leads' => (new LeadModel())->where('client_id', $cid)->where('assigned_to', $id)->countAllResults(),
+        ]);
+    }
+
     public function deleteStaff(int $id)
     {
         if ($resp = $this->requirePermission('team', 'delete')) {
             return $resp;
         }
-        $cid = $this->clientId();
-        if (! (new ClientStaffModel())->where('client_id', $cid)->find($id)) {
+        $cid   = $this->clientId();
+        $staff = (new ClientStaffModel())->where('client_id', $cid)->find($id);
+        if (! $staff) {
             return $this->failNotFound('Staff not found');
         }
+
+        // Real-time guard: never orphan leads. If this member still holds leads,
+        // require an explicit reassignment to another member before deleting.
+        $leadModel = new LeadModel();
+        $assigned  = $leadModel->where('client_id', $cid)->where('assigned_to', $id)->countAllResults();
+        if ($assigned > 0) {
+            $reassignTo = (int) ($this->input('reassign_to') ?? 0);
+            if ($reassignTo <= 0) {
+                return $this->respond([
+                    'message'        => "Cannot delete: {$staff['name']} still has {$assigned} lead(s) assigned. Reassign them to another member first.",
+                    'assigned_leads' => $assigned,
+                ], 409);
+            }
+            if ($reassignTo === $id) {
+                return $this->failValidationErrors(['reassign_to' => 'Choose a different member to reassign the leads to.']);
+            }
+            $target = (new ClientStaffModel())->where('client_id', $cid)->find($reassignTo);
+            if (! $target) {
+                return $this->failValidationErrors(['reassign_to' => 'The member to reassign leads to was not found.']);
+            }
+            // Move every lead off the departing member onto the chosen one.
+            $leadModel->where('client_id', $cid)->where('assigned_to', $id)
+                ->set(['assigned_to' => $reassignTo, 'assigned_date' => date('Y-m-d')])->update();
+            $this->logActivity('updated', 'lead', null, "Reassigned {$assigned} lead(s) from {$staff['name']} to {$target['name']} before deleting the member", $cid);
+        }
+
         (new ClientStaffModel())->delete($id);
         (new StaffAccountModel())->where('client_id', $cid)->where('staff_id', $id)->delete();
-        $this->logActivity('deleted', 'staff', $id, 'Removed staff member');
+        $this->logActivity('deleted', 'staff', $id, 'Removed staff member' . ($assigned > 0 ? " (reassigned {$assigned} lead(s))" : ''));
 
-        return $this->respond(['message' => 'Staff removed']);
+        return $this->respond(['message' => $assigned > 0 ? "Staff removed; {$assigned} lead(s) reassigned." : 'Staff removed']);
+    }
+
+    /**
+     * POST /client/staff/{id}/reassign-leads — hand a member's leads to one or
+     * more members before deleting them. Round-robins across `targets` (one id =
+     * single transfer). Optionally re-stamps the assigned date and changes the
+     * status / lead type / source. Each lead gets its own activity-log entry; each
+     * receiving member gets a summary notification.
+     */
+    public function reassignStaffLeads(int $id)
+    {
+        if ($resp = $this->denyUnlessPerm('team', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $staff = (new ClientStaffModel())->where('client_id', $cid)->find($id);
+        if (! $staff) {
+            return $this->failNotFound('Staff not found');
+        }
+
+        // Validate the chosen targets (each must belong to this client, not be the
+        // departing member). Round-robin assigns leads across them in order.
+        $wanted  = array_values(array_unique(array_filter(array_map('intval', (array) $this->input('targets')), static fn ($t) => $t > 0)));
+        $wanted  = array_values(array_filter($wanted, static fn ($t) => $t !== $id));
+        $names   = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->whereIn('id', $wanted ?: [0])->findAll());
+        $targets = array_values(array_filter($wanted, static fn ($t) => isset($names[$t])));
+        if (! $targets) {
+            return $this->failValidationErrors(['targets' => 'Choose at least one valid member to transfer the leads to.']);
+        }
+
+        $updateDate = ! empty($this->input('update_assigned_date'));
+        $notify     = ! empty($this->input('notify')); // in-app + web push to receivers
+        $statusId   = (int) $this->input('status_id') ?: null;
+        $typeId     = (int) $this->input('lead_type_id') ?: null;
+        $sourceId   = (int) $this->input('source_id') ?: null;
+
+        $statusNames = $statusId ? $this->idNameMap($this->lookupRows(LeadStatusModel::class, $cid)) : [];
+        $typeNames   = $typeId ? $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid)) : [];
+        $sourceNames = $sourceId ? $this->idNameMap($this->lookupRows(LeadSourceModel::class, $cid)) : [];
+
+        $leadModel = new LeadModel();
+        $leads     = $leadModel->where('client_id', $cid)->where('assigned_to', $id)->orderBy('id', 'ASC')->findAll();
+
+        $perTarget = array_fill_keys($targets, 0);
+        $count     = count($targets);
+        foreach ($leads as $i => $lead) {
+            $to  = $targets[$i % $count];
+            $upd = ['assigned_to' => $to];
+            if ($updateDate) {
+                $upd['assigned_date'] = date('Y-m-d');
+            }
+            if ($statusId) {
+                $upd['status_id'] = $statusId;
+            }
+            if ($typeId) {
+                $upd['lead_type_id'] = $typeId;
+            }
+            if ($sourceId) {
+                $upd['source_id'] = $sourceId;
+            }
+            $leadModel->update((int) $lead['id'], $upd);
+            $perTarget[$to]++;
+
+            // One readable audit entry per lead, summarising every applied change.
+            $parts = ["Reassigned: {$staff['name']} → {$names[$to]}"];
+            if ($updateDate) {
+                $parts[] = 'assigned date updated';
+            }
+            if ($statusId) {
+                $parts[] = 'status → ' . ($statusNames[$statusId] ?? '—');
+            }
+            if ($typeId) {
+                $parts[] = 'type → ' . ($typeNames[$typeId] ?? '—');
+            }
+            if ($sourceId) {
+                $parts[] = 'source → ' . ($sourceNames[$sourceId] ?? '—');
+            }
+            $this->logActivity('updated', 'lead', (int) $lead['id'], implode('; ', $parts));
+        }
+
+        // A summary notification (in-app + web push) per receiver — only if asked.
+        if ($notify) {
+            foreach ($perTarget as $to => $n) {
+                if ($n > 0) {
+                    $this->notifyStaff((int) $to, 'lead_assigned', "{$n} lead" . ($n === 1 ? '' : 's') . ' assigned to you', "Transferred from {$staff['name']}.", '/client/leads');
+                }
+            }
+        }
+        $this->logActivity('updated', 'staff', $id, 'Transferred ' . count($leads) . ' lead(s) from ' . $staff['name'] . ' to ' . $count . ' member(s)');
+
+        return $this->respond(['message' => 'Leads transferred', 'moved' => count($leads), 'per_target' => $perTarget]);
     }
 
     /** Keep the main-DB staff login index in sync with a staff profile. */
@@ -3433,7 +5535,7 @@ class ClientController extends ApiController
             'facebook'           => trim((string) ($this->input('facebook') ?? '')) ?: null,
             'linkedin'           => trim((string) ($this->input('linkedin') ?? '')) ?: null,
             'skype'              => trim((string) ($this->input('skype') ?? '')) ?: null,
-            'email_signature'    => trim((string) ($this->input('email_signature') ?? '')) ?: null,
+            'email_signature'    => HtmlSanitizer::clean(trim((string) ($this->input('email_signature') ?? ''))) ?: null,
             'status'             => $this->input('status', 'active'),
         ];
 
@@ -3456,6 +5558,173 @@ class ClientController extends ApiController
     }
 
     // ----------------------------------------------------------------- TASKS
+
+    /** Built-in task-form fields the admin can mark mandatory (title is always required). */
+    private const TASK_CONFIGURABLE_REQUIRED_FIELDS = ['description', 'assigned_to', 'due_date', 'start_date', 'priority', 'type'];
+
+    /** Human labels for the configurable task fields, used in validation messages. */
+    private const TASK_REQUIRED_FIELD_LABELS = [
+        'description' => 'Description',
+        'assigned_to' => 'Assignee',
+        'due_date'    => 'Due date',
+        'start_date'  => 'Start date',
+        'priority'    => 'Priority',
+        'type'        => 'Type',
+    ];
+
+    /** Allowed custom-field input types. */
+    private const TASK_CUSTOM_FIELD_TYPES = ['text', 'textarea', 'number', 'date', 'select'];
+
+    /** Built-in task fields this client has marked mandatory on the task form. */
+    private function taskRequiredFields(): array
+    {
+        $keys = json_decode((string) ($this->settingsMap()['task_required_fields'] ?? '[]'), true);
+
+        return is_array($keys)
+            ? array_values(array_intersect(array_map('strval', $keys), self::TASK_CONFIGURABLE_REQUIRED_FIELDS))
+            : [];
+    }
+
+    /** The client's admin-defined custom task fields (sanitized definitions). */
+    private function taskCustomFields(): array
+    {
+        $defs = json_decode((string) ($this->settingsMap()['task_custom_fields'] ?? '[]'), true);
+        if (! is_array($defs)) {
+            return [];
+        }
+        $out = [];
+        foreach ($defs as $d) {
+            if (! is_array($d) || trim((string) ($d['label'] ?? '')) === '') {
+                continue;
+            }
+            $type = in_array($d['type'] ?? 'text', self::TASK_CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $key  = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($d['key'] ?? '')));
+            if ($key === '') {
+                continue;
+            }
+            $out[] = [
+                'key'      => $key,
+                'label'    => (string) $d['label'],
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        return $out;
+    }
+
+    /** Pull + sanitize the custom-field values from request input, keyed by field key. */
+    private function taskCustomValues(array $in): array
+    {
+        $raw = $in['custom_fields'] ?? [];
+        if (is_string($raw)) {
+            $raw = json_decode($raw, true) ?: [];
+        }
+        if (! is_array($raw)) {
+            $raw = [];
+        }
+        $out = [];
+        foreach ($this->taskCustomFields() as $f) {
+            if (! array_key_exists($f['key'], $raw)) {
+                continue;
+            }
+            $v = $raw[$f['key']];
+            $out[$f['key']] = $f['type'] === 'number'
+                ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                : trim((string) $v);
+        }
+
+        return $out;
+    }
+
+    /** Validation errors for the configured-mandatory built-in + custom task fields. */
+    private function taskFieldErrors(array $data, array $customValues): array
+    {
+        $errors = [];
+        foreach ($this->taskRequiredFields() as $key) {
+            $val = $data[$key] ?? null;
+            if ($val === null || $val === '' || $val === 0) {
+                $errors[$key] = (self::TASK_REQUIRED_FIELD_LABELS[$key] ?? $key) . ' is required.';
+            }
+        }
+        foreach ($this->taskCustomFields() as $f) {
+            if (! empty($f['required'])) {
+                $v = $customValues[$f['key']] ?? null;
+                if ($v === null || $v === '') {
+                    $errors['custom_' . $f['key']] = $f['label'] . ' is required.';
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /** GET /client/task-setup — required-field flags + custom-field definitions. */
+    public function taskSetup()
+    {
+        if ($resp = $this->requirePermission('tasks')) {
+            return $resp;
+        }
+
+        return $this->respond([
+            'required_fields' => $this->taskRequiredFields(),
+            'custom_fields'   => $this->taskCustomFields(),
+        ]);
+    }
+
+    /** POST /client/task-field-settings — save mandatory flags + custom-field definitions (admin). */
+    public function saveTaskFieldSettings()
+    {
+        if ($resp = $this->denyUnlessPerm('tasks', 'update')) {
+            return $resp;
+        }
+        $in = (array) $this->input();
+
+        $required = is_array($in['required_fields'] ?? null)
+            ? array_values(array_intersect(array_map('strval', $in['required_fields']), self::TASK_CONFIGURABLE_REQUIRED_FIELDS))
+            : [];
+
+        $custom = [];
+        $seen   = [];
+        foreach ((array) ($in['custom_fields'] ?? []) as $d) {
+            if (! is_array($d)) {
+                continue;
+            }
+            $label = trim((string) ($d['label'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $base = preg_replace('/[^a-z0-9_]/', '', strtolower(str_replace([' ', '-'], '_', (string) (($d['key'] ?? '') ?: $label))));
+            $key  = $base !== '' ? $base : 'field';
+            while (isset($seen[$key])) {
+                $key .= '_';
+            }
+            $seen[$key] = true;
+            $type = in_array($d['type'] ?? 'text', self::TASK_CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $custom[] = [
+                'key'      => $key,
+                'label'    => $label,
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        $this->setSetting('task_required_fields', json_encode($required));
+        $this->setSetting('task_custom_fields', json_encode($custom));
+        $this->logActivity('updated', 'settings', null, 'Updated task form fields', $this->clientId());
+
+        return $this->respond([
+            'message'         => 'Saved',
+            'required_fields' => $required,
+            'custom_fields'   => $this->taskCustomFields(),
+        ]);
+    }
 
     /** GET /client/tasks — every task for this client, assignee names + overdue flag. */
     public function tasks()
@@ -3485,6 +5754,7 @@ class ClientController extends ApiController
             $t['assignee_name']  = $t['assigned_to'] ? ($names[$t['assigned_to']] ?? null) : null;
             $t['overdue']        = $this->isOverdue($t);
             $t['comment_count']  = $counts[(int) $t['id']] ?? 0;
+            $t['custom_fields']  = is_array($cf = json_decode((string) ($t['custom_fields'] ?? ''), true)) ? $cf : [];
         }
         unset($t);
 
@@ -3497,9 +5767,20 @@ class ClientController extends ApiController
     /** POST /client/tasks */
     public function createTask()
     {
+        if ($resp = $this->requirePermission('tasks', 'create')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new ClientTaskModel();
         $data  = $this->taskData($cid);
+
+        // Custom fields + mandatory-field enforcement (built-in + custom).
+        $customValues          = $this->taskCustomValues((array) $this->input());
+        $data['custom_fields'] = json_encode($customValues);
+        if ($errs = $this->taskFieldErrors($data, $customValues)) {
+            return $this->failValidationErrors($errs);
+        }
+
         // Stamp the creator (and seed the updater to the same person).
         $data['created_by']      = $this->actorId();
         $data['created_by_name'] = $this->actorName();
@@ -3526,6 +5807,9 @@ class ClientController extends ApiController
     /** POST /client/tasks/{id} — update, emitting a notification for what changed. */
     public function updateTask(int $id)
     {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new ClientTaskModel();
         $before = $model->where('client_id', $cid)->find($id);
@@ -3533,7 +5817,25 @@ class ClientController extends ApiController
             return $this->failNotFound('Task not found');
         }
 
+        $in   = (array) $this->input();
         $data = $this->taskData($cid, true);
+
+        // Custom fields — only touched when the form sends them (board moves don't).
+        if (array_key_exists('custom_fields', $in)) {
+            $customValues          = $this->taskCustomValues($in);
+            $data['custom_fields'] = json_encode($customValues);
+        } else {
+            $customValues = is_array($cf = json_decode((string) ($before['custom_fields'] ?? ''), true)) ? $cf : [];
+        }
+
+        // Enforce mandatory fields only on a full form edit (title present), so a
+        // status-only board move never trips the required-field validation.
+        if (array_key_exists('title', $in)) {
+            if ($errs = $this->taskFieldErrors(array_merge($before, $data), $customValues)) {
+                return $this->failValidationErrors($errs);
+            }
+        }
+
         // Record who made this change.
         $data['updated_by']      = $this->actorId();
         $data['updated_by_name'] = $this->actorName();
@@ -3616,6 +5918,7 @@ class ClientController extends ApiController
         }
         $t['assignee_name'] = $t['assigned_to'] ? $this->staffName((int) $t['assigned_to']) : null;
         $t['overdue']       = $this->isOverdue($t);
+        $t['custom_fields'] = is_array($cf = json_decode((string) ($t['custom_fields'] ?? ''), true)) ? $cf : [];
 
         return $this->respond(['task' => $t]);
     }
@@ -3635,6 +5938,9 @@ class ClientController extends ApiController
     /** POST /client/tasks/{id}/comments — { body }. Pings the assignee. */
     public function addTaskComment(int $id)
     {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $task = (new ClientTaskModel())->where('client_id', $cid)->find($id);
         if (! $task) {
@@ -3670,6 +5976,9 @@ class ClientController extends ApiController
     /** POST /client/tasks/{taskId}/comments/{commentId}/delete */
     public function deleteTaskComment(int $taskId, int $commentId)
     {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new TaskCommentModel();
         if (! $model->where('client_id', $cid)->where('task_id', $taskId)->find($commentId)) {
@@ -3715,9 +6024,38 @@ class ClientController extends ApiController
         $staffNames = $this->idNameMap($staff);
         $deptNames  = $this->idNameMap($this->departments($cid));
 
+        // Optional filters (mirror the Leads filter drawer): text search, audience,
+        // pinned / acknowledgement flags and a created-date range. All AND together.
+        $q        = trim((string) ($this->request->getGet('q') ?? ''));
+        $audience = array_values(array_intersect(
+            array_filter(array_map('trim', explode(',', (string) ($this->request->getGet('audience') ?? '')))),
+            ['all', 'department', 'staff'],
+        ));
+        $from = trim((string) ($this->request->getGet('from') ?? ''));
+        $to   = trim((string) ($this->request->getGet('to') ?? ''));
+
+        $builder = (new AnnouncementModel())->where('client_id', $cid);
+        if ($q !== '') {
+            $builder->groupStart()->like('title', $q)->orLike('body', $q)->groupEnd();
+        }
+        if ($audience) {
+            $builder->whereIn('audience', $audience);
+        }
+        if ($this->request->getGet('pinned') === '1') {
+            $builder->where('pinned', 1);
+        }
+        if ($this->request->getGet('require_ack') === '1') {
+            $builder->where('require_ack', 1);
+        }
+        if ($from !== '') {
+            $builder->where('created_at >=', $from . ' 00:00:00');
+        }
+        if ($to !== '') {
+            $builder->where('created_at <=', $to . ' 23:59:59');
+        }
+
         // Pinned first, then newest — paginated for infinite scroll.
-        $rows = (new AnnouncementModel())->where('client_id', $cid)
-            ->orderBy('pinned', 'DESC')->orderBy('id', 'DESC')->findAll($limit, $offset);
+        $rows = $builder->orderBy('pinned', 'DESC')->orderBy('id', 'DESC')->findAll($limit, $offset);
 
         $reads = (new AnnouncementReadModel())->where('client_id', $cid)->findAll();
 
@@ -3755,6 +6093,9 @@ class ClientController extends ApiController
     /** POST /client/announcements — create a targeted announcement. */
     public function createAnnouncement()
     {
+        if ($resp = $this->requirePermission('announcements', 'create')) {
+            return $resp;
+        }
         $cid = $this->clientId();
 
         $title = trim((string) $this->input('title'));
@@ -3779,7 +6120,7 @@ class ClientController extends ApiController
         $id   = (new AnnouncementModel())->insert([
             'client_id'   => $cid,
             'title'       => mb_substr($title, 0, 255),
-            'body'        => trim((string) $this->input('body')) ?: null,
+            'body'        => HtmlSanitizer::clean(trim((string) $this->input('body'))) ?: null,
             'pinned'      => $this->input('pinned') ? 1 : 0,
             'created_by'  => (int) ($user['id'] ?? 0),
             'audience'    => $audience,
@@ -3798,6 +6139,9 @@ class ClientController extends ApiController
     /** POST /client/announcements/{id}/delete */
     public function deleteAnnouncement(int $id)
     {
+        if ($resp = $this->requirePermission('announcements', 'delete')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         $ann = (new AnnouncementModel())->where('client_id', $cid)->find($id);
         if (! $ann) {
@@ -3885,6 +6229,88 @@ class ClientController extends ApiController
     }
 
     /** Resolve which active staff ids an announcement targets. */
+    /**
+     * The id used to track who has read an announcement in the client panel:
+     * a staff member's own id, or 0 for the client admin (account owner), who
+     * sees every announcement.
+     */
+    private function announcementViewerId(): int
+    {
+        return $this->role() === 'staff' ? $this->staffId() : 0;
+    }
+
+    /**
+     * GET /client/announcements/unread-count — how many announcements the current
+     * user can see but hasn't read yet (drives the navbar badge, like the bell).
+     */
+    public function announcementsUnreadCount()
+    {
+        if ($resp = $this->requirePermission('announcements')) {
+            return $resp;
+        }
+        $cid    = $this->clientId();
+        $viewer = $this->announcementViewerId();
+        $staff  = (new ClientStaffModel())->where('client_id', $cid)->findAll();
+
+        $readIds = [];
+        foreach ((new AnnouncementReadModel())->where('client_id', $cid)->where('staff_id', $viewer)->findAll() as $r) {
+            if (! empty($r['read_at'])) {
+                $readIds[(int) $r['announcement_id']] = true;
+            }
+        }
+
+        $unread = 0;
+        foreach ((new AnnouncementModel())->where('client_id', $cid)->findAll() as $a) {
+            // Staff only count announcements addressed to them; the admin sees all.
+            if ($viewer !== 0 && ! in_array($viewer, $this->announcementRecipientIds($a, $staff), true)) {
+                continue;
+            }
+            if (empty($readIds[(int) $a['id']])) {
+                $unread++;
+            }
+        }
+
+        return $this->respond(['unread' => $unread]);
+    }
+
+    /**
+     * POST /client/announcements/read-all — mark every announcement the current
+     * user can see as read (clears the navbar badge, like "mark all read").
+     */
+    public function markAllAnnouncementsRead()
+    {
+        if ($resp = $this->requirePermission('announcements')) {
+            return $resp;
+        }
+        $cid    = $this->clientId();
+        $viewer = $this->announcementViewerId();
+        $staff  = (new ClientStaffModel())->where('client_id', $cid)->findAll();
+        $model  = new AnnouncementReadModel();
+
+        $existing = [];
+        foreach ($model->where('client_id', $cid)->where('staff_id', $viewer)->findAll() as $r) {
+            $existing[(int) $r['announcement_id']] = $r;
+        }
+
+        $now = date('Y-m-d H:i:s');
+        foreach ((new AnnouncementModel())->where('client_id', $cid)->findAll() as $a) {
+            if ($viewer !== 0 && ! in_array($viewer, $this->announcementRecipientIds($a, $staff), true)) {
+                continue;
+            }
+            $aid = (int) $a['id'];
+            $row = $existing[$aid] ?? null;
+            if ($row) {
+                if (empty($row['read_at'])) {
+                    $model->update($row['id'], ['read_at' => $now]);
+                }
+            } else {
+                $model->insert(['client_id' => $cid, 'announcement_id' => $aid, 'staff_id' => $viewer, 'read_at' => $now]);
+            }
+        }
+
+        return $this->respond(['message' => 'Marked all read']);
+    }
+
     private function announcementRecipientIds(array $a, array $allStaff): array
     {
         $audience = $a['audience'] ?? 'all';
@@ -3914,15 +6340,17 @@ class ClientController extends ApiController
         try {
             $staff = (new ClientStaffModel())->where('client_id', $cid)->findAll();
             $model = new AppNotificationModel();
+            $body = mb_substr($title, 0, 140);
             foreach ($this->announcementRecipientIds($ann, $staff) as $sid) {
                 $model->insert([
                     'recipient_type' => 'staff',
                     'recipient_id'   => $sid,
                     'type'           => 'announcement',
                     'title'          => 'New announcement',
-                    'body'           => mb_substr($title, 0, 140),
+                    'body'           => $body,
                     'link'           => '/staff/announcements',
                 ]);
+                PushService::sendToRecipient($cid, 'staff', (int) $sid, 'New announcement', $body, '/staff/announcements');
             }
         } catch (\Throwable $e) {
             log_message('error', 'Announcement notify failed: ' . $e->getMessage());
@@ -3991,7 +6419,7 @@ class ClientController extends ApiController
             return [
                 'client_id'   => $cid,
                 'title'       => trim((string) ($in['title'] ?? '')),
-                'description' => trim((string) ($in['description'] ?? '')) ?: null,
+                'description' => HtmlSanitizer::clean(trim((string) ($in['description'] ?? ''))) ?: null,
                 'assigned_to' => (int) ($in['assigned_to'] ?? 0) ?: null,
                 'due_date'    => trim((string) ($in['due_date'] ?? '')) ?: null,
                 'start_date'  => trim((string) ($in['start_date'] ?? '')) ?: null,
@@ -4005,7 +6433,7 @@ class ClientController extends ApiController
         // wipe the title/dates/assignee of the task it touches.
         $data = [];
         if (array_key_exists('title', $in))       $data['title']       = trim((string) $in['title']);
-        if (array_key_exists('description', $in)) $data['description'] = trim((string) $in['description']) ?: null;
+        if (array_key_exists('description', $in)) $data['description'] = HtmlSanitizer::clean(trim((string) $in['description'])) ?: null;
         if (array_key_exists('assigned_to', $in)) $data['assigned_to'] = (int) $in['assigned_to'] ?: null;
         if (array_key_exists('due_date', $in))    $data['due_date']    = trim((string) $in['due_date']) ?: null;
         if (array_key_exists('start_date', $in))  $data['start_date']  = trim((string) $in['start_date']) ?: null;
@@ -4085,6 +6513,7 @@ class ClientController extends ApiController
                 'body'           => $body !== null ? mb_substr($body, 0, 500) : null,
                 'link'           => $link,
             ]);
+            PushService::sendToRecipient($this->clientId(), 'user', (int) $user['id'], $title, $body, $link);
         } catch (\Throwable $e) {
             log_message('error', 'Notification write failed: ' . $e->getMessage());
         }
@@ -4105,6 +6534,7 @@ class ClientController extends ApiController
                 'body'           => $body !== null ? mb_substr($body, 0, 500) : null,
                 'link'           => $link,
             ]);
+            PushService::sendToRecipient($this->clientId(), 'staff', $staffId, $title, $body, $link);
         } catch (\Throwable $e) {
             log_message('error', 'Staff notification write failed: ' . $e->getMessage());
         }
@@ -4137,23 +6567,30 @@ class ClientController extends ApiController
             $model = new AppNotificationModel();
             foreach ($tasks as $t) {
                 $link   = '/client/tasks?task=' . $t['id'];
+                // Only one due/overdue alert per task per day — checked regardless
+                // of read state, so dismissing it doesn't make it regenerate on the
+                // next page load. A fresh reminder can still appear the next day.
                 $exists = $model
                     ->where('recipient_type', 'user')->where('recipient_id', (int) $user['id'])
-                    ->where('type', 'task_due')->where('link', $link)->where('read_at', null)
+                    ->where('type', 'task_due')->where('link', $link)
+                    ->where('created_at >=', $today . ' 00:00:00')
                     ->countAllResults();
                 if ($exists) {
                     continue;
                 }
 
                 $overdue = substr((string) $t['due_date'], 0, 10) < $today;
+                $title   = $overdue ? 'Task overdue' : 'Task due today';
+                $body    = mb_substr((string) $t['title'], 0, 500);
                 $model->insert([
                     'recipient_type' => 'user',
                     'recipient_id'   => (int) $user['id'],
                     'type'           => 'task_due',
-                    'title'          => $overdue ? 'Task overdue' : 'Task due today',
-                    'body'           => mb_substr((string) $t['title'], 0, 500),
+                    'title'          => $title,
+                    'body'           => $body,
                     'link'           => $link,
                 ]);
+                PushService::sendToRecipient($cid, 'user', (int) $user['id'], $title, $body, $link);
             }
         } catch (\Throwable $e) {
             log_message('error', 'Due-task alert generation failed: ' . $e->getMessage());
@@ -4252,6 +6689,172 @@ class ClientController extends ApiController
 
     // --------------------------------------------------------------- ASSETS
 
+    /** Built-in asset-form fields the admin can mark mandatory (name is always required). */
+    private const ASSET_CONFIGURABLE_REQUIRED_FIELDS = ['series_model', 'asset_group', 'managed_by', 'asset_location', 'purchase_date', 'warranty_months', 'unit_price', 'supplier_name'];
+
+    /** Human labels for the configurable asset fields, used in validation messages. */
+    private const ASSET_REQUIRED_FIELD_LABELS = [
+        'series_model'    => 'Series / model',
+        'asset_group'     => 'Asset group',
+        'managed_by'      => 'Managed by',
+        'asset_location'  => 'Location',
+        'purchase_date'   => 'Purchase date',
+        'warranty_months' => 'Warranty (months)',
+        'unit_price'      => 'Unit price',
+        'supplier_name'   => 'Supplier name',
+    ];
+
+    /** Built-in asset fields this client has marked mandatory on the asset form. */
+    private function assetRequiredFields(): array
+    {
+        $keys = json_decode((string) ($this->settingsMap()['asset_required_fields'] ?? '[]'), true);
+
+        return is_array($keys)
+            ? array_values(array_intersect(array_map('strval', $keys), self::ASSET_CONFIGURABLE_REQUIRED_FIELDS))
+            : [];
+    }
+
+    /** The client's admin-defined custom asset fields (sanitized definitions). */
+    private function assetCustomFields(): array
+    {
+        $defs = json_decode((string) ($this->settingsMap()['asset_custom_fields'] ?? '[]'), true);
+        if (! is_array($defs)) {
+            return [];
+        }
+        $out = [];
+        foreach ($defs as $d) {
+            if (! is_array($d) || trim((string) ($d['label'] ?? '')) === '') {
+                continue;
+            }
+            $type = in_array($d['type'] ?? 'text', self::TASK_CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $key  = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($d['key'] ?? '')));
+            if ($key === '') {
+                continue;
+            }
+            $out[] = [
+                'key'      => $key,
+                'label'    => (string) $d['label'],
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        return $out;
+    }
+
+    /** Pull + sanitize custom asset-field values from request input, keyed by field key. */
+    private function assetCustomValues(array $in): array
+    {
+        $raw = $in['custom_fields'] ?? [];
+        if (is_string($raw)) {
+            $raw = json_decode($raw, true) ?: [];
+        }
+        if (! is_array($raw)) {
+            $raw = [];
+        }
+        $out = [];
+        foreach ($this->assetCustomFields() as $f) {
+            if (! array_key_exists($f['key'], $raw)) {
+                continue;
+            }
+            $v = $raw[$f['key']];
+            $out[$f['key']] = $f['type'] === 'number'
+                ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                : trim((string) $v);
+        }
+
+        return $out;
+    }
+
+    /** Validation errors for the configured-mandatory built-in + custom asset fields. */
+    private function assetFieldErrors(array $data, array $customValues): array
+    {
+        $errors = [];
+        foreach ($this->assetRequiredFields() as $key) {
+            $val = $data[$key] ?? null;
+            if ($val === null || $val === '' || $val === 0) {
+                $errors[$key] = (self::ASSET_REQUIRED_FIELD_LABELS[$key] ?? $key) . ' is required.';
+            }
+        }
+        foreach ($this->assetCustomFields() as $f) {
+            if (! empty($f['required'])) {
+                $v = $customValues[$f['key']] ?? null;
+                if ($v === null || $v === '') {
+                    $errors['custom_' . $f['key']] = $f['label'] . ' is required.';
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /** GET /client/asset-setup — required-field flags + custom-field definitions. */
+    public function assetSetup()
+    {
+        if ($resp = $this->requirePermission('assets')) {
+            return $resp;
+        }
+
+        return $this->respond([
+            'required_fields' => $this->assetRequiredFields(),
+            'custom_fields'   => $this->assetCustomFields(),
+        ]);
+    }
+
+    /** POST /client/asset-field-settings — save mandatory flags + custom-field defs (admin). */
+    public function saveAssetFieldSettings()
+    {
+        if ($resp = $this->denyUnlessPerm('assets', 'update')) {
+            return $resp;
+        }
+        $in = (array) $this->input();
+
+        $required = is_array($in['required_fields'] ?? null)
+            ? array_values(array_intersect(array_map('strval', $in['required_fields']), self::ASSET_CONFIGURABLE_REQUIRED_FIELDS))
+            : [];
+
+        $custom = [];
+        $seen   = [];
+        foreach ((array) ($in['custom_fields'] ?? []) as $d) {
+            if (! is_array($d)) {
+                continue;
+            }
+            $label = trim((string) ($d['label'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $base = preg_replace('/[^a-z0-9_]/', '', strtolower(str_replace([' ', '-'], '_', (string) (($d['key'] ?? '') ?: $label))));
+            $key  = $base !== '' ? $base : 'field';
+            while (isset($seen[$key])) {
+                $key .= '_';
+            }
+            $seen[$key] = true;
+            $type = in_array($d['type'] ?? 'text', self::TASK_CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $custom[] = [
+                'key'      => $key,
+                'label'    => $label,
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        $this->setSetting('asset_required_fields', json_encode($required));
+        $this->setSetting('asset_custom_fields', json_encode($custom));
+        $this->logActivity('updated', 'settings', null, 'Updated asset form fields', $this->clientId());
+
+        return $this->respond([
+            'message'         => 'Saved',
+            'required_fields' => $required,
+            'custom_fields'   => $this->assetCustomFields(),
+        ]);
+    }
+
     /** GET /client/assets — assets with their current allocation. */
     public function assets()
     {
@@ -4273,6 +6876,7 @@ class ClientController extends ApiController
             $alloc                 = $current[(int) $as['id']] ?? null;
             $as['allocated_to']    = $alloc ? ($staff[(int) $alloc['staff_id']] ?? null) : null;
             $as['allocated_to_id'] = $alloc ? (int) $alloc['staff_id'] : null;
+            $as['custom_fields']   = is_array($cf = json_decode((string) ($as['custom_fields'] ?? ''), true)) ? $cf : [];
         }
 
         return $this->respond(['assets' => $assets]);
@@ -4281,11 +6885,21 @@ class ClientController extends ApiController
     /** POST /client/assets — create. */
     public function createAsset()
     {
+        if ($resp = $this->requirePermission('assets', 'create')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new AssetModel();
         $code  = trim((string) ($this->input('asset_code') ?? '')) ?: $this->nextAssetCode($cid);
 
-        $id = $model->insert($this->assetData($cid) + ['asset_code' => $code]);
+        $data         = $this->assetData($cid) + ['asset_code' => $code];
+        $customValues = $this->assetCustomValues((array) $this->input());
+        $data['custom_fields'] = json_encode($customValues);
+        if ($errs = $this->assetFieldErrors($data, $customValues)) {
+            return $this->failValidationErrors($errs);
+        }
+
+        $id = $model->insert($data);
         if ($id === false) {
             return $this->failValidationErrors($model->errors());
         }
@@ -4297,15 +6911,34 @@ class ClientController extends ApiController
     /** POST /client/assets/{id} — update. */
     public function updateAsset(int $id)
     {
+        if ($resp = $this->requirePermission('assets', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new AssetModel();
-        if (! $model->where('client_id', $cid)->find($id)) {
+        $before = $model->where('client_id', $cid)->find($id);
+        if (! $before) {
             return $this->failNotFound('Asset not found');
         }
+        $in   = (array) $this->input();
         $data = $this->assetData($cid, true);
         if (($code = trim((string) ($this->input('asset_code') ?? ''))) !== '') {
             $data['asset_code'] = $code;
         }
+
+        if (array_key_exists('custom_fields', $in)) {
+            $customValues          = $this->assetCustomValues($in);
+            $data['custom_fields'] = json_encode($customValues);
+        } else {
+            $customValues = is_array($cf = json_decode((string) ($before['custom_fields'] ?? ''), true)) ? $cf : [];
+        }
+        // The asset form always sends `name`; enforce mandatory fields then.
+        if (array_key_exists('name', $in)) {
+            if ($errs = $this->assetFieldErrors(array_merge($before, $data), $customValues)) {
+                return $this->failValidationErrors($errs);
+            }
+        }
+
         $model->skipValidation(true)->update($id, $data);
         $this->logAsset($cid, $id, 'updated', 'Updated asset details');
 
@@ -4347,6 +6980,9 @@ class ClientController extends ApiController
     /** POST /client/assets/{id}/allocate — { staff_id, notes? } */
     public function allocateAsset(int $id)
     {
+        if ($resp = $this->requirePermission('assets', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $asset = (new AssetModel())->where('client_id', $cid)->find($id);
         if (! $asset) {
@@ -4370,6 +7006,9 @@ class ClientController extends ApiController
     /** POST /client/assets/{id}/transfer — move from current holder to another staff. */
     public function transferAsset(int $id)
     {
+        if ($resp = $this->requirePermission('assets', 'update')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $asset = (new AssetModel())->where('client_id', $cid)->find($id);
         if (! $asset) {
@@ -4396,6 +7035,9 @@ class ClientController extends ApiController
     /** POST /client/assets/{id}/revoke — { notes? } */
     public function revokeAsset(int $id)
     {
+        if ($resp = $this->requirePermission('assets', 'update')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         if (! (new AssetModel())->where('client_id', $cid)->find($id)) {
             return $this->failNotFound('Asset not found');
@@ -4413,6 +7055,9 @@ class ClientController extends ApiController
     /** POST /client/assets/{id}/note — attach a free-text note to the tracker. */
     public function addAssetNote(int $id)
     {
+        if ($resp = $this->requirePermission('assets', 'update')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         if (! (new AssetModel())->where('client_id', $cid)->find($id)) {
             return $this->failNotFound('Asset not found');
@@ -4537,6 +7182,14 @@ class ClientController extends ApiController
      * POST /client/upload — multipart image/file upload (field "file").
      * Used for staff photos and asset attachments. Returns the stored URL.
      */
+    /** Extensions allowed for client uploads (staff photos, attachments, avatars).
+     *  Strictly allow-listed: never executable/script types (.php, .phtml, .svg,
+     *  .html, .js, …) so a file dropped in the web-served uploads dir can't run. */
+    private const UPLOAD_ALLOWED_EXT = [
+        'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp',
+        'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'csv', 'txt', 'rtf', 'odt', 'ods', 'zip',
+    ];
+
     public function upload()
     {
         $file = $this->request->getFile('file');
@@ -4547,13 +7200,38 @@ class ClientController extends ApiController
             return $this->failValidationErrors('File must be 5MB or smaller.');
         }
 
+        // Whitelist the extension — the saved filename is built from it, so an
+        // executable type can never land in the web-served uploads directory.
+        $ext = strtolower((string) $file->getClientExtension());
+        if ($ext === '' || ! in_array($ext, self::UPLOAD_ALLOWED_EXT, true)) {
+            return $this->failValidationErrors('That file type is not allowed. Upload an image or document (PDF, DOC, XLS, CSV, ZIP, …).');
+        }
+
         $uploadDir = FCPATH . 'uploads';
         if (! is_dir($uploadDir)) {
             mkdir($uploadDir, 0775, true);
         }
-        $newName = $file->getRandomName();
+        $this->protectUploadDir($uploadDir);
+
+        // Deterministic random name with the validated extension (never trust the
+        // client-supplied name or a guessed extension).
+        $newName = bin2hex(random_bytes(16)) . '.' . $ext;
         $file->move($uploadDir, $newName);
 
         return $this->respond(['message' => 'Uploaded', 'url' => '/uploads/' . $newName]);
+    }
+
+    /** Defense-in-depth: drop an .htaccess that disables script execution in the
+     *  uploads dir, so even a misnamed file can never be run by Apache. */
+    private function protectUploadDir(string $dir): void
+    {
+        $htaccess = $dir . DIRECTORY_SEPARATOR . '.htaccess';
+        if (is_file($htaccess)) {
+            return;
+        }
+        $rules = "php_flag engine off\n"
+            . "AddType text/plain .php .phtml .php3 .php4 .php5 .php7 .phps .pht .phar .cgi .pl .py .sh .asp .aspx .jsp\n"
+            . "<IfModule mod_rewrite.c>\nRewriteEngine Off\n</IfModule>\n";
+        @file_put_contents($htaccess, $rules);
     }
 }

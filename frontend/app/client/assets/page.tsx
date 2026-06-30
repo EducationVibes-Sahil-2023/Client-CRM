@@ -9,20 +9,29 @@ import {
   deleteAsset,
   getAssetHistory,
   getAssets,
+  getAssetSetup,
   getStaff,
   revokeAsset,
+  saveAssetFieldSettings,
   transferAsset,
   updateAsset,
+  ASSET_REQUIRABLE_FIELDS,
   type Asset,
   type AssetLog,
   type Staff,
+  type TaskCustomField,
 } from "../../lib/client";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Badge, Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+import { Badge, Card, Drawer, Modal, PageHeader, SkeletonStats, SkeletonBlock, fmtDate, timeAgo } from "../../admin/ui";
 import { DataTable, IconButton, type Column } from "../../admin/DataTable";
 import { FieldRow, inputCls } from "../../admin/clients/formKit";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
+import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
+import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { FieldSetupDrawer } from "../FieldSetupDrawer";
+import RichTextEditor from "../../admin/RichTextEditor";
 import { DonutChart, BarChart } from "../../admin/Charts";
 
 interface Draft {
@@ -31,11 +40,14 @@ interface Draft {
   asset_group: string; managed_by: string; asset_location: string; purchase_date: string;
   warranty_months: string; unit_price: string; depreciation_months: string;
   supplier_name: string; supplier_phone: string; supplier_address: string; description: string; attachment: string;
+  /** Values for admin-defined custom fields, keyed by field key. */
+  custom: Record<string, string>;
 }
 const blank: Draft = {
   asset_code: "", name: "", quantity: "1", unit: "", series_model: "", asset_group: "",
   managed_by: "", asset_location: "", purchase_date: "", warranty_months: "", unit_price: "",
   depreciation_months: "", supplier_name: "", supplier_phone: "", supplier_address: "", description: "", attachment: "",
+  custom: {},
 };
 const field = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
 
@@ -48,6 +60,7 @@ function toDraft(a: Asset): Draft {
     depreciation_months: a.depreciation_months != null ? String(a.depreciation_months) : "",
     supplier_name: a.supplier_name ?? "", supplier_phone: a.supplier_phone ?? "", supplier_address: a.supplier_address ?? "",
     description: a.description ?? "", attachment: a.attachment ?? "",
+    custom: { ...(a.custom_fields ?? {}) },
   };
 }
 
@@ -71,8 +84,27 @@ const statusHex = (s: string) => STATUS_HEX[s] ?? "#64748b";
 
 const assetVal = (a: Asset) => (Number(a.unit_price) || 0) * (a.quantity || 1);
 const fmtMoney = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-const PER_PAGE = 10;   // table view: rows per page
 const CARD_BATCH = 12; // card view: cards loaded per infinite-scroll step
+
+// ---- Filters (a draft the user edits in the rail + the applied set that filters;
+// synced on "Apply", mirroring the Announcements section). ----
+interface AssetFilters {
+  status: string[];
+  group: string[];
+  allocation: string[]; // "allocated" | "available"
+  managedBy: string[];  // staff id (string)
+  location: string[];
+}
+const BLANK_ASSET_FILTERS: AssetFilters = { status: [], group: [], allocation: [], managedBy: [], location: [] };
+const ALLOCATION_OPTIONS: SelectOption[] = [
+  { value: "allocated", label: "Allocated" },
+  { value: "available", label: "Available" },
+];
+const assetFiltersActive = (f: AssetFilters): boolean =>
+  f.status.length > 0 || f.group.length > 0 || f.allocation.length > 0 || f.managedBy.length > 0 || f.location.length > 0;
+const countAssetFilters = (f: AssetFilters): number =>
+  [f.status.length, f.group.length, f.allocation.length, f.managedBy.length, f.location.length].filter(Boolean).length;
+const assetGroupOf = (a: { asset_group: string | null }) => (a.asset_group || "Ungrouped").trim() || "Ungrouped";
 
 /** Warranty expiry date from purchase + months, or null. */
 function warrantyExpiry(a: Asset): Date | null {
@@ -94,11 +126,19 @@ type ActionType = "allocate" | "transfer" | "revoke";
 export default function AssetsPage() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { defaultPageSize, isAdmin, can } = useClient();
   const [assets, setAssets] = useState<Asset[] | null>(null);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+
+  // Admin-configured form fields: which built-ins are mandatory + custom fields.
+  const [requiredFields, setRequiredFields] = useState<Set<string>>(new Set());
+  const [customFields, setCustomFields] = useState<TaskCustomField[]>([]);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const canManageFields = isAdmin || can("assets", "update");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [action, setAction] = useState<{ type: ActionType; asset: Asset } | null>(null);
@@ -111,11 +151,16 @@ export default function AssetsPage() {
 
   const [history, setHistory] = useState<{ asset: Asset; rows: AssetLog[] } | null>(null);
 
-  // UI controls.
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  // UI controls. Seed from a global-search deep link (?q=...) when present.
+  const [query, setQuery] = useState(() => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("q") ?? "" : ""));
+  // `filters` is the draft edited in the rail; `applied` is what filters the list.
+  const [filters, setFilters] = useState<AssetFilters>(BLANK_ASSET_FILTERS);
+  const [applied, setApplied] = useState<AssetFilters>(BLANK_ASSET_FILTERS);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const setFilter = <K extends keyof AssetFilters>(key: K, value: AssetFilters[K]) => setFilters((f) => ({ ...f, [key]: value }));
   const [view, setView] = useState<"grid" | "table">("grid");
   const [page, setPage] = useState(1);              // table pagination
+  const [perPage, setPerPage] = useState(defaultPageSize);
   const [cardLimit, setCardLimit] = useState(CARD_BATCH); // card infinite scroll
   const sentinel = useRef<HTMLDivElement>(null);
 
@@ -126,9 +171,15 @@ export default function AssetsPage() {
     getAssets().then((d) => setAssets(d.assets)).catch(() => setAssets([]));
     getStaff().then((d) => setStaff(d.staff)).catch(() => {});
   }
-  useEffect(load, []);
+  function loadSetup() {
+    getAssetSetup().then((d) => { setRequiredFields(new Set(d.required_fields ?? [])); setCustomFields(d.custom_fields ?? []); }).catch(() => {});
+  }
+  useEffect(() => { load(); loadSetup(); }, []);
 
   const set = (k: keyof Draft) => (v: string) => setDraft((d) => d && { ...d, [k]: v });
+  const reqAsset = (k: string) => requiredFields.has(k);
+  const setCustom = (key: string, v: string) => setDraft((d) => (d ? { ...d, custom: { ...d.custom, [key]: v } } : d));
+  const assigneeOpts: SelectOption[] = [{ value: "", label: "— Select —" }, ...staff.map((s) => ({ value: String(s.id), label: s.name }))];
 
   // -------------------------------------------------------- derived dashboard
   const list = useMemo(() => assets ?? [], [assets]);
@@ -173,21 +224,39 @@ export default function AssetsPage() {
       .slice(0, 6);
   }, [list]);
 
-  const statuses = useMemo(() => [...new Set(list.map((a) => a.status))], [list]);
+  // Filter dropdown options, derived from the data on hand.
+  const statusOptions = useMemo<SelectOption[]>(() => [...new Set(list.map((a) => a.status))].map((s) => ({ value: s, label: s })), [list]);
+  const groupOptions = useMemo<SelectOption[]>(() => [...new Set(list.map(assetGroupOf))].map((g) => ({ value: g, label: g })), [list]);
+  const locationOptions = useMemo<SelectOption[]>(() => [...new Set(list.map((a) => a.asset_location).filter((l): l is string => !!l))].map((l) => ({ value: l, label: l })), [list]);
+  const managedByOptions = useMemo<SelectOption[]>(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
+
+  const appliedFilterCount = useMemo(() => countAssetFilters(applied), [applied]);
+  const draftDirty = useMemo(() => JSON.stringify(filters) !== JSON.stringify(applied), [filters, applied]);
+  function applyFilters() { setApplied(filters); resetPaging(); }
+  function clearFilters() { setFilters(BLANK_ASSET_FILTERS); setApplied(BLANK_ASSET_FILTERS); setQuery(""); resetPaging(); }
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return list.filter((a) => {
-      if (statusFilter !== "all" && a.status !== statusFilter) return false;
+      if (applied.status.length && !applied.status.includes(a.status)) return false;
+      if (applied.group.length && !applied.group.includes(assetGroupOf(a))) return false;
+      if (applied.location.length && !applied.location.includes(a.asset_location ?? "")) return false;
+      if (applied.managedBy.length && !applied.managedBy.includes(String(a.managed_by ?? ""))) return false;
+      if (applied.allocation.length) {
+        const isAllocated = !!a.allocated_to_id;
+        const wantAllocated = applied.allocation.includes("allocated");
+        const wantAvailable = applied.allocation.includes("available");
+        if (!((wantAllocated && isAllocated) || (wantAvailable && !isAllocated))) return false;
+      }
       if (!q) return true;
       return [a.name, a.asset_code, a.asset_group, a.series_model, a.allocated_to, a.managed_by_name, a.asset_location]
         .some((v) => (v ?? "").toLowerCase().includes(q));
     });
-  }, [list, query, statusFilter]);
+  }, [list, query, applied]);
 
   // Table view: page slice. Card view: a growing slice for infinite scroll.
-  const totalPages = Math.max(1, Math.ceil(visible.length / PER_PAGE));
-  const pageRows = useMemo(() => visible.slice((page - 1) * PER_PAGE, page * PER_PAGE), [visible, page]);
+  const totalPages = Math.max(1, Math.ceil(visible.length / perPage));
+  const pageRows = useMemo(() => visible.slice((page - 1) * perPage, page * perPage), [visible, page, perPage]);
   const cardRows = useMemo(() => visible.slice(0, cardLimit), [visible, cardLimit]);
   const moreCards = cardLimit < visible.length;
 
@@ -212,12 +281,29 @@ export default function AssetsPage() {
     finally { setUploading(false); }
   }
 
+  function validate(d: Draft): Record<string, string> {
+    const e: Record<string, string> = {};
+    if (d.name.trim().length < 1) e.name = "Asset name is required.";
+    for (const f of ASSET_REQUIRABLE_FIELDS) {
+      if (requiredFields.has(f.key) && !String((d as unknown as Record<string, string>)[f.key] ?? "").trim()) {
+        e[f.key] = `${f.label} is required.`;
+      }
+    }
+    for (const f of customFields) {
+      if (f.required && !String(d.custom[f.key] ?? "").trim()) e[`custom_${f.key}`] = `${f.label} is required.`;
+    }
+    return e;
+  }
+
   async function save() {
     if (!draft) return;
-    if (draft.name.trim().length < 1) { toast.warning("Enter an asset name."); return; }
+    const e = validate(draft);
+    setErrors(e);
+    if (Object.keys(e).length) { toast.warning("Please fix the highlighted fields."); return; }
     setSaving(true);
     try {
-      const body = { ...draft, quantity: Number(draft.quantity) || 1, managed_by: draft.managed_by ? Number(draft.managed_by) : 0 };
+      const { custom, ...rest } = draft;
+      const body = { ...rest, quantity: Number(draft.quantity) || 1, managed_by: draft.managed_by ? Number(draft.managed_by) : 0, custom_fields: custom };
       if (draft.id) { await updateAsset(draft.id, body); toast.success("Asset updated."); }
       else { await createAsset(body); toast.success("Asset created."); }
       setDraft(null); load();
@@ -296,13 +382,26 @@ export default function AssetsPage() {
       <PageHeader
         title="Asset Management"
         subtitle="Track, value, allocate and audit every company asset"
-        action={<button onClick={() => setDraft({ ...blank })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>Add asset</button>}
+        action={
+          <div className="flex items-center gap-2">
+            {canManageFields && (
+              <button onClick={() => setSetupOpen(true)} title="Configure asset form fields" className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M10.3 4.3a2 2 0 013.4 0l.5.9 1-.2a2 2 0 012.4 2.4l-.2 1 .9.5a2 2 0 010 3.4l-.9.5.2 1a2 2 0 01-2.4 2.4l-1-.2-.5.9a2 2 0 01-3.4 0l-.5-.9-1 .2a2 2 0 01-2.4-2.4l.2-1-.9-.5a2 2 0 010-3.4l.9-.5-.2-1a2 2 0 012.4-2.4l1 .2z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
+                Form setup
+              </button>
+            )}
+            {can("assets", "create") && <button onClick={() => { setErrors({}); setDraft({ ...blank, custom: {} }); }} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>Add asset</button>}
+          </div>
+        }
       />
 
       {assets === null ? (
-        <Spinner />
-      ) : (
         <div className="space-y-5">
+          <SkeletonStats count={4} />
+          <SkeletonBlock className="h-96" />
+        </div>
+      ) : (
+        <div className={`space-y-5 ${filterRailPad(filterOpen)}`}>
           {/* KPI cards */}
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <StatCard label="Total assets" value={String(stats.total)} tone="slate" icon="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-14L4 7m8 4v10M4 7v10l8 4" />
@@ -352,10 +451,10 @@ export default function AssetsPage() {
               <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
               <input value={query} onChange={(e) => { setQuery(e.target.value); resetPaging(); }} placeholder="Search assets, code, group, holder…" className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
             </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Chip active={statusFilter === "all"} onClick={() => { setStatusFilter("all"); resetPaging(); }}>All</Chip>
-              {statuses.map((s) => <Chip key={s} active={statusFilter === s} onClick={() => { setStatusFilter(s); resetPaging(); }} dot={statusHex(s)}>{s}</Chip>)}
-            </div>
+            <FilterToggle open={filterOpen} count={appliedFilterCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+            {(assetFiltersActive(applied) || query.trim()) && (
+              <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>
+            )}
             <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
               <ViewBtn active={view === "grid"} onClick={() => setView("grid")} icon="M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z" />
               <ViewBtn active={view === "table"} onClick={() => setView("table")} icon="M3 6h18M3 12h18M3 18h18" />
@@ -365,6 +464,8 @@ export default function AssetsPage() {
           {/* List */}
           {view === "table" ? (
             <DataTable
+              tableKey="assets"
+              canRenameColumns={isAdmin}
               columns={columns}
               rows={pageRows}
               getKey={(a) => a.id}
@@ -376,17 +477,23 @@ export default function AssetsPage() {
               totalPages={totalPages}
               onPage={setPage}
               total={visible.length}
+              pageSize={perPage}
+              onPageSize={(n) => { setPerPage(n); setPage(1); }}
               quickActions={(a) => (
                 <>
                   <IconButton title="Tracker log" onClick={() => openHistory(a)}>
                     <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" /></svg>
                   </IconButton>
-                  <IconButton title="Edit" onClick={() => setDraft(toDraft(a))}>
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                  </IconButton>
-                  <IconButton title="Delete" danger onClick={() => remove(a)}>
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                  </IconButton>
+                  {can("assets", "update") && (
+                    <IconButton title="Edit" onClick={() => setDraft(toDraft(a))}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    </IconButton>
+                  )}
+                  {can("assets", "delete") && (
+                    <IconButton title="Delete" danger onClick={() => remove(a)}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    </IconButton>
+                  )}
                 </>
               )}
               rowActions={rowActions}
@@ -445,8 +552,8 @@ export default function AssetsPage() {
                     )}
                     <CardBtn title="Tracker" onClick={() => openHistory(a)} icon="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                     <CardBtn title="Note" onClick={() => { setNoteFor(a); setNoteText(""); }} icon="M11 5h6M11 9h6M5 5h.01M5 9h.01M5 13h.01M11 13h6M5 17h.01M11 17h6" />
-                    <CardBtn title="Edit" onClick={() => setDraft(toDraft(a))} icon="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" />
-                    <CardBtn title="Delete" danger onClick={() => remove(a)} icon="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" />
+                    {can("assets", "update") && <CardBtn title="Edit" onClick={() => setDraft(toDraft(a))} icon="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" />}
+                    {can("assets", "delete") && <CardBtn title="Delete" danger onClick={() => remove(a)} icon="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" />}
                   </div>
                 </div>
               ))}
@@ -465,6 +572,38 @@ export default function AssetsPage() {
           )}
         </div>
       )}
+
+      {/* ---- Filters panel (status / group / allocation / managed by / location) ---- */}
+      <FilterRail
+        open={filterOpen}
+        onClose={() => setFilterOpen(false)}
+        dirty={draftDirty}
+        onReset={() => setFilters(BLANK_ASSET_FILTERS)}
+        resetDisabled={!assetFiltersActive(filters)}
+        onApply={applyFilters}
+        applyDisabled={!draftDirty}
+      >
+        <div className="space-y-1.5">
+          <FilterLabel>Status</FilterLabel>
+          <MultiSelect ariaLabel="Filter by status" value={filters.status} onChange={(v) => setFilter("status", v)} options={statusOptions} placeholder="Any status" searchPlaceholder="Search status…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Group</FilterLabel>
+          <MultiSelect ariaLabel="Filter by group" value={filters.group} onChange={(v) => setFilter("group", v)} options={groupOptions} placeholder="Any group" searchPlaceholder="Search groups…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Allocation</FilterLabel>
+          <MultiSelect ariaLabel="Filter by allocation" value={filters.allocation} onChange={(v) => setFilter("allocation", v)} options={ALLOCATION_OPTIONS} placeholder="Any" searchPlaceholder="Search…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Managed by</FilterLabel>
+          <MultiSelect ariaLabel="Filter by manager" value={filters.managedBy} onChange={(v) => setFilter("managedBy", v)} options={managedByOptions} placeholder="Anyone" searchPlaceholder="Search people…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Location</FilterLabel>
+          <MultiSelect ariaLabel="Filter by location" value={filters.location} onChange={(v) => setFilter("location", v)} options={locationOptions} placeholder="Any location" searchPlaceholder="Search locations…" />
+        </div>
+      </FilterRail>
 
       {/* Create / edit — right-side drawer */}
       <Drawer
@@ -489,21 +628,18 @@ export default function AssetsPage() {
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Asset details</h4>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <FieldRow label="Asset code"><input className={inputCls()} placeholder="Auto (AST-…)" value={draft.asset_code} onChange={(e) => set("asset_code")(e.target.value)} /></FieldRow>
-                <FieldRow label="Asset name" required><input className={inputCls()} placeholder="MacBook Pro 14” " value={draft.name} onChange={(e) => set("name")(e.target.value)} /></FieldRow>
+                <FieldRow label="Asset name" required error={errors.name}><input className={inputCls()} placeholder="MacBook Pro 14” " value={draft.name} onChange={(e) => set("name")(e.target.value)} /></FieldRow>
                 <FieldRow label="Quantity" required><input type="number" min="1" className={inputCls()} value={draft.quantity} onChange={(e) => set("quantity")(e.target.value)} /></FieldRow>
                 <FieldRow label="Unit"><input className={inputCls()} placeholder="pcs / set" value={draft.unit} onChange={(e) => set("unit")(e.target.value)} /></FieldRow>
-                <FieldRow label="Series / Model"><input className={inputCls()} value={draft.series_model} onChange={(e) => set("series_model")(e.target.value)} /></FieldRow>
-                <FieldRow label="Asset group"><input className={inputCls()} value={draft.asset_group} onChange={(e) => set("asset_group")(e.target.value)} /></FieldRow>
-                <FieldRow label="Managed by">
-                  <select className={inputCls()} value={draft.managed_by} onChange={(e) => set("managed_by")(e.target.value)}>
-                    <option value="">— Select —</option>
-                    {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
+                <FieldRow label="Series / Model" required={reqAsset("series_model")} error={errors.series_model}><input className={inputCls()} value={draft.series_model} onChange={(e) => set("series_model")(e.target.value)} /></FieldRow>
+                <FieldRow label="Asset group" required={reqAsset("asset_group")} error={errors.asset_group}><input className={inputCls()} value={draft.asset_group} onChange={(e) => set("asset_group")(e.target.value)} /></FieldRow>
+                <FieldRow label="Managed by" required={reqAsset("managed_by")} error={errors.managed_by}>
+                  <SearchSelect ariaLabel="Managed by" value={draft.managed_by} onChange={set("managed_by")} options={assigneeOpts} placeholder="— Select —" searchPlaceholder="Search team…" />
                 </FieldRow>
-                <FieldRow label="Asset location"><input className={inputCls()} value={draft.asset_location} onChange={(e) => set("asset_location")(e.target.value)} /></FieldRow>
-                <FieldRow label="Date of purchase"><input type="date" className={inputCls()} value={draft.purchase_date} onChange={(e) => set("purchase_date")(e.target.value)} /></FieldRow>
-                <FieldRow label="Warranty (months)"><input type="number" className={inputCls()} value={draft.warranty_months} onChange={(e) => set("warranty_months")(e.target.value)} /></FieldRow>
-                <FieldRow label="Unit price"><input type="number" step="0.01" className={inputCls()} value={draft.unit_price} onChange={(e) => set("unit_price")(e.target.value)} /></FieldRow>
+                <FieldRow label="Asset location" required={reqAsset("asset_location")} error={errors.asset_location}><input className={inputCls()} value={draft.asset_location} onChange={(e) => set("asset_location")(e.target.value)} /></FieldRow>
+                <FieldRow label="Date of purchase" required={reqAsset("purchase_date")} error={errors.purchase_date}><input type="date" className={inputCls()} value={draft.purchase_date} onChange={(e) => set("purchase_date")(e.target.value)} /></FieldRow>
+                <FieldRow label="Warranty (months)" required={reqAsset("warranty_months")} error={errors.warranty_months}><input type="number" className={inputCls()} value={draft.warranty_months} onChange={(e) => set("warranty_months")(e.target.value)} /></FieldRow>
+                <FieldRow label="Unit price" required={reqAsset("unit_price")} error={errors.unit_price}><input type="number" step="0.01" className={inputCls()} value={draft.unit_price} onChange={(e) => set("unit_price")(e.target.value)} /></FieldRow>
                 <FieldRow label="Depreciation (months)"><input type="number" className={inputCls()} value={draft.depreciation_months} onChange={(e) => set("depreciation_months")(e.target.value)} /></FieldRow>
               </div>
             </section>
@@ -511,15 +647,39 @@ export default function AssetsPage() {
             <section>
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Supplier</h4>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <FieldRow label="Supplier name"><input className={inputCls()} value={draft.supplier_name} onChange={(e) => set("supplier_name")(e.target.value)} /></FieldRow>
+                <FieldRow label="Supplier name" required={reqAsset("supplier_name")} error={errors.supplier_name}><input className={inputCls()} value={draft.supplier_name} onChange={(e) => set("supplier_name")(e.target.value)} /></FieldRow>
                 <FieldRow label="Supplier phone"><input className={inputCls()} value={draft.supplier_phone} onChange={(e) => set("supplier_phone")(e.target.value)} /></FieldRow>
                 <FieldRow label="Supplier address" full><input className={inputCls()} value={draft.supplier_address} onChange={(e) => set("supplier_address")(e.target.value)} /></FieldRow>
               </div>
             </section>
 
+            {/* Admin-defined custom fields */}
+            {customFields.length > 0 && (
+              <section>
+                <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Additional info</h4>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  {customFields.map((f) => {
+                    const ek = `custom_${f.key}`;
+                    const val = draft.custom[f.key] ?? "";
+                    return (
+                      <FieldRow key={f.key} label={f.label} required={f.required} error={errors[ek]} full={f.type === "textarea"}>
+                        {f.type === "textarea" ? (
+                          <textarea value={val} onChange={(e) => setCustom(f.key, e.target.value)} rows={3} className={inputCls()} />
+                        ) : f.type === "select" ? (
+                          <SearchSelect ariaLabel={f.label} value={val} onChange={(v) => setCustom(f.key, v)} options={[{ value: "", label: "— Select —" }, ...f.options.map((o) => ({ value: o, label: o }))]} placeholder="— Select —" searchPlaceholder="Search…" />
+                        ) : (
+                          <input type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"} value={val} onChange={(e) => setCustom(f.key, e.target.value)} className={inputCls()} />
+                        )}
+                      </FieldRow>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
             <section>
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Notes &amp; attachment</h4>
-              <textarea className={inputCls()} rows={3} placeholder="Description" value={draft.description} onChange={(e) => set("description")(e.target.value)} />
+              <RichTextEditor key={`asset-desc-${draft.id ?? "new"}`} initialHTML={draft.description} onChange={(html) => set("description")(html)} placeholder="Description / notes…" minHeight={140} />
               <div className="mt-3 flex items-center gap-3">
                 <button onClick={() => fileRef.current?.click()} disabled={uploading} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60">{uploading ? "Uploading…" : "Attach file"}</button>
                 <input ref={fileRef} type="file" className="hidden" onChange={(e) => e.target.files?.[0] && uploadAttachment(e.target.files[0])} />
@@ -530,6 +690,19 @@ export default function AssetsPage() {
         )}
       </Drawer>
 
+      {/* Asset form setup (admin) — mandatory toggles + custom field builder */}
+      <FieldSetupDrawer
+        open={setupOpen}
+        onClose={() => setSetupOpen(false)}
+        title="Asset form fields"
+        subtitle="Choose mandatory fields and build your own custom fields"
+        requirableFields={ASSET_REQUIRABLE_FIELDS}
+        required={requiredFields}
+        customFields={customFields}
+        onSave={saveAssetFieldSettings}
+        onSaved={(req, custom) => { setRequiredFields(new Set(req)); setCustomFields(custom); }}
+      />
+
       {/* Allocate / Transfer / Revoke */}
       <Modal open={!!action} onClose={() => setAction(null)} title={action ? `${action.type[0].toUpperCase()}${action.type.slice(1)} "${action.asset.name}"` : ""}>
         {action && (
@@ -539,10 +712,14 @@ export default function AssetsPage() {
             )}
             {action.type !== "revoke" && (
               <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">{action.type === "transfer" ? "Transfer to" : "Assign to"} staff</span>
-                <select className={field} value={actStaff} onChange={(e) => setActStaff(e.target.value)}>
-                  <option value="">— Select staff —</option>
-                  {staff.filter((s) => s.id !== action.asset.allocated_to_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
+                <SearchSelect
+                  ariaLabel="Select staff"
+                  value={actStaff}
+                  onChange={setActStaff}
+                  options={[{ value: "", label: "— Select staff —" }, ...staff.filter((s) => s.id !== action.asset.allocated_to_id).map((s) => ({ value: String(s.id), label: s.name }))]}
+                  placeholder="— Select staff —"
+                  searchPlaceholder="Search team…"
+                />
               </label>
             )}
             <textarea className={field} rows={2} placeholder="Notes (optional, tracked)" value={actNotes} onChange={(e) => setActNotes(e.target.value)} />
@@ -632,15 +809,6 @@ function StatCard({ label, value, icon, tone }: { label: string; value: string; 
       <div className="text-2xl font-bold text-slate-900">{value}</div>
       <div className="text-xs text-slate-400">{label}</div>
     </div>
-  );
-}
-
-function Chip({ active, onClick, children, dot }: { active: boolean; onClick: () => void; children: React.ReactNode; dot?: string }) {
-  return (
-    <button onClick={onClick} className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium capitalize transition ${active ? "bg-emerald-600 text-white" : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"}`}>
-      {dot && <span className="h-2 w-2 rounded-full" style={{ background: active ? "#fff" : dot }} />}
-      {children}
-    </button>
   );
 }
 

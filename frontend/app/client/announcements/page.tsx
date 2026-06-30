@@ -15,11 +15,60 @@ import {
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
+import { useClient } from "../ClientContext";
 import RichTextEditor from "../../admin/RichTextEditor";
-import { PageHeader, Card, EmptyState, Spinner, Modal, Drawer, timeAgo } from "../../admin/ui";
+import { PageHeader, Card, EmptyState, SkeletonBlock, SkeletonText, Modal, Drawer, timeAgo } from "../../admin/ui";
+import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
+import { DateRangeFilter, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
+import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
 
 type Dept = { id: number; name: string };
 type StaffOpt = { id: number; name: string; department_id: number | null };
+
+// ---- Filters (a draft the user edits + the applied set that reloads the list,
+// synced on "Apply", mirroring the Leads section). Server-side filtered. ----
+interface AnnFilters {
+  audience: string[];   // "all" | "department" | "staff"
+  attrs: string[];      // "pinned" | "ack"
+  created: DateRange;
+}
+const BLANK_FILTERS: AnnFilters = { audience: [], attrs: [], created: EMPTY_RANGE };
+
+const AUDIENCE_OPTIONS: SelectOption[] = [
+  { value: "all", label: "All team" },
+  { value: "department", label: "By department" },
+  { value: "staff", label: "Specific people" },
+];
+const ATTR_OPTIONS: SelectOption[] = [
+  { value: "pinned", label: "Pinned" },
+  { value: "ack", label: "Acknowledgement required" },
+];
+
+const annFiltersActive = (f: AnnFilters): boolean =>
+  !!(f.audience.length || f.attrs.length || rangeActive(f.created));
+const countAnnFilters = (f: AnnFilters): number =>
+  [f.audience.length, f.attrs.length, rangeActive(f.created)].filter(Boolean).length;
+
+/** Resolve a date-range preset to concrete inclusive YYYY-MM-DD bounds for the API. */
+function resolveRange(r: DateRange): { from?: string; to?: string } {
+  if (r.preset === "all") return {};
+  if (r.preset === "custom") return { from: r.from, to: r.to };
+  const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const back = (n: number) => { const d = new Date(today); d.setDate(d.getDate() - n); return d; };
+  switch (r.preset) {
+    case "today": return { from: ymd(today), to: ymd(today) };
+    case "yesterday": return { from: ymd(back(1)), to: ymd(back(1)) };
+    case "7d": return { from: ymd(back(7)), to: ymd(today) };
+    case "30d": return { from: ymd(back(30)), to: ymd(today) };
+    case "this_month": return { from: ymd(new Date(today.getFullYear(), today.getMonth(), 1)), to: ymd(today) };
+    case "last_month": return {
+      from: ymd(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+      to: ymd(new Date(today.getFullYear(), today.getMonth(), 0)),
+    };
+    default: return {};
+  }
+}
 
 function fmtSize(n: number): string {
   if (!n) return "";
@@ -62,6 +111,7 @@ function AttachmentChip({ a }: { a: AnnouncementAttachment }) {
 export default function AnnouncementsPage() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { can } = useClient();
   const [items, setItems] = useState<Announcement[]>([]);
   const [departments, setDepartments] = useState<Dept[]>([]);
   const [staff, setStaff] = useState<StaffOpt[]>([]);
@@ -87,13 +137,42 @@ export default function AnnouncementsPage() {
   const [readersFor, setReadersFor] = useState<Announcement | null>(null);
   const [readers, setReaders] = useState<AnnouncementReader[] | null>(null);
 
+  // Filters — `filters` is the draft in the drawer; `applied` reloads the list.
+  // `search` is the instant top-bar query (debounced into the applied params).
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [filters, setFilters] = useState<AnnFilters>(BLANK_FILTERS);
+  const [applied, setApplied] = useState<AnnFilters>(BLANK_FILTERS);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const setFilter = <K extends keyof AnnFilters>(key: K, value: AnnFilters[K]) => setFilters((f) => ({ ...f, [key]: value }));
+
   const PAGE = 15;
 
-  // (Re)load the first page — used on mount and after create/delete.
+  // Debounce the search box so typing doesn't refetch on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // The active query params sent to the API — applied filters + debounced search.
+  const params = useMemo(() => {
+    const range = resolveRange(applied.created);
+    return {
+      q: debouncedSearch.trim() || undefined,
+      audience: applied.audience.length ? applied.audience.join(",") : undefined,
+      pinned: applied.attrs.includes("pinned") ? "1" : undefined,
+      require_ack: applied.attrs.includes("ack") ? "1" : undefined,
+      from: range.from,
+      to: range.to,
+    };
+  }, [applied, debouncedSearch]);
+
+  // (Re)load the first page — runs on mount, whenever the params change, and
+  // after create/delete.
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await getAnnouncements({ limit: PAGE, offset: 0 });
+      const d = await getAnnouncements({ limit: PAGE, offset: 0, ...params });
       setItems(d.announcements);
       setHasMore(d.has_more);
       if (d.departments) setDepartments(d.departments);
@@ -104,15 +183,15 @@ export default function AnnouncementsPage() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [params]);
 
-  // Append the next page (infinite scroll).
+  // Append the next page (infinite scroll), keeping the active filters.
   const loadMore = useCallback(async () => {
     if (loadingMoreRef.current || !hasMore) return;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const d = await getAnnouncements({ limit: PAGE, offset: items.length });
+      const d = await getAnnouncements({ limit: PAGE, offset: items.length, ...params });
       setItems((list) => [...list, ...d.announcements]);
       setHasMore(d.has_more);
     } catch {
@@ -121,7 +200,15 @@ export default function AnnouncementsPage() {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [hasMore, items.length]);
+  }, [hasMore, items.length, params]);
+
+  const appliedCount = useMemo(() => countAnnFilters(applied), [applied]);
+  const draftDirty = useMemo(() => JSON.stringify(filters) !== JSON.stringify(applied), [filters, applied]);
+  const filtersOn = annFiltersActive(applied) || !!debouncedSearch.trim();
+  // Apply keeps the panel open so the list updates beside it; closing is done
+  // via the Filters toggle / the panel's close button.
+  function applyFilters() { setApplied(filters); }
+  function clearFilters() { setFilters(BLANK_FILTERS); setApplied(BLANK_FILTERS); setSearch(""); }
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
@@ -232,17 +319,38 @@ export default function AnnouncementsPage() {
         title="Announcements"
         subtitle="Broadcast to your whole team, a department, or specific people — and track who's seen it."
         action={
-          <button onClick={() => { resetForm(); setOpen(true); }} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
-            New announcement
-          </button>
+          can("announcements", "create") ? (
+            <button onClick={() => { resetForm(); setOpen(true); }} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
+              New announcement
+            </button>
+          ) : undefined
         }
       />
 
+      {/* Search + filters bar — the drawer mirrors the Leads section; nothing
+          applies until “Apply”. The search box filters as you type (debounced). */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-1 flex-wrap items-center gap-3">
+          <div className="relative w-full max-w-sm">
+            <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search announcements…" className={`${field} pl-9`} />
+          </div>
+          <FilterToggle open={filterOpen} count={appliedCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+        </div>
+        {filtersOn && (
+          <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>
+        )}
+      </div>
+
+      {/* The list. When the rail is open it pads right so nothing hides behind it. */}
+      <div className={filterRailPad(filterOpen)}>
       {loading ? (
-        <Spinner />
+        <div className="space-y-3">
+          {Array.from({ length: 5 }).map((_, i) => <SkeletonBlock key={i} className="h-24" />)}
+        </div>
       ) : items.length === 0 ? (
-        <Card><EmptyState title="No announcements yet" hint="Post your first announcement to keep the team in the loop." /></Card>
+        <Card><EmptyState title={filtersOn ? "No matching announcements" : "No announcements yet"} hint={filtersOn ? "Try clearing or widening your filters." : "Post your first announcement to keep the team in the loop."} /></Card>
       ) : (
         <div className="space-y-4">
           {items.map((a) => (
@@ -261,9 +369,11 @@ export default function AnnouncementsPage() {
                     <span>{timeAgo(a.created_at)}</span>
                   </div>
                 </div>
-                <button onClick={() => remove(a)} title="Delete" className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600">
-                  <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5h6v2m-1 0 .8 13H8.2L9 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                </button>
+                {can("announcements", "delete") && (
+                  <button onClick={() => remove(a)} title="Delete" className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5h6v2m-1 0 .8 13H8.2L9 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
               </div>
 
               {a.body && <div className="rte-content mt-3 text-sm leading-relaxed text-slate-600" dangerouslySetInnerHTML={{ __html: a.body }} />}
@@ -299,6 +409,30 @@ export default function AnnouncementsPage() {
           )}
         </div>
       )}
+      </div>
+
+      <FilterRail
+        open={filterOpen}
+        onClose={() => setFilterOpen(false)}
+        dirty={draftDirty}
+        onReset={() => setFilters(BLANK_FILTERS)}
+        resetDisabled={!annFiltersActive(filters)}
+        onApply={applyFilters}
+        applyDisabled={!draftDirty}
+      >
+        <label className="flex flex-col gap-1">
+          <FilterLabel>Audience</FilterLabel>
+          <MultiSelect ariaLabel="Filter by audience" value={filters.audience} onChange={(v) => setFilter("audience", v)} options={AUDIENCE_OPTIONS} placeholder="Any audience" searchPlaceholder="Search audience…" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <FilterLabel>Attributes</FilterLabel>
+          <MultiSelect ariaLabel="Filter by attributes" value={filters.attrs} onChange={(v) => setFilter("attrs", v)} options={ATTR_OPTIONS} placeholder="Any" searchPlaceholder="Search…" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <FilterLabel>Date posted</FilterLabel>
+          <DateRangeFilter ariaLabel="Date posted" value={filters.created} onChange={(v) => setFilter("created", v)} />
+        </label>
+      </FilterRail>
 
       {/* Create drawer (slides in from the right) */}
       <Drawer
@@ -414,7 +548,7 @@ export default function AnnouncementsPage() {
       {/* Recipients modal */}
       <Modal open={readersFor !== null} onClose={() => setReadersFor(null)} title="Recipients">
         {readers === null ? (
-          <Spinner />
+          <SkeletonText lines={4} />
         ) : readers.length === 0 ? (
           <p className="py-6 text-center text-sm text-slate-400">No recipients for this announcement.</p>
         ) : (

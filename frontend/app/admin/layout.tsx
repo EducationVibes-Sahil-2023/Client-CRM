@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { API_URL } from "../lib/api";
+import { changePassword } from "../lib/admin";
 import { AdminProvider, useAdmin } from "./AdminContext";
 import { useToast } from "../components/toast/ToastProvider";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 import ChatLauncher from "../components/chat/ChatLauncher";
+import ForcePasswordChange from "../client/ForcePasswordChange";
 
 interface AdminUser {
   id: number;
@@ -15,6 +17,7 @@ interface AdminUser {
   role: string;
   name?: string;
   avatar?: string;
+  must_change_password?: boolean;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -36,6 +39,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const toast = useToast();
   const [user, setUser] = useState<AdminUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,6 +53,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           return;
         }
         setUser(data.user);
+        setMustChangePassword(!!data.user?.must_change_password);
       })
       .catch(() => {
         if (cancelled) return;
@@ -73,6 +78,22 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           Loading dashboard…
         </div>
       </div>
+    );
+  }
+
+  if (mustChangePassword) {
+    return (
+      <ForcePasswordChange
+        email={user.email}
+        submit={(current_password, new_password) =>
+          changePassword({ current_password, new_password }).then(() => undefined)
+        }
+        onDone={() => setMustChangePassword(false)}
+        onLogout={async () => {
+          await fetch(`${API_URL}/auth/logout`, { method: "POST", credentials: "include" }).catch(() => {});
+          router.replace("/login");
+        }}
+      />
     );
   }
 

@@ -2,7 +2,9 @@
 
 namespace App\Controllers;
 
+use App\Libraries\PasswordPolicy;
 use App\Libraries\TenantManager;
+use App\Models\ClientModel;
 use App\Models\ClientStaffModel;
 use App\Models\StaffAccountModel;
 use App\Models\UserModel;
@@ -25,6 +27,13 @@ class Auth extends ApiController
         // 1) Platform users: super admins and client admins.
         $user = (new UserModel())->findByEmail($email);
         if ($user && password_verify($password, $user['password'])) {
+            // A client admin can't sign in while their workspace is suspended/inactive.
+            if (($user['role'] ?? '') === 'client_admin' && $user['client_id'] !== null) {
+                $client = (new ClientModel())->find((int) $user['client_id']);
+                if (! $client || ! ClientModel::statusAllowsAccess($client['status'] ?? null)) {
+                    return $this->fail('This workspace has been suspended. Please contact support.', 403);
+                }
+            }
             $this->session->regenerate(true); // prevent session fixation
 
             $sessionUser = [
@@ -33,6 +42,8 @@ class Auth extends ApiController
                 'name'      => $user['name'] ?? $user['email'],
                 'role'      => $user['role'],
                 'client_id' => $user['client_id'] !== null ? (int) $user['client_id'] : null,
+                // Flag accounts still on a weak password so the UI forces a change.
+                'must_change_password' => ! PasswordPolicy::isStrong($password, $user['email']),
             ];
             $this->session->set('user', $sessionUser);
             $this->logActivity('login', 'session', (int) $user['id'], 'Signed in');
@@ -51,6 +62,12 @@ class Auth extends ApiController
         ) {
             $clientId = (int) $account['client_id'];
             $staffId  = (int) $account['staff_id'];
+
+            // Block staff whose workspace is suspended/inactive.
+            $client = (new ClientModel())->find($clientId);
+            if (! $client || ! ClientModel::statusAllowsAccess($client['status'] ?? null)) {
+                return $this->fail('This workspace has been suspended. Please contact support.', 403);
+            }
 
             // Pull display name + role from the client's own database.
             $profile = null;
@@ -71,6 +88,8 @@ class Auth extends ApiController
                 'staff_id'  => $staffId,
                 'role_id'   => isset($profile['role_id']) && $profile['role_id'] !== null ? (int) $profile['role_id'] : null,
                 'name'      => $profile['name'] ?? $account['email'],
+                // Flag accounts still on a weak password so the UI forces a change.
+                'must_change_password' => ! PasswordPolicy::isStrong($password, $account['email']),
             ];
             $this->session->set('user', $sessionUser);
             $this->logActivity('login', 'session', $staffId, 'Staff signed in', $clientId);
@@ -89,6 +108,23 @@ class Auth extends ApiController
         $this->session->destroy();
 
         return $this->respond(['message' => 'Logged out']);
+    }
+
+    /**
+     * POST /auth/stop-impersonation — restore the super-admin session that was
+     * stashed when they used "Login as client". No-ops (still 200) when the
+     * current session isn't an impersonation, so the UI can call it safely.
+     */
+    public function stopImpersonation()
+    {
+        $impersonator = $this->session->get('impersonator');
+        if (! is_array($impersonator) || empty($impersonator['id'])) {
+            return $this->respond(['message' => 'Not impersonating', 'restored' => false]);
+        }
+        $this->session->remove('impersonator');
+        $this->session->set('user', $impersonator);
+
+        return $this->respond(['message' => 'Returned to admin', 'restored' => true, 'user' => $impersonator]);
     }
 
     /**

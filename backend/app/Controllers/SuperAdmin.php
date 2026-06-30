@@ -2,6 +2,8 @@
 
 namespace App\Controllers;
 
+use App\Libraries\BackupRunner;
+use App\Libraries\BackupService;
 use App\Libraries\FeatureService;
 use App\Libraries\GmailService;
 use App\Libraries\GoogleCalendarService;
@@ -160,6 +162,16 @@ class SuperAdmin extends ApiController
             log_message('error', 'Tenant DB provisioning failed for ' . $data['db_name'] . ': ' . $e->getMessage());
         }
 
+        // Optionally email the new admin their credentials (platform Gmail).
+        // Best-effort: never fails the creation, reports whether it went out.
+        $emailSent  = false;
+        $emailError = null;
+        if ($createAdmin && $this->input('email_credentials') && $adminPassword !== '') {
+            $r          = \App\Libraries\CredentialMailer::send(null, $adminName, $adminEmail, $adminPassword, $this->loginUrl());
+            $emailSent  = $r['sent'];
+            $emailError = $r['error'];
+        }
+
         return $this->respondCreated([
             'message'        => $createAdmin ? 'Client and admin created' : 'Client created',
             'client_id'      => $clientId,
@@ -169,7 +181,53 @@ class SuperAdmin extends ApiController
             'subdomain'      => $data['subdomain'],
             'db_provisioned' => $provisioned,
             'db_error'       => $provisionError,
+            'email_sent'     => $emailSent,
+            'email_error'    => $emailError,
         ]);
+    }
+
+    /** The app's login page URL — from the request origin, falling back to config. */
+    private function loginUrl(): string
+    {
+        $origin = $this->request->getHeaderLine('Origin');
+        $base   = $origin !== '' ? $origin : rtrim((string) (env('app.baseURL') ?: site_url()), '/');
+
+        return rtrim($base, '/') . '/login';
+    }
+
+    /**
+     * POST /superadmin/clients/{id}/login-as — impersonate a client's admin so the
+     * super admin can work inside that client's dashboard. The current super-admin
+     * session is stashed under `impersonator` so it can be restored on exit.
+     */
+    public function loginAsClient(int $clientId)
+    {
+        $client = (new ClientModel())->find($clientId);
+        if (! $client) {
+            return $this->failNotFound('Client not found');
+        }
+        if (! ClientModel::statusAllowsAccess($client['status'] ?? null)) {
+            return $this->fail('This workspace is suspended.', 403);
+        }
+        $admin = (new UserModel())->where('role', 'client_admin')->where('client_id', $clientId)->first();
+        if (! $admin) {
+            return $this->failValidationErrors(['client' => 'This client has no admin user to log in as.']);
+        }
+
+        // Stash the super-admin session, then become the client admin.
+        $this->session->set('impersonator', $this->currentUser());
+        $this->session->set('user', [
+            'id'             => (int) $admin['id'],
+            'email'          => $admin['email'],
+            'name'           => $admin['name'] ?? $admin['email'],
+            'role'           => 'client_admin',
+            'client_id'      => (int) $clientId,
+            'impersonated_by' => $this->currentUser()['name'] ?? 'Super admin',
+            'client_name'    => $client['name'] ?? null,
+        ]);
+        $this->logActivity('login', 'session', (int) $admin['id'], 'Super admin logged in as client "' . ($client['name'] ?? $clientId) . '"', (int) $clientId);
+
+        return $this->respond(['ok' => true]);
     }
 
     /** Lowercase, underscore-separated slug of a company name. */
@@ -362,6 +420,104 @@ class SuperAdmin extends ApiController
      * and return its structure (tables, columns, indexes, row counts + sizes)
      * for the super-admin schema viewer. Read-only; never touches client data.
      */
+    /** GET /superadmin/backup/main — download a SQL dump of the main (shared) DB. */
+    public function backupMain()
+    {
+        $db     = \Config\Database::connect();
+        $dbName = (string) (config('Database')->default['database'] ?? 'crm_main');
+
+        return $this->streamBackup($db, $dbName, 'main');
+    }
+
+    /** GET /superadmin/clients/{id}/backup — download a SQL dump of a client's DB. */
+    public function backupClient(int $clientId)
+    {
+        $client = (new ClientModel())->find($clientId);
+        if (! $client) {
+            return $this->failNotFound('Client not found');
+        }
+        if (empty($client['db_name'])) {
+            return $this->fail('This client has no provisioned database.', 409);
+        }
+
+        try {
+            $db = (new TenantManager())->forClient($client);
+        } catch (\Throwable $e) {
+            return $this->fail('Could not connect to the client database: ' . $e->getMessage(), 502);
+        }
+
+        return $this->streamBackup($db, (string) $client['db_name'], (string) $client['db_name']);
+    }
+
+    /** Build a SQL dump and return it as a file-download response. */
+    private function streamBackup(\CodeIgniter\Database\BaseConnection $db, string $dbName, string $label)
+    {
+        try {
+            $sql = (new BackupService())->dump($db, $dbName);
+        } catch (\Throwable $e) {
+            return $this->fail('Backup failed: ' . $e->getMessage(), 500);
+        }
+
+        $filename = "backup-{$label}-" . date('Ymd-His') . '.sql';
+        $this->logActivity('created', 'backup', null, "Downloaded database backup of {$dbName}");
+
+        return $this->response
+            ->setHeader('Content-Type', 'application/sql; charset=utf-8')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . $filename . '"')
+            ->setBody($sql);
+    }
+
+    /** GET /superadmin/backup-settings — auto-backup config + stored backup files. */
+    public function backupSettings()
+    {
+        $r = new BackupRunner();
+
+        return $this->respond([
+            'settings'    => $r->config(),
+            'files'       => $r->files(),
+            'frequencies' => BackupRunner::FREQUENCIES,
+        ]);
+    }
+
+    /** POST /superadmin/backup-settings — save the auto-backup schedule. */
+    public function saveBackupSettings()
+    {
+        $r   = new BackupRunner();
+        $cfg = $r->saveConfig((array) $this->input());
+        $this->logActivity('updated', 'settings', null, 'Updated automatic backup settings');
+
+        return $this->respond(['settings' => $cfg, 'files' => $r->files()]);
+    }
+
+    /** POST /superadmin/backup-run — run a backup to disk now (manual trigger). */
+    public function runBackupNow()
+    {
+        $r   = new BackupRunner();
+        $res = $r->run($this->input('scope') === 'main' ? 'main' : null);
+        $this->logActivity('created', 'backup', null, 'Ran backup to disk (' . $res['status'] . ')');
+
+        return $this->respond([
+            'status'   => $res['status'],
+            'errors'   => $res['errors'],
+            'settings' => $r->config(),
+            'files'    => $r->files(),
+        ]);
+    }
+
+    /** GET /superadmin/backup-files/{name} — download a stored backup file. */
+    public function downloadBackupFile(string $name)
+    {
+        $path = (new BackupRunner())->pathFor($name);
+        if ($path === null) {
+            return $this->failNotFound('Backup file not found.');
+        }
+
+        return $this->response
+            ->setHeader('Content-Type', 'application/gzip')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . basename($path) . '"')
+            ->setBody((string) file_get_contents($path));
+    }
+
     public function clientSchema(int $clientId)
     {
         $client = (new ClientModel())->find($clientId);
@@ -1091,8 +1247,9 @@ class SuperAdmin extends ApiController
             return $this->failValidationErrors('Current and new password are required');
         }
 
-        if (strlen($next) < 8) {
-            return $this->failValidationErrors(['new_password' => 'New password must be at least 8 characters.']);
+        $email = (string) ($this->currentUser()['email'] ?? '');
+        if ($problems = \App\Libraries\PasswordPolicy::problems($next, $email)) {
+            return $this->failValidationErrors(['new_password' => 'Password must: ' . implode('; ', $problems) . '.']);
         }
 
         $userModel = new UserModel();
@@ -1108,6 +1265,11 @@ class SuperAdmin extends ApiController
             return $this->failValidationErrors($userModel->errors());
         }
 
+        $u = $this->currentUser();
+        if (is_array($u)) {
+            $u['must_change_password'] = false;
+            session()->set('user', $u);
+        }
         $this->logActivity('updated', 'profile', $id, 'Changed their password');
 
         return $this->respond(['message' => 'Password changed']);

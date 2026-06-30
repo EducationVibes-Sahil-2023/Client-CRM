@@ -6,7 +6,9 @@ import {
   type CallDashboard, type CallRep, type CallLog, type LeadStatus, type LeadSource, type Staff, type LookupItem,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, PageHeader, Spinner, EmptyState, fmtDateTime } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+import { Card, PageHeader, Spinner, EmptyState, SkeletonStats, SkeletonBlock, fmtDateTime } from "../../admin/ui";
+import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
 import { DataTable, Pagination, Avatar, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
@@ -216,10 +218,10 @@ const isSubStatus = (s: LeadStatus) => (s.parent_ids?.length ?? 0) > 0 || !!s.pa
 
 // =============================================================================
 
-const PER_PAGE = 20;
 
 export default function ClientCalls() {
   const toast = useToast();
+  const { defaultPageSize } = useClient();
   const [tab, setTab] = useState<"dashboard" | "log">("dashboard");
 
   // ---- dashboard state ----
@@ -269,6 +271,10 @@ export default function ClientCalls() {
 
   const filtersActive = !!(fStatus.length || fSource.length || fDept.length || fOffice.length || fAssign.length);
   function clearDashFilters() { setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]); }
+  // Slide-in Filters drawer (shared across both tabs — only one is visible at a
+  // time). Counts drive the badge on each tab's Filters button.
+  const [filterOpen, setFilterOpen] = useState(false);
+  const dashCount = [fSource.length, fStatus.length, fDept.length, fOffice.length, fAssign.length].filter(Boolean).length;
 
   // Derived dashboard slices.
   const k = dash?.kpis.today;
@@ -300,6 +306,7 @@ export default function ClientCalls() {
   const [lConn, setLConn] = useState<string[]>([]);
   const [lDate, setLDate] = useState<DateRange>(EMPTY_RANGE);
   const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(defaultPageSize);
 
   useEffect(() => {
     if (tab !== "log" || logLoaded) return;
@@ -319,10 +326,13 @@ export default function ClientCalls() {
       return true;
     });
   }, [calls, search, lType, lSource, lStatus, lConn, lDate]);
-  const logPages = Math.max(1, Math.ceil(logFiltered.length / PER_PAGE));
+  const logPages = Math.max(1, Math.ceil(logFiltered.length / perPage));
   const logSafe = Math.min(page, logPages);
-  const logRows = useMemo(() => logFiltered.slice((logSafe - 1) * PER_PAGE, logSafe * PER_PAGE), [logFiltered, logSafe]);
+  const logRows = useMemo(() => logFiltered.slice((logSafe - 1) * perPage, logSafe * perPage), [logFiltered, logSafe, perPage]);
   const logActive = !!(search || lType.length || lSource.length || lStatus.length || lConn.length || rangeActive(lDate));
+  // Active filter groups (search lives in the toolbar, so it's excluded here).
+  const logCount = [lType.length, lSource.length, lStatus.length, lConn.length, rangeActive(lDate)].filter(Boolean).length;
+  function clearLogFilters() { setLType([]); setLSource([]); setLStatus([]); setLConn([]); setLDate(EMPTY_RANGE); setPage(1); }
 
   const dash2 = <span className="text-slate-400">—</span>;
   const logCols: Column<CallLog>[] = [
@@ -342,7 +352,6 @@ export default function ClientCalls() {
   const CSTATUS_OPTS: SelectOption[] = CALL_STATUSES.map((s) => ({ value: s.key, label: s.label, prefix: <span className="h-2 w-2 rounded-full" style={{ background: s.color }} /> }));
 
   const selCls = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
-  const fLabel = "text-[11px] font-medium uppercase tracking-wide text-slate-400";
 
   return (
     <>
@@ -356,28 +365,44 @@ export default function ClientCalls() {
       </div>
 
       {tab === "dashboard" ? (
-        <div className="space-y-4">
-          {/* Filters */}
-          <Card>
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1">
-                <span className={fLabel}>Date</span>
-                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={selCls} />
-              </label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Lead source</span><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Lead status</span><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Department</span><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Office</span><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Assign</span><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></label>
-              {filtersActive && <button onClick={clearDashFilters} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>}
-              <button onClick={() => { setDashLoading(true); loadDash(); }} title="Refresh" className="flex h-[38px] w-[38px] items-center justify-center rounded-lg border border-slate-300 text-slate-500 hover:bg-slate-50">
+        <div className={`space-y-4 ${filterRailPad(filterOpen)}`}>
+          {/* Filters — Date + Refresh stay in the bar; the rest live in the right-side rail. */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <FilterToggle open={filterOpen} count={dashCount} onClick={() => setFilterOpen((o) => !o)} />
+            </div>
+            <div className="flex items-center gap-2">
+              {filtersActive && <button onClick={clearDashFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>}
+              <button onClick={() => { setDashLoading(true); loadDash(); }} title="Refresh" className="flex h-[38px] w-[38px] items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-500 hover:bg-slate-50">
                 <svg className={`h-4 w-4 ${dashLoading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 2v6h-6M3 12a9 9 0 0115-6.7L21 8M3 22v-6h6M21 12a9 9 0 01-15 6.7L3 16" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </button>
             </div>
-          </Card>
+          </div>
+
+          <FilterRail
+            open={tab === "dashboard" && filterOpen}
+            onClose={() => setFilterOpen(false)}
+            onReset={clearDashFilters}
+            resetDisabled={!filtersActive}
+            onApply={() => setFilterOpen(false)}
+            applyLabel="Done"
+          >
+            <div className="space-y-1.5"><FilterLabel>Date</FilterLabel><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={`${selCls} w-full`} /></div>
+            <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>
+          </FilterRail>
 
           {dashLoading && !dash ? (
-            <Card><Spinner /></Card>
+            <div className="space-y-4">
+              <SkeletonStats count={4} />
+              <div className="grid gap-4 lg:grid-cols-2">
+                <SkeletonBlock className="h-64" />
+                <SkeletonBlock className="h-64" />
+              </div>
+            </div>
           ) : !k ? (
             <Card><EmptyState title="No call data" hint="No calls match these filters for the selected date." /></Card>
           ) : (
@@ -447,22 +472,31 @@ export default function ClientCalls() {
         </div>
       ) : (
         // ============================ CALL LOG VIEW ============================
-        <div className="space-y-4">
-          <Card>
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="flex w-44 flex-col gap-1"><span className={fLabel}>Status</span><MultiSelect ariaLabel="Status" value={lStatus} onChange={(v) => { setLStatus(v); setPage(1); }} options={CSTATUS_OPTS} placeholder="All statuses" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Type</span><MultiSelect ariaLabel="Type" value={lType} onChange={(v) => { setLType(v); setPage(1); }} options={TYPE_OPTS} placeholder="All types" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Source</span><MultiSelect ariaLabel="Source" value={lSource} onChange={(v) => { setLSource(v); setPage(1); }} options={SRC_OPTS} placeholder="All sources" searchPlaceholder="Search…" /></label>
-              <label className="flex w-40 flex-col gap-1"><span className={fLabel}>Connected</span><MultiSelect ariaLabel="Connected" value={lConn} onChange={(v) => { setLConn(v); setPage(1); }} options={CONN_OPTS} placeholder="Any" searchPlaceholder="Search…" /></label>
-              <label className="flex w-44 flex-col gap-1"><span className={fLabel}>Call date</span><DateRangeFilter ariaLabel="Call date" value={lDate} onChange={(v) => { setLDate(v); setPage(1); }} /></label>
-              {logActive && <button onClick={() => { setSearch(""); setLType([]); setLSource([]); setLStatus([]); setLConn([]); setLDate(EMPTY_RANGE); setPage(1); }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>}
-            </div>
-          </Card>
+        <div className={`space-y-4 ${filterRailPad(filterOpen)}`}>
+          {/* Filters — a Filters toggle opens the right-side rail; the search stays instant. */}
+          <FilterRail
+            open={filterOpen}
+            onClose={() => setFilterOpen(false)}
+            onReset={clearLogFilters}
+            resetDisabled={!(lType.length || lSource.length || lStatus.length || lConn.length || rangeActive(lDate))}
+            onApply={() => setFilterOpen(false)}
+            applyLabel="Done"
+          >
+            <div className="space-y-1.5"><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={lStatus} onChange={(v) => { setLStatus(v); setPage(1); }} options={CSTATUS_OPTS} placeholder="All statuses" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={lType} onChange={(v) => { setLType(v); setPage(1); }} options={TYPE_OPTS} placeholder="All types" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Source</FilterLabel><MultiSelect ariaLabel="Source" value={lSource} onChange={(v) => { setLSource(v); setPage(1); }} options={SRC_OPTS} placeholder="All sources" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Connected</FilterLabel><MultiSelect ariaLabel="Connected" value={lConn} onChange={(v) => { setLConn(v); setPage(1); }} options={CONN_OPTS} placeholder="Any" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Call date</FilterLabel><DateRangeFilter ariaLabel="Call date" value={lDate} onChange={(v) => { setLDate(v); setPage(1); }} /></div>
+          </FilterRail>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="relative w-full max-w-sm">
-              <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
-              <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search lead, number, staff…" className={`${selCls} w-full pl-9`} />
+            <div className="flex flex-1 items-center gap-2">
+              <div className="flex-shrink-0"><FilterToggle open={filterOpen} count={logCount} onClick={() => setFilterOpen((o) => !o)} /></div>
+              <div className="relative w-full max-w-sm">
+                <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
+                <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search lead, number, staff…" className={`${selCls} w-full pl-9`} />
+              </div>
+              {logActive && <button onClick={() => { setSearch(""); clearLogFilters(); }} className="flex-shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>}
             </div>
             <div className="flex items-center gap-3">
               <span className="hidden text-sm text-slate-400 sm:block">{logFiltered.length} call{logFiltered.length === 1 ? "" : "s"}</span>
@@ -480,6 +514,7 @@ export default function ClientCalls() {
               emptyTitle={logActive ? "No matching calls" : "No calls yet"}
               emptyHint={logActive ? "Try clearing or widening your filters." : "Calls appear here once your call-tracking app starts syncing."}
               page={logSafe} totalPages={logPages} onPage={setPage} total={logFiltered.length}
+              pageSize={perPage} onPageSize={(n) => { setPerPage(n); setPage(1); }}
             />
           ) : (
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -488,7 +523,7 @@ export default function ClientCalls() {
               ) : (
                 <>
                   <CallActivityList calls={logRows} />
-                  {logPages > 1 && <Pagination page={logSafe} totalPages={logPages} onPage={setPage} total={logFiltered.length} align="right" />}
+                  {logPages > 1 && <Pagination page={logSafe} totalPages={logPages} onPage={setPage} total={logFiltered.length} align="right" pageSize={perPage} onPageSize={(n) => { setPerPage(n); setPage(1); }} />}
                 </>
               )}
             </div>

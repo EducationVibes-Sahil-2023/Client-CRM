@@ -5,7 +5,7 @@ import Link from "next/link";
 import { adminUpload, getLanding, saveLanding, type Landing } from "../../lib/admin";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, PageHeader, Spinner } from "../ui";
+import { Card, PageHeader, SkeletonText } from "../ui";
 
 export default function LandingPage() {
   const toast = useToast();
@@ -45,7 +45,7 @@ export default function LandingPage() {
     }
   }
 
-  if (!data) return (<><PageHeader title="Landing Page" /><Card><Spinner /></Card></>);
+  if (!data) return (<><PageHeader title="Landing Page" /><Card><SkeletonText lines={6} /></Card></>);
 
   return (
     <>

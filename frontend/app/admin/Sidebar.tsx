@@ -61,7 +61,7 @@ export default function Sidebar() {
         } ${collapsed ? "justify-center" : ""}`}
       >
         {active && <span className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-indigo-600" />}
-        <svg className={`h-5 w-5 flex-shrink-0 ${active ? "text-indigo-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+        <svg className={`anim-ico h-5 w-5 flex-shrink-0 ${active ? "text-indigo-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
           <path d={icons[item.icon]} strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         {!collapsed && <span className="truncate">{item.label}</span>}
@@ -94,7 +94,7 @@ export default function Sidebar() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-2">
+        <nav className="no-scrollbar flex-1 space-y-1 overflow-y-auto px-3 py-2">
           {mainNav.map((item) => <Item key={item.href} item={item} />)}
 
           {!collapsed && (

@@ -1,7 +1,38 @@
-import { API_URL, type SessionUser } from "./api";
+import { API_URL, downloadFile, redirectToLogin, type SessionUser } from "./api";
+
+const today = () => new Date().toISOString().slice(0, 10);
+/** Download a SQL dump of the main (shared) database. */
+export const backupMainDb = () => downloadFile("/superadmin/backup/main", `backup-main-${today()}.sql`);
+/** Download a SQL dump of one client's tenant database. */
+export const backupClientDb = (id: number, dbName: string) =>
+  downloadFile(`/superadmin/clients/${id}/backup`, `backup-${dbName}-${today()}.sql`);
+
+// ---- automatic (scheduled) backups ----
+export interface BackupSettings {
+  enabled: boolean;
+  frequency: "daily" | "weekly" | "monthly";
+  retention_days: number;
+  scope: "main" | "all";
+  last_run: string | null;
+  last_status: string | null;
+}
+export interface BackupFile { name: string; size: number; created: string }
+
+export const getBackupSettings = () =>
+  adminGet<{ settings: BackupSettings; files: BackupFile[]; frequencies: string[] }>("/backup-settings");
+export const saveBackupSettings = (b: Partial<BackupSettings>) =>
+  adminPost<{ settings: BackupSettings; files: BackupFile[] }>("/backup-settings", b as Record<string, unknown>);
+export const runBackupNow = (scope?: "main" | "all") =>
+  adminPost<{ status: string; errors: string[]; settings: BackupSettings; files: BackupFile[] }>("/backup-run", scope ? { scope } : {});
+export const downloadBackupFile = (name: string) =>
+  downloadFile(`/superadmin/backup-files/${encodeURIComponent(name)}`, name);
 
 // ---- low-level helpers (session-cookie auth) ----
 async function handle(res: Response) {
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error("Your session has expired. Please sign in again.");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msgs = (data as Record<string, unknown>)?.messages;
@@ -111,6 +142,10 @@ export const updateClient = (id: number, body: Partial<Client>) =>
 export const deleteClient = (id: number) =>
   adminPost<{ message: string }>(`/clients/${id}/delete`);
 
+/** Impersonate a client's admin (super-admin "login as client"). */
+export const loginAsClient = (id: number) =>
+  adminPost<{ ok: boolean }>(`/clients/${id}/login-as`);
+
 // ---- per-client feature entitlements (checkboxes + numeric quotas) ----
 export interface ClientFeatureItem {
   key: string;
@@ -135,6 +170,7 @@ export const FEATURE_CATALOG: { key: string; label: string; core: boolean; quota
   { key: "email_config", label: "Email setup", core: false, quota: null },
   { key: "notifications", label: "Notifications", core: true, quota: null },
   { key: "settings", label: "Settings", core: true, quota: null },
+  { key: "web_push", label: "Web push notifications", core: false, quota: null },
 ];
 
 // ---- per-client database schema viewer ----

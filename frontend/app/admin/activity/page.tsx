@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getActivity, type ActivityItem, type ActivityStats } from "../../lib/admin";
-import { EmptyState, PageHeader, Spinner, fmtDate, fmtDateTime, timeAgo } from "../ui";
+import { EmptyState, PageHeader, SkeletonBlock, fmtDate, fmtDateTime, timeAgo } from "../ui";
 import { APP_TZ, parseServer } from "../../lib/datetime";
 
 type Filter = "all" | "created" | "updated" | "deleted" | "login";
@@ -167,7 +167,9 @@ export default function ActivityPage() {
       </div>
 
       {loading ? (
-        <Spinner />
+        <div className="space-y-3">
+          {Array.from({ length: 6 }).map((_, i) => <SkeletonBlock key={i} className="h-16" />)}
+        </div>
       ) : items.length === 0 ? (
         <EmptyState title="No activity yet" hint="Actions performed by super admins will show up here." />
       ) : (

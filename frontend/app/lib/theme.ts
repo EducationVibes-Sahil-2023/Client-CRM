@@ -8,16 +8,81 @@
 export type ThemeMode = "light" | "dark" | "system";
 export type Density = "comfortable" | "compact";
 export type SidebarStyle = "subtle" | "solid";
+export type FontFamily = "inter" | "poppins" | "slab" | "mono" | "system";
+export type FontSize = "sm" | "base" | "lg";
 
 export interface Branding {
   brand_color: string;
   app_name: string;
   app_tagline: string;
   logo_url: string;
+  /** Browser tab icon (favicon) — a separate upload from the sidebar logo. */
+  favicon_url: string;
+  /** Sidebar logo box size in px (stored as strings). Supports wide logos. */
+  logo_width: string;
+  logo_height: string;
   theme_mode: ThemeMode;
   density: Density;
   sidebar_style: SidebarStyle;
   menu_order: string[];
+  /** Per-nav-key custom label overrides (key → label). */
+  menu_labels: Record<string, string>;
+  /** Per-nav-key custom icon overrides (key → icon name). */
+  menu_icons: Record<string, string>;
+  /** Default rows-per-page for every data table (stored as a string, e.g. "15"). */
+  default_page_size: string;
+  /** Typeface for the whole client dashboard. */
+  font_family: FontFamily;
+  /** Base text size for the whole client dashboard. */
+  font_size: FontSize;
+}
+
+/** Selectable typefaces. `stack` references the next/font CSS vars set on <html>. */
+export const FONT_FAMILY_OPTIONS: { value: FontFamily; label: string; stack: string }[] = [
+  { value: "inter", label: "Inter", stack: "var(--font-inter), ui-sans-serif, system-ui, sans-serif" },
+  { value: "poppins", label: "Poppins", stack: "var(--font-poppins), ui-sans-serif, system-ui, sans-serif" },
+  { value: "slab", label: "Slab", stack: "var(--font-slab), Georgia, 'Times New Roman', serif" },
+  { value: "mono", label: "Mono", stack: "var(--font-mono-custom), ui-monospace, 'Courier New', monospace" },
+  { value: "system", label: "System", stack: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" },
+];
+
+/** Base font sizes — scale the whole dashboard's relative (rem) text. */
+export const FONT_SIZE_OPTIONS: { value: FontSize; label: string; px: string }[] = [
+  { value: "sm", label: "Small", px: "15px" },
+  { value: "base", label: "Default", px: "16px" },
+  { value: "lg", label: "Large", px: "18px" },
+];
+
+/** The CSS font-family stack for a saved font_family (falls back to Inter). */
+export function fontStack(f: FontFamily | undefined): string {
+  return FONT_FAMILY_OPTIONS.find((o) => o.value === f)?.stack ?? FONT_FAMILY_OPTIONS[0].stack;
+}
+
+/** The base font-size (px) for a saved font_size (falls back to 16px). */
+export function fontSizePx(s: FontSize | undefined): string {
+  return FONT_SIZE_OPTIONS.find((o) => o.value === s)?.px ?? "16px";
+}
+
+/** Logo box bounds (px). Width allows wide logos; height stays sidebar-friendly. */
+export const LOGO_WIDTH_RANGE = { min: 24, max: 220, default: 40 } as const;
+export const LOGO_HEIGHT_RANGE = { min: 24, max: 80, default: 40 } as const;
+
+/** Clamp the stored logo width/height into a safe px range (falls back to 40×40). */
+export function resolveLogoSize(width: string | number | undefined, height: string | number | undefined): { width: number; height: number } {
+  const clamp = (v: string | number | undefined, r: { min: number; max: number; default: number }) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.min(r.max, Math.max(r.min, Math.round(n))) : r.default;
+  };
+  return { width: clamp(width, LOGO_WIDTH_RANGE), height: clamp(height, LOGO_HEIGHT_RANGE) };
+}
+
+/** Allowed "rows per page" values, shared by the picker and table page-size menus. */
+export const PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100] as const;
+
+/** Parse a stored default_page_size into a valid number, falling back to 15. */
+export function resolvePageSize(value: string | number | null | undefined): number {
+  const n = Number(value);
+  return (PAGE_SIZE_OPTIONS as readonly number[]).includes(n) ? n : 15;
 }
 
 export const DEFAULT_BRANDING: Branding = {
@@ -25,10 +90,18 @@ export const DEFAULT_BRANDING: Branding = {
   app_name: "My CRM",
   app_tagline: "Client Panel",
   logo_url: "",
+  favicon_url: "",
+  logo_width: "40",
+  logo_height: "40",
   theme_mode: "light",
   density: "comfortable",
   sidebar_style: "subtle",
   menu_order: [],
+  menu_labels: {},
+  menu_icons: {},
+  default_page_size: "15",
+  font_family: "inter",
+  font_size: "base",
 };
 
 // The Tailwind shade stops we generate. The picked colour anchors 600 (the

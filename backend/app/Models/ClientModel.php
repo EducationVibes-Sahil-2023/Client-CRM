@@ -23,6 +23,15 @@ class ClientModel extends BaseModel
     /** Allowed client lifecycle statuses. */
     public const STATUSES = ['active', 'trial', 'suspended', 'inactive'];
 
+    /** Statuses that may sign in / use the app ('suspended' & 'inactive' are blocked). */
+    public const ACTIVE_STATUSES = ['active', 'trial'];
+
+    /** Whether a client status currently permits its users to access the app. */
+    public static function statusAllowsAccess(?string $status): bool
+    {
+        return in_array((string) $status, self::ACTIVE_STATUSES, true);
+    }
+
     protected $validationRules = [
         'name'        => 'required|min_length[2]|max_length[255]',
         'db_name'     => 'required|alpha_dash|is_unique[clients.db_name,id,{id}]',

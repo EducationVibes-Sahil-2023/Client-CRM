@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getOverview, type Overview } from "../lib/admin";
 import { AreaChart, DonutChart, BarChart } from "./Charts";
-import { Card, PageHeader, Spinner, Badge, fmtDate, EmptyState } from "./ui";
+import { Card, PageHeader, SkeletonStats, SkeletonBlock, Badge, fmtDate, EmptyState } from "./ui";
 
 const planColors: Record<string, string> = {
   starter: "#94a3b8",
@@ -67,7 +67,13 @@ export default function Dashboard() {
     return (
       <>
         <PageHeader title="Dashboard" subtitle="Overview of your platform" />
-        <Card><Spinner /></Card>
+        <div className="space-y-6">
+          <SkeletonStats count={4} />
+          <div className="grid gap-6 lg:grid-cols-2">
+            <SkeletonBlock className="h-72" />
+            <SkeletonBlock className="h-72" />
+          </div>
+        </div>
       </>
     );
   }

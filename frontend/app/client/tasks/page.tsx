@@ -11,15 +11,24 @@ import {
   getTaskActivity,
   getTaskComments,
   getTasks,
+  getTaskSetup,
+  saveTaskFieldSettings,
   updateTask,
+  TASK_REQUIRABLE_FIELDS,
   type ClientActivity,
   type Staff,
   type Task,
   type TaskComment,
+  type TaskCustomField,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
-import { ConfirmDialog, Drawer, PageHeader, fmtDate, fmtDateTime, timeAgo } from "../../admin/ui";
+import { ConfirmDialog, Drawer, PageHeader, SkeletonBlock, fmtDate, fmtDateTime, timeAgo } from "../../admin/ui";
 import { useClient } from "../ClientContext";
+import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
+import { FieldSetupDrawer } from "../FieldSetupDrawer";
+import RichTextEditor from "../../admin/RichTextEditor";
+import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
+import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
 
 interface Draft {
   id?: number;
@@ -31,8 +40,46 @@ interface Draft {
   priority: string;
   type: string;
   status: string;
+  /** Values for admin-defined custom fields, keyed by field key. */
+  custom: Record<string, string>;
 }
-const blank: Draft = { title: "", description: "", assigned_to: "", start_date: "", due_date: "", priority: "medium", type: "task", status: "open" };
+const blank: Draft = { title: "", description: "", assigned_to: "", start_date: "", due_date: "", priority: "medium", type: "task", status: "open", custom: {} };
+
+/** Plain-text from a rich-text HTML string (for previews + "is it empty" checks). */
+const stripHtml = (h: string) => h.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+
+const STATUS_OPTIONS: SelectOption[] = [
+  { value: "open", label: "Backlog" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "in_review", label: "In Review" },
+  { value: "done", label: "Done" },
+];
+
+// ---- Filters (a draft the user edits in the rail + the applied set that
+// actually filters; synced on "Apply", mirroring the Announcements section). ----
+interface TaskFilters {
+  assignee: string[];
+  type: string[];
+  priority: string[];
+  due: DateRange;
+}
+const BLANK_TASK_FILTERS: TaskFilters = { assignee: [], type: [], priority: [], due: EMPTY_RANGE };
+const TYPE_OPTIONS: SelectOption[] = [
+  { value: "feature", label: "Feature" },
+  { value: "bug", label: "Bug" },
+  { value: "improvement", label: "Improvement" },
+  { value: "task", label: "Task" },
+];
+const PRIORITY_OPTIONS: SelectOption[] = [
+  { value: "urgent", label: "Urgent" },
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+];
+const taskFiltersActive = (f: TaskFilters): boolean =>
+  f.assignee.length > 0 || f.type.length > 0 || f.priority.length > 0 || rangeActive(f.due);
+const countTaskFilters = (f: TaskFilters): number =>
+  [f.assignee.length, f.type.length, f.priority.length, rangeActive(f.due)].filter(Boolean).length;
 const field = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
 
 const priorityTone: Record<string, string> = {
@@ -112,11 +159,18 @@ function initials(name: string) {
 
 export default function TasksPage() {
   const toast = useToast();
-  const { refreshNotifications } = useClient();
+  const { refreshNotifications, isAdmin, can } = useClient();
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // Admin-configured form fields: which built-ins are mandatory + custom fields.
+  const [requiredFields, setRequiredFields] = useState<Set<string>>(new Set());
+  const [customFields, setCustomFields] = useState<TaskCustomField[]>([]);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const canManageFields = isAdmin || can("tasks", "update");
 
   // Delete confirmation popup state.
   const [confirmDel, setConfirmDel] = useState<Task | null>(null);
@@ -130,10 +184,13 @@ export default function TasksPage() {
   const [posting, setPosting] = useState(false);
 
   const [view, setView] = useState<"board" | "list">("board");
-  const [query, setQuery] = useState("");
-  const [assignee, setAssignee] = useState("");
-  const [priority, setPriority] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
+  // Seed from a global-search deep link (?q=...) when present.
+  const [query, setQuery] = useState(() => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("q") ?? "" : ""));
+  // `filters` is the draft edited in the rail; `applied` is what filters the board/list.
+  const [filters, setFilters] = useState<TaskFilters>(BLANK_TASK_FILTERS);
+  const [applied, setApplied] = useState<TaskFilters>(BLANK_TASK_FILTERS);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const setFilter = <K extends keyof TaskFilters>(key: K, value: TaskFilters[K]) => setFilters((f) => ({ ...f, [key]: value }));
   const [listStatus, setListStatus] = useState<"all" | "open" | "in_progress" | "in_review" | "done" | "overdue">("all");
   const [dragId, setDragId] = useState<number | null>(null);
 
@@ -141,7 +198,10 @@ export default function TasksPage() {
     getTasks().then((d) => setTasks(d.tasks)).catch(() => setTasks([]));
     getStaff().then((d) => setStaff(d.staff)).catch(() => {});
   }
-  useEffect(load, []);
+  function loadSetup() {
+    getTaskSetup().then((d) => { setRequiredFields(new Set(d.required_fields ?? [])); setCustomFields(d.custom_fields ?? []); }).catch(() => {});
+  }
+  useEffect(() => { load(); loadSetup(); }, []);
 
   const summary = useMemo(() => {
     const t = tasks ?? [];
@@ -158,19 +218,43 @@ export default function TasksPage() {
     const q = query.trim().toLowerCase();
     return (t: Task) =>
       (!q || t.title.toLowerCase().includes(q) || (t.description ?? "").toLowerCase().includes(q)) &&
-      (!assignee || String(t.assigned_to ?? "") === assignee) &&
-      (!priority || t.priority === priority) &&
-      (!typeFilter || t.type === typeFilter);
-  }, [query, assignee, priority, typeFilter]);
+      (applied.assignee.length === 0 || applied.assignee.includes(String(t.assigned_to ?? ""))) &&
+      (applied.type.length === 0 || applied.type.includes(t.type)) &&
+      (applied.priority.length === 0 || applied.priority.includes(t.priority)) &&
+      inDateRange(t.due_date, applied.due);
+  }, [query, applied]);
+
+  const appliedFilterCount = useMemo(() => countTaskFilters(applied), [applied]);
+  const draftDirty = useMemo(() => JSON.stringify(filters) !== JSON.stringify(applied), [filters, applied]);
+  const assigneeOptions = useMemo<SelectOption[]>(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
+  function applyFilters() { setApplied(filters); }
+  function clearFilters() { setFilters(BLANK_TASK_FILTERS); setApplied(BLANK_TASK_FILTERS); setQuery(""); }
 
   const filtered = useMemo(() => (tasks ?? []).filter(matches), [tasks, matches]);
 
+  // Validate the title + any admin-mandated built-in and custom fields.
+  function validate(d: Draft): Record<string, string> {
+    const e: Record<string, string> = {};
+    if (d.title.trim().length < 2) e.title = "Task title is required (min 2 characters).";
+    for (const f of TASK_REQUIRABLE_FIELDS) {
+      const raw = String((d as unknown as Record<string, string>)[f.key] ?? "");
+      const val = f.key === "description" ? stripHtml(raw) : raw.trim();
+      if (requiredFields.has(f.key) && !val) e[f.key] = `${f.label} is required.`;
+    }
+    for (const f of customFields) {
+      if (f.required && !String(d.custom[f.key] ?? "").trim()) e[`custom_${f.key}`] = `${f.label} is required.`;
+    }
+    return e;
+  }
+
   async function save() {
     if (!draft) return;
-    if (draft.title.trim().length < 2) { toast.warning("Enter a task title."); return; }
+    const e = validate(draft);
+    setErrors(e);
+    if (Object.keys(e).length) { toast.warning("Please fix the highlighted fields."); return; }
     setSaving(true);
     try {
-      const body = { title: draft.title, description: draft.description, assigned_to: draft.assigned_to ? Number(draft.assigned_to) : 0, start_date: draft.start_date, due_date: draft.due_date, priority: draft.priority, type: draft.type, status: draft.status };
+      const body = { title: draft.title, description: draft.description, assigned_to: draft.assigned_to ? Number(draft.assigned_to) : 0, start_date: draft.start_date, due_date: draft.due_date, priority: draft.priority, type: draft.type, status: draft.status, custom_fields: draft.custom };
       if (draft.id) { await updateTask(draft.id, body); toast.success("Task updated."); }
       else { await createTask(body); toast.success("Task created."); }
       setDraft(null);
@@ -217,8 +301,10 @@ export default function TasksPage() {
   }
 
   function editDraft(t: Task) {
-    setDraft({ id: t.id, title: t.title, description: t.description ?? "", assigned_to: t.assigned_to ? String(t.assigned_to) : "", start_date: t.start_date ? t.start_date.slice(0, 10) : "", due_date: t.due_date ? t.due_date.slice(0, 10) : "", priority: t.priority, type: t.type || "task", status: t.status });
+    setErrors({});
+    setDraft({ id: t.id, title: t.title, description: t.description ?? "", assigned_to: t.assigned_to ? String(t.assigned_to) : "", start_date: t.start_date ? t.start_date.slice(0, 10) : "", due_date: t.due_date ? t.due_date.slice(0, 10) : "", priority: t.priority, type: t.type || "task", status: t.status, custom: { ...(t.custom_fields ?? {}) } });
   }
+  function newDraft() { setErrors({}); setDraft({ ...blank, custom: {} }); }
 
   // ---- detail drawer ----
   function openDetail(t: Task) {
@@ -272,7 +358,17 @@ export default function TasksPage() {
       <PageHeader
         title="Task Management"
         subtitle="Assign, track and complete work across your team"
-        action={<button onClick={() => setDraft({ ...blank })} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>New task</button>}
+        action={
+          <div className="flex items-center gap-2">
+            {canManageFields && (
+              <button onClick={() => setSetupOpen(true)} title="Configure task form fields" className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M10.3 4.3a2 2 0 013.4 0l.5.9 1-.2a2 2 0 012.4 2.4l-.2 1 .9.5a2 2 0 010 3.4l-.9.5.2 1a2 2 0 01-2.4 2.4l-1-.2-.5.9a2 2 0 01-3.4 0l-.5-.9-1 .2a2 2 0 01-2.4-2.4l.2-1-.9-.5a2 2 0 010-3.4l.9-.5-.2-1a2 2 0 012.4-2.4l1 .2z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
+                Form setup
+              </button>
+            )}
+            {can("tasks", "create") && <button onClick={newDraft} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>New task</button>}
+          </div>
+        }
       />
 
       {/* Stat cards */}
@@ -285,24 +381,18 @@ export default function TasksPage() {
         ))}
       </div>
 
-      {/* Toolbar */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      {/* Toolbar — instant search + a Filters panel (assignee / type / priority /
+          due date), mirroring the Announcements section. Nothing applies until
+          “Apply”; the search box filters as you type. */}
+      <div className={`mb-4 flex flex-wrap items-center gap-2 ${filterRailPad(filterOpen)}`}>
         <div className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2">
           <svg className="h-4 w-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.2-3.2" strokeLinecap="round" /></svg>
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search tasks" className="w-40 bg-transparent text-sm focus:outline-none" />
         </div>
-        <select value={assignee} onChange={(e) => setAssignee(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none">
-          <option value="">All assignees</option>
-          {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none">
-          <option value="">All types</option>
-          <option value="feature">Feature</option><option value="bug">Bug</option><option value="improvement">Improvement</option><option value="task">Task</option>
-        </select>
-        <select value={priority} onChange={(e) => setPriority(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none">
-          <option value="">All priorities</option>
-          <option value="urgent">Urgent</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
-        </select>
+        <FilterToggle open={filterOpen} count={appliedFilterCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+        {(taskFiltersActive(applied) || query.trim()) && (
+          <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>
+        )}
         <div className="ml-auto flex rounded-lg border border-slate-300 bg-white p-0.5">
           {(["board", "list"] as const).map((v) => (
             <button key={v} onClick={() => setView(v)} className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize transition ${view === v ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{v}</button>
@@ -310,8 +400,12 @@ export default function TasksPage() {
         </div>
       </div>
 
+      <div className={filterRailPad(filterOpen)}>
+
       {tasks === null ? (
-        <div className="py-20 text-center text-slate-400">Loading…</div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => <SkeletonBlock key={i} className="h-80" />)}
+        </div>
       ) : view === "board" ? (
         <>
           <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -357,7 +451,7 @@ export default function TasksPage() {
                             <span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold capitalize ${priorityTone[t.priority] ?? priorityTone.medium}`}>{t.priority}</span>
                           </div>
                           <h4 className={`text-[15px] font-semibold leading-snug ${t.status === "done" ? "text-slate-400 line-through" : "text-slate-900"}`}>{t.title}</h4>
-                          {t.description && <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-slate-500">{t.description}</p>}
+                          {stripHtml(t.description ?? "") && <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-slate-500">{stripHtml(t.description ?? "")}</p>}
                           {tb && (
                             <div className="mt-3">
                               <div className="mb-1 flex items-center justify-between">
@@ -416,6 +510,35 @@ export default function TasksPage() {
           onDelete={remove}
         />
       )}
+      </div>
+
+      {/* ---- Filters panel (assignee / type / priority / due date) ---- */}
+      <FilterRail
+        open={filterOpen}
+        onClose={() => setFilterOpen(false)}
+        dirty={draftDirty}
+        onReset={() => setFilters(BLANK_TASK_FILTERS)}
+        resetDisabled={!taskFiltersActive(filters)}
+        onApply={applyFilters}
+        applyDisabled={!draftDirty}
+      >
+        <div className="space-y-1.5">
+          <FilterLabel>Assignee</FilterLabel>
+          <MultiSelect ariaLabel="Filter by assignee" value={filters.assignee} onChange={(v) => setFilter("assignee", v)} options={assigneeOptions} placeholder="Anyone" searchPlaceholder="Search people…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Type</FilterLabel>
+          <MultiSelect ariaLabel="Filter by type" value={filters.type} onChange={(v) => setFilter("type", v)} options={TYPE_OPTIONS} placeholder="Any type" searchPlaceholder="Search…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Priority</FilterLabel>
+          <MultiSelect ariaLabel="Filter by priority" value={filters.priority} onChange={(v) => setFilter("priority", v)} options={PRIORITY_OPTIONS} placeholder="Any priority" searchPlaceholder="Search…" />
+        </div>
+        <div className="space-y-1.5">
+          <FilterLabel>Due date</FilterLabel>
+          <DateRangeFilter ariaLabel="Due date" value={filters.due} onChange={(v) => setFilter("due", v)} />
+        </div>
+      </FilterRail>
 
       {/* ---- Create / edit drawer ---- */}
       <Drawer
@@ -437,42 +560,83 @@ export default function TasksPage() {
           </div>
         ) : undefined}
       >
-        {draft && (
+        {draft && (() => {
+          const star = (key: string) => requiredFields.has(key) ? <span className="text-rose-500"> *</span> : null;
+          const errCls = (k: string) => errors[k] ? "ring-2 ring-red-500/30" : "";
+          const setC = (key: string, v: string) => setDraft({ ...draft, custom: { ...draft.custom, [key]: v } });
+          const assigneeFormOpts: SelectOption[] = [{ value: "", label: "Unassigned" }, ...staff.map((s) => ({ value: String(s.id), label: s.name }))];
+          return (
           <div className="space-y-3">
-            <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="Task title *" className={field} />
-            <textarea value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} placeholder="Description" rows={3} className={field} />
+            <div>
+              <span className="mb-1 block text-sm font-medium text-slate-600">Title<span className="text-rose-500"> *</span></span>
+              <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="Task title" className={`${field} ${errCls("title")}`} />
+              {errors.title && <p className="mt-1 text-xs text-rose-600">{errors.title}</p>}
+            </div>
+            <div>
+              <span className="mb-1 block text-sm font-medium text-slate-600">Description{star("description")}</span>
+              <RichTextEditor key={`desc-${draft.id ?? "new"}`} initialHTML={draft.description} onChange={(html) => setDraft((d) => d && { ...d, description: html })} placeholder="Describe the work…" minHeight={140} />
+              {errors.description && <p className="mt-1 text-xs text-rose-600">{errors.description}</p>}
+            </div>
             <div className="grid grid-cols-2 gap-3">
-              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Type</span>
-                <select value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} className={field}>
-                  <option value="task">Task</option><option value="feature">Feature</option><option value="bug">Bug</option><option value="improvement">Improvement</option>
-                </select>
+              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Type{star("type")}</span>
+                <SearchSelect ariaLabel="Type" value={draft.type} onChange={(v) => setDraft({ ...draft, type: v })} options={TYPE_OPTIONS} placeholder="— Select —" searchPlaceholder="Search…" className={errCls("type")} />
               </label>
-              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Priority</span>
-                <select value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: e.target.value })} className={field}>
-                  <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="urgent">Urgent</option>
-                </select>
+              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Priority{star("priority")}</span>
+                <SearchSelect ariaLabel="Priority" value={draft.priority} onChange={(v) => setDraft({ ...draft, priority: v })} options={PRIORITY_OPTIONS} placeholder="— Select —" searchPlaceholder="Search…" className={errCls("priority")} />
               </label>
-              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Start date</span>
-                <input type="date" value={draft.start_date} onChange={(e) => setDraft({ ...draft, start_date: e.target.value })} className={field} />
+              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Start date{star("start_date")}</span>
+                <input type="date" value={draft.start_date} onChange={(e) => setDraft({ ...draft, start_date: e.target.value })} className={`${field} ${errCls("start_date")}`} />
               </label>
-              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Due date</span>
-                <input type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} className={field} />
+              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Due date{star("due_date")}</span>
+                <input type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} className={`${field} ${errCls("due_date")}`} />
               </label>
-              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Assign to</span>
-                <select value={draft.assigned_to} onChange={(e) => setDraft({ ...draft, assigned_to: e.target.value })} className={field}>
-                  <option value="">Unassigned</option>
-                  {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
+              <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Assign to{star("assigned_to")}</span>
+                <SearchSelect ariaLabel="Assignee" value={draft.assigned_to} onChange={(v) => setDraft({ ...draft, assigned_to: v })} options={assigneeFormOpts} placeholder="Unassigned" searchPlaceholder="Search team…" className={errCls("assigned_to")} />
               </label>
               <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Status</span>
-                <select value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value })} className={field}>
-                  <option value="open">Backlog</option><option value="in_progress">In Progress</option><option value="in_review">In Review</option><option value="done">Done</option>
-                </select>
+                <SearchSelect ariaLabel="Status" value={draft.status} onChange={(v) => setDraft({ ...draft, status: v })} options={STATUS_OPTIONS} placeholder="— Select —" searchPlaceholder="Search…" />
               </label>
             </div>
+
+            {/* Admin-defined custom fields */}
+            {customFields.length > 0 && (
+              <div className="space-y-3 border-t border-slate-100 pt-3">
+                {customFields.map((f) => {
+                  const ek = `custom_${f.key}`;
+                  const val = draft.custom[f.key] ?? "";
+                  return (
+                    <div key={f.key}>
+                      <span className="mb-1 block text-sm font-medium text-slate-600">{f.label}{f.required && <span className="text-rose-500"> *</span>}</span>
+                      {f.type === "textarea" ? (
+                        <textarea value={val} onChange={(e) => setC(f.key, e.target.value)} rows={3} className={`${field} ${errCls(ek)}`} />
+                      ) : f.type === "select" ? (
+                        <SearchSelect ariaLabel={f.label} value={val} onChange={(v) => setC(f.key, v)} options={[{ value: "", label: "— Select —" }, ...f.options.map((o) => ({ value: o, label: o }))]} placeholder="— Select —" searchPlaceholder="Search…" className={errCls(ek)} />
+                      ) : (
+                        <input type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"} value={val} onChange={(e) => setC(f.key, e.target.value)} className={`${field} ${errCls(ek)}`} />
+                      )}
+                      {errors[ek] && <p className="mt-1 text-xs text-rose-600">{errors[ek]}</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-        )}
+          );
+        })()}
       </Drawer>
+
+      {/* ---- Task form setup (admin) — mandatory toggles + custom field builder ---- */}
+      <FieldSetupDrawer
+        open={setupOpen}
+        onClose={() => setSetupOpen(false)}
+        title="Task form fields"
+        subtitle="Choose mandatory fields and build your own custom fields"
+        requirableFields={TASK_REQUIRABLE_FIELDS}
+        required={requiredFields}
+        customFields={customFields}
+        onSave={saveTaskFieldSettings}
+        onSaved={(req, custom) => { setRequiredFields(new Set(req)); setCustomFields(custom); }}
+      />
 
       {/* ---- Task detail drawer ---- */}
       <Drawer
@@ -482,7 +646,7 @@ export default function TasksPage() {
         width="max-w-2xl"
         footer={detail ? (
           <div className="flex items-center justify-between gap-2">
-            <button onClick={() => remove(detail)} className="rounded-lg px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50">Delete</button>
+            {can("tasks", "delete") ? <button onClick={() => remove(detail)} className="rounded-lg px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50">Delete</button> : <span />}
             <div className="flex gap-2">
               <button onClick={() => setDetail(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
               <button onClick={() => editDraft(detail)} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700">Edit details</button>
@@ -501,7 +665,7 @@ export default function TasksPage() {
                 <span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold capitalize ${priorityTone[detail.priority] ?? priorityTone.medium}`}>{detail.priority}</span>
               </div>
               <h2 className="mt-2 text-xl font-bold text-slate-900">{detail.title}</h2>
-              {detail.description && <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-500">{detail.description}</p>}
+              {stripHtml(detail.description ?? "") && <div className="rte-content mt-1.5 text-sm leading-relaxed text-slate-600" dangerouslySetInnerHTML={{ __html: detail.description ?? "" }} />}
             </div>
 
             {/* Stage stepper */}
@@ -551,6 +715,18 @@ export default function TasksPage() {
               )}
             </dl>
 
+            {/* Custom fields */}
+            {customFields.some((f) => (detail.custom_fields?.[f.key] ?? "") !== "") && (
+              <dl className="grid grid-cols-2 gap-4 rounded-xl border border-slate-100 p-4 text-sm">
+                {customFields.filter((f) => (detail.custom_fields?.[f.key] ?? "") !== "").map((f) => (
+                  <div key={f.key} className={f.type === "textarea" ? "col-span-2" : ""}>
+                    <dt className="text-slate-400">{f.label}</dt>
+                    <dd className="mt-0.5 whitespace-pre-wrap font-medium text-slate-800">{detail.custom_fields?.[f.key]}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+
             {/* Comments */}
             <section>
               <h3 className="mb-3 text-sm font-semibold text-slate-900">Comments <span className="text-slate-400">({comments.length})</span></h3>
@@ -564,9 +740,11 @@ export default function TasksPage() {
                         <span className="text-sm font-semibold text-slate-800">{c.author_name || "Member"}</span>
                         <span className="flex items-center gap-2">
                           <span className="text-[11px] text-slate-400" title={fmtDateTime(c.created_at)}>{timeAgo(c.created_at)}</span>
-                          <button onClick={() => removeComment(c)} className="text-slate-300 opacity-0 transition hover:text-red-500 group-hover:opacity-100" title="Delete">
-                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" strokeLinecap="round" /></svg>
-                          </button>
+                          {can("tasks", "update") && (
+                            <button onClick={() => removeComment(c)} className="text-slate-300 opacity-0 transition hover:text-red-500 group-hover:opacity-100" title="Delete">
+                              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" strokeLinecap="round" /></svg>
+                            </button>
+                          )}
                         </span>
                       </div>
                       <p className="mt-0.5 whitespace-pre-wrap break-words text-sm text-slate-600">{c.body}</p>

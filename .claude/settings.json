@@ -17,7 +17,31 @@
       "Bash(/c/xampp/mysql/bin/mysql.exe -u root -e \"SELECT version, class FROM crm_main.migrations WHERE class LIKE '%SoftDelete%' OR class LIKE '%AddTask%' OR class LIKE '%AddAsset%';\")",
       "Bash(/c/xampp/php/php.exe -r '$m=@new mysqli\\(\"127.0.0.1\",\"root\",\"\",\"crm_main\"\\); if\\($m->connect_errno\\){echo \"noconn\";exit;} $r=$m->query\\(\"SHOW COLUMNS FROM announcements LIKE \\\\\"deleted_at\\\\\"\"\\); echo \\($r&&$r->num_rows\\)?\"main.deleted_at OK\\\\n\":\"main.deleted_at MISSING\\\\n\"; $r=$m->query\\(\"SELECT id FROM clients LIMIT 1\"\\); if\\($r&&$row=$r->fetch_assoc\\(\\)\\){echo \"client #\".$row[\"id\"].\" exists\\\\n\";}')",
       "Bash(/c/xampp/php/php.exe -r ' *)",
-      "Bash(/c/xampp/mysql/bin/mysql -u root -e \"SELECT 'main' AS db, COUNT\\(*\\) AS has_deleted_at FROM information_schema.columns WHERE table_schema='crm_main' AND table_name='client_tasks' AND column_name='deleted_at' UNION ALL SELECT 'tenant', COUNT\\(*\\) FROM information_schema.columns WHERE table_schema='crm_education_vibes' AND table_name='client_tasks' AND column_name='deleted_at';\")"
+      "Bash(/c/xampp/mysql/bin/mysql -u root -e \"SELECT 'main' AS db, COUNT\\(*\\) AS has_deleted_at FROM information_schema.columns WHERE table_schema='crm_main' AND table_name='client_tasks' AND column_name='deleted_at' UNION ALL SELECT 'tenant', COUNT\\(*\\) FROM information_schema.columns WHERE table_schema='crm_education_vibes' AND table_name='client_tasks' AND column_name='deleted_at';\")",
+      "Bash(grep -nA20 \"public function login\" app/Controllers/Auth.php)",
+      "Bash(npx --no-install playwright --version)",
+      "Bash(timeout 12 npm view lucide-react version)",
+      "Bash(timeout 180 npm install lucide-react)",
+      "Bash(node -e \"console.log\\(require\\('lucide-react/package.json'\\).version\\)\")",
+      "Bash(grep -nE \"svg className=\\\\{\\\\`h-5 w-5 flex-shrink-0|iconCls\" app/client/ClientSidebar.tsx)",
+      "Bash(grep -nE \"group relative flex|<svg className=\\\\{\\\\`h-5 w-5|MODULE_META\\\\[|d=\\\\{.*icon\" app/staff/StaffSidebar.tsx)",
+      "Bash(/c/xampp/mysql/bin/mysql.exe -u root crm_main -e \"SELECT id, email, role, client_id, LEFT\\(password,12\\) AS pw FROM users WHERE role='super_admin' OR \\(role='client_admin' AND client_id=1\\) ORDER BY role;\")",
+      "Bash(/c/xampp/mysql/bin/mysql.exe -u root crm_main -e \"SELECT id, email, client_id, staff_id, LEFT\\(password,12\\) AS pw FROM staff_accounts WHERE email='swati.chauhan@demo.team';\")",
+      "Bash(grep -nE \"group relative|<svg className=\\\\{?\\\\`?h-5 w-5|nav.*icon|d=\\\\{\" app/admin/Sidebar.tsx)",
+      "Bash(grep -rn \"flex-shrink-0\\\\${\" app/staff/StaffSidebar.tsx app/client/ClientSidebar.tsx app/admin/Sidebar.tsx)",
+      "Bash(/c/xampp/mysql/bin/mysql.exe -u root crm_main -e 'UPDATE users SET password='\\\\''__TRACKED_VAR__'\\\\'' WHERE id IN \\(1,8\\); UPDATE staff_accounts SET password='\\\\''__TRACKED_VAR__'\\\\'' WHERE id=3;')",
+      "Bash(/c/xampp/mysql/bin/mysql.exe -u root crm_education_vibes -e \"UPDATE client_staff SET extra_permissions='{\\\\\"leads\\\\\":{\\\\\"view\\\\\":true,\\\\\"create\\\\\":false,\\\\\"update\\\\\":false,\\\\\"delete\\\\\":false},\\\\\"dashboard\\\\\":{\\\\\"view\\\\\":true}}' WHERE id=21;\")",
+      "Bash(/c/xampp/mysql/bin/mysql.exe -u root crm_main -N -e \"SELECT password FROM users WHERE id=1;\")",
+      "Bash(/c/xampp/php/php.exe -r 'var_dump\\(password_verify\\('\\\\''Test@12345'\\\\'', '\\\\''__TRACKED_VAR__'\\\\''\\)\\);')",
+      "Bash(echo \"=== visitors fields ===\"; sed -n '/createTable\\(.visitors.\\)/q;p' app/Database/Migrations/*CreateVisitors.php | grep -oE \"'[a-z_]+' *=>\" | tr -d \"' =>\" | sort -u | grep -vE \"type|constraint|null|default|auto\" ; echo \"--- raw visitors block ---\"; grep -n \"assigned_to\\\\|lead_id\\\\|type_id\\\\|status_id\\\\|visit_date\\\\|deleted_at\\\\|purpose\\\\|notes\" app/Database/Migrations/*CreateVisitors.php; echo \"=== lead_transfers fields ===\"; grep -n \"to_staff_id\\\\|from_staff_id\\\\|requested_by\\\\|status\\\\|reason\\\\|deleted_at\\\\|lead_id\\\\|client_id\" app/Database/Migrations/*CreateLeadTransfers.php; echo \"=== staff_accounts fields ===\"; grep -n \"email\\\\|password\\\\|client_id\\\\|staff_id\\\\|status\" app/Database/Migrations/*CreateStaffAccounts.php)",
+      "Bash(/c/xampp/php/php.exe -l app/Database/Migrations/2026-06-30-000005_AddPerformanceIndexesV2.php)",
+      "Bash(grep -nE \"use App\\\\\\\\\\\\\\\\Libraries\\\\\\\\\\\\\\\\TenantManager|use App\\\\\\\\\\\\\\\\Libraries\\\\\\\\\\\\\\\\BackupService|use App\\\\\\\\\\\\\\\\Models\\\\\\\\\\\\\\\\ClientModel|function clientId\\\\\\(\" app/Controllers/ClientController.php)",
+      "Bash(grep -nE \"^use App\\\\\\\\\\\\\\\\\\(Libraries|Models\\)\\\\\\\\\\\\\\\\\" app/Controllers/ClientController.php)",
+      "Bash(grep -nE 'public function me\\\\\\(\\\\\\)|return \\\\$this->respond\\\\\\(\\\\[\\\\s*$|'\\\\''modules'\\\\''     => self::MODULES,' app/Controllers/ClientController.php)",
+      "Bash(grep -nA12 \"export interface Client \" app/lib/admin.ts)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\sahil\\OneDrive\\Desktop\\crm\\backend\\app\\Database\\Migrations"
     ]
   }
 }

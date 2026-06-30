@@ -33,7 +33,7 @@ export default function StaffSidebar() {
             className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${pathname === "/staff" ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-100"} ${collapsed ? "justify-center" : ""}`}
           >
             {pathname === "/staff" && <span className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-sky-600" />}
-            <svg className={`h-5 w-5 flex-shrink-0 ${pathname === "/staff" ? "text-sky-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={MODULE_META.dashboard.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <svg className={`anim-ico h-5 w-5 flex-shrink-0 ${pathname === "/staff" ? "text-sky-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={MODULE_META.dashboard.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
             {!collapsed && "Dashboard"}
           </Link>
 
@@ -45,7 +45,7 @@ export default function StaffSidebar() {
             className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${chatActive ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-100"} ${collapsed ? "justify-center" : ""}`}
           >
             {chatActive && <span className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-sky-600" />}
-            <svg className={`h-5 w-5 flex-shrink-0 ${chatActive ? "text-sky-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={MODULE_META.chat.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <svg className={`anim-ico h-5 w-5 flex-shrink-0 ${chatActive ? "text-sky-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={MODULE_META.chat.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
             {!collapsed && "Chat"}
           </Link>
 
@@ -57,7 +57,7 @@ export default function StaffSidebar() {
             className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${annActive ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-100"} ${collapsed ? "justify-center" : ""}`}
           >
             {annActive && <span className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-sky-600" />}
-            <svg className={`h-5 w-5 flex-shrink-0 ${annActive ? "text-sky-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={MODULE_META.announcements.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <svg className={`anim-ico h-5 w-5 flex-shrink-0 ${annActive ? "text-sky-600" : "text-slate-400 group-hover:text-slate-600"}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={MODULE_META.announcements.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
             {!collapsed && "Announcements"}
           </Link>
 
@@ -77,7 +77,7 @@ export default function StaffSidebar() {
                     title={collapsed ? meta.label : undefined}
                     className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 ${collapsed ? "justify-center" : ""}`}
                   >
-                    <svg className="h-5 w-5 flex-shrink-0 text-slate-400 group-hover:text-slate-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={meta.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    <svg className="anim-ico h-5 w-5 flex-shrink-0 text-slate-400 group-hover:text-slate-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={meta.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
                     {!collapsed && <span className="truncate">{meta.label}</span>}
                   </a>
                 );

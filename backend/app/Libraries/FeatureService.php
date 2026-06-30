@@ -21,8 +21,9 @@ class FeatureService
 {
     /** Every gateable feature key (mirrors the client modules). */
     public const FEATURES = [
-        'dashboard', 'leads', 'lead_import', 'tasks', 'team', 'roles', 'assets',
+        'dashboard', 'leads', 'lead_import', 'lead_transfer', 'visitors', 'tasks', 'team', 'roles', 'assets',
         'announcements', 'chat', 'notifications', 'email_config', 'settings',
+        'billing', 'followups', 'call_tracking', 'reports', 'web_push', 'backup',
     ];
 
     /** Core features every plan always includes (cannot be left without a shell). */
@@ -41,6 +42,8 @@ class FeatureService
         'dashboard'     => ['label' => 'Dashboard', 'core' => true],
         'leads'         => ['label' => 'Leads', 'quota' => 'Max leads'],
         'lead_import'   => ['label' => 'Lead import', 'quota' => 'Max imports'],
+        'lead_transfer' => ['label' => 'Lead transfer'],
+        'visitors'      => ['label' => 'Visitor requests'],
         'team'          => ['label' => 'Team / staff', 'quota' => 'Max staff'],
         'tasks'         => ['label' => 'Tasks'],
         'roles'         => ['label' => 'Roles & permissions'],
@@ -50,12 +53,18 @@ class FeatureService
         'email_config'  => ['label' => 'Email setup'],
         'notifications' => ['label' => 'Notifications', 'core' => true],
         'settings'      => ['label' => 'Settings', 'core' => true],
+        'billing'       => ['label' => 'Billing'],
+        'followups'     => ['label' => 'Follow-up tracker'],
+        'call_tracking' => ['label' => 'Call tracking'],
+        'reports'       => ['label' => 'Reports'],
+        'web_push'      => ['label' => 'Web push notifications'],
+        'backup'        => ['label' => 'Database backup'],
     ];
 
     /** Plan → features granted (on top of ALWAYS_ON). 'enterprise' gets everything. */
     public const PLAN_PRESETS = [
-        'starter' => ['leads', 'tasks', 'team', 'announcements'],
-        'growth'  => ['leads', 'tasks', 'team', 'announcements', 'roles', 'chat', 'email_config'],
+        'starter' => ['leads', 'lead_transfer', 'visitors', 'tasks', 'team', 'announcements', 'billing', 'followups', 'call_tracking', 'reports'],
+        'growth'  => ['leads', 'lead_transfer', 'visitors', 'tasks', 'team', 'announcements', 'roles', 'chat', 'email_config', 'billing', 'followups', 'call_tracking', 'reports', 'web_push'],
         // enterprise resolved as "all features" in presetFor().
     ];
 

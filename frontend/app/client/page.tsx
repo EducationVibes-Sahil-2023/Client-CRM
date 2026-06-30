@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { getClientDashboard, getLeadsSetup, getLeadAnalytics, type ClientInfo, type ClientFeature, type Task, type TaskSummary, type LeadStatus, type LeadSource, type MarketingType, type ConversionType, type LeadAnalytics, type LeadCount } from "../lib/client";
 import { BarChart, DonutChart } from "../admin/Charts";
+import { SkeletonStats, SkeletonBlock } from "../admin/ui";
 import { fmtDate } from "../lib/datetime";
 
 // Map the config colour names (and pass-through hex values) to chart hex codes.
@@ -23,10 +24,10 @@ function GradientStat({ grad, shadow, value, label, sub, icon }: {
   grad: string; shadow: string; value: ReactNode; label: string; sub?: string; icon: string;
 }) {
   return (
-    <div className={`relative overflow-hidden rounded-2xl bg-gradient-to-br ${grad} p-5 text-white shadow-lg ${shadow}`}>
+    <div className={`group relative overflow-hidden rounded-2xl bg-gradient-to-br ${grad} p-5 text-white shadow-lg ${shadow} transition duration-200 hover:-translate-y-0.5 hover:shadow-xl`}>
       <div className="relative z-10">
         <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/20 backdrop-blur-sm">
-          <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+          <svg className="anim-ico h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
         </span>
         <div className="mt-3 text-3xl font-bold leading-none tracking-tight">{value}</div>
         <div className="mt-1.5 truncate text-sm font-semibold text-white/90" title={label}>{label}</div>
@@ -94,11 +95,14 @@ function subscriptionPct(planStart: string, planEnd: string) {
 }
 
 const statCards = (s: Record<string, number>) => [
-  { label: "Team Members", value: s.staff ?? 0, icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2", tone: "bg-emerald-100 text-emerald-600" },
-  { label: "Roles", value: s.roles ?? 0, icon: "M12 11a3 3 0 100-6 3 3 0 000 6zM4 21v-2a4 4 0 014-4h8a4 4 0 014 4v2", tone: "bg-indigo-100 text-indigo-600" },
-  { label: "Open Tasks", value: s.tasks_open ?? 0, icon: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11", tone: "bg-amber-100 text-amber-600" },
-  { label: "Announcements", value: s.announcements ?? 0, icon: "M11 5L6 9H2v6h4l5 4V5z", tone: "bg-violet-100 text-violet-600" },
+  { label: "Team Members", value: s.staff ?? 0, icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2", tone: "bg-emerald-100 text-emerald-600", bar: "from-emerald-400 to-teal-500", dot: "bg-emerald-300" },
+  { label: "Roles", value: s.roles ?? 0, icon: "M12 11a3 3 0 100-6 3 3 0 000 6zM4 21v-2a4 4 0 014-4h8a4 4 0 014 4v2", tone: "bg-indigo-100 text-indigo-600", bar: "from-indigo-400 to-blue-500", dot: "bg-indigo-300" },
+  { label: "Open Tasks", value: s.tasks_open ?? 0, icon: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11", tone: "bg-amber-100 text-amber-600", bar: "from-amber-400 to-orange-500", dot: "bg-amber-300" },
+  { label: "Announcements", value: s.announcements ?? 0, icon: "M11 5L6 9H2v6h4l5 4V5z", tone: "bg-violet-100 text-violet-600", bar: "from-violet-400 to-purple-500", dot: "bg-violet-300" },
 ];
+
+// Fixed heights for the decorative equalizer flourish on each stat card.
+const SPARK = [9, 15, 11, 18, 13, 16];
 
 export default function ClientDashboard() {
   const [client, setClient] = useState<ClientInfo | null>(null);
@@ -133,7 +137,16 @@ export default function ClientDashboard() {
   }, []);
 
   if (error) return <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-500">{error}</div>;
-  if (!client) return <div className="py-20 text-center text-slate-400">Loading…</div>;
+  if (!client) return (
+    <div className="space-y-6">
+      <SkeletonStats count={4} />
+      <div className="grid gap-6 lg:grid-cols-2">
+        <SkeletonBlock className="h-72" />
+        <SkeletonBlock className="h-72" />
+      </div>
+      <SkeletonBlock className="h-64" />
+    </div>
+  );
 
   const enabled = features.filter((f) => f.enabled);
   const v = planValidity(client.plan_end);
@@ -187,29 +200,43 @@ export default function ClientDashboard() {
       )}
 
       {/* Hero */}
-      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 p-6 text-white shadow-lg">
-        <div className="relative z-10">
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold">{client.name}</h1>
-            <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${planBadge[client.plan] ?? "bg-white/20"}`}>{client.plan} plan</span>
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-600 via-emerald-600 to-teal-700 p-6 text-white shadow-lg shadow-emerald-600/20">
+        <div className="relative z-10 max-w-2xl">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight sm:text-[28px]">{client.name}</h1>
+            <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${planBadge[client.plan] ?? "bg-white/20"}`}>{client.plan} plan</span>
           </div>
-          <p className="mt-1 text-emerald-100">Your dedicated CRM workspace · status: <span className="font-semibold capitalize">{client.status}</span></p>
+          <p className="mt-1.5 text-emerald-50/90">Your dedicated CRM workspace</p>
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs font-medium">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 backdrop-blur-sm">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" /> Status: <span className="font-semibold capitalize">{client.status}</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 backdrop-blur-sm">
+              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M8 7V3m8 4V3M3 11h18M5 5h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              {v.text}
+            </span>
+          </div>
         </div>
-        <div className="pointer-events-none absolute -right-8 -top-8 h-40 w-40 rounded-full bg-white/10" />
-        <div className="pointer-events-none absolute -bottom-10 right-20 h-32 w-32 rounded-full bg-white/10" />
+        <div className="pointer-events-none absolute -right-12 -top-16 h-56 w-56 rounded-full bg-white/10 blur-2xl" />
+        <div className="pointer-events-none absolute -bottom-12 right-24 h-32 w-32 rounded-full bg-white/10" />
+        <div className="pointer-events-none absolute right-8 top-1/2 hidden h-28 w-28 -translate-y-1/2 rounded-full bg-white/5 sm:block" />
       </div>
 
       {/* Stats */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {statCards(stats).map((s) => (
-          <div key={s.label} className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <span className={`flex h-12 w-12 items-center justify-center rounded-xl ${s.tone}`}>
-              <svg className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={s.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </span>
-            <div>
-              <div className="text-2xl font-bold text-slate-900">{s.value}</div>
-              <div className="text-sm text-slate-500">{s.label}</div>
+          <div key={s.label} className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md">
+            <span className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${s.bar}`} />
+            <div className="flex items-start justify-between">
+              <span className={`flex h-11 w-11 items-center justify-center rounded-xl ${s.tone}`}>
+                <svg className="anim-ico h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={s.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </span>
+              <div className="flex items-end gap-0.5" aria-hidden>
+                {SPARK.map((h, i) => <span key={i} className={`w-1 rounded-full ${s.dot} transition-all duration-300 group-hover:opacity-100 ${i === SPARK.length - 1 ? "opacity-100" : "opacity-50"}`} style={{ height: h }} />)}
+              </div>
             </div>
+            <div className="mt-4 text-3xl font-bold tracking-tight text-slate-900">{s.value.toLocaleString()}</div>
+            <div className="mt-0.5 text-sm font-medium text-slate-500">{s.label}</div>
           </div>
         ))}
       </div>
@@ -217,8 +244,13 @@ export default function ClientDashboard() {
       {/* Charts */}
       {taskSummary && (
         <div className="grid gap-6 lg:grid-cols-3">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
-            <h3 className="mb-4 font-semibold text-slate-900">Tasks by status</h3>
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md lg:col-span-2">
+            <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-900">
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 19V5m0 14h16M8 17v-5m4 5V8m4 9v-7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </span>
+              Tasks by status
+            </h3>
             {taskSummary.total === 0 ? (
               <p className="py-10 text-center text-sm text-slate-400">No tasks yet — create one to see the chart.</p>
             ) : (
@@ -234,8 +266,13 @@ export default function ClientDashboard() {
               />
             )}
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <h3 className="mb-4 font-semibold text-slate-900">Task distribution</h3>
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
+            <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-900">
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-100 text-sky-600">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-6.2-8.6M21 12a9 9 0 00-9-9v9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </span>
+              Task distribution
+            </h3>
             {taskSummary.total === 0 ? (
               <p className="py-10 text-center text-sm text-slate-400">No data yet.</p>
             ) : (
@@ -281,7 +318,7 @@ export default function ClientDashboard() {
                   </div>
                   <GradientBars data={toBars(la!.by_status)} total={la!.total} />
                 </div>
-                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
                   <h4 className="mb-4 font-semibold text-slate-900">By marketing channel</h4>
                   {marketingDonut.length > 0 ? (
                     <DonutChart data={marketingDonut} size={150} />
@@ -293,11 +330,11 @@ export default function ClientDashboard() {
 
               {/* Row B — lead type + conversion stage */}
               <div className="grid gap-4 lg:grid-cols-2">
-                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
                   <h4 className="mb-4 font-semibold text-slate-900">By lead type</h4>
                   <GradientBars data={toBars(la!.by_lead_type)} total={la!.total} />
                 </div>
-                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
                   <div className="mb-4 flex items-center justify-between">
                     <h4 className="font-semibold text-slate-900">By conversion stage</h4>
                     <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">win % from setup</span>
@@ -312,7 +349,7 @@ export default function ClientDashboard() {
 
               {/* Row C — sub-status (full width) */}
               {la!.by_sub_status.length > 0 && (
-                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
                   <h4 className="mb-4 font-semibold text-slate-900">By sub-status</h4>
                   <div className="grid gap-x-8 gap-y-3 sm:grid-cols-2">
                     <GradientBars data={toBars(la!.by_sub_status.slice(0, Math.ceil(la!.by_sub_status.length / 2)))} total={la!.total} />
@@ -323,7 +360,7 @@ export default function ClientDashboard() {
 
               {/* Status composition per conversion stage (status → sub-status grouping) */}
               {stagesMapped.length > 0 && (
-                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
                   <h4 className="font-semibold text-slate-900">Status composition by stage</h4>
                   <p className="mb-4 mt-0.5 text-xs text-slate-400">Which lead statuses make up each conversion stage.</p>
                   <div className="grid gap-x-8 gap-y-4 lg:grid-cols-2">
@@ -350,7 +387,7 @@ export default function ClientDashboard() {
             </>
           ) : (
             /* No leads captured yet — keep the config-level snapshot + mapping hint */
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 {[
                   { label: "Pipeline statuses", value: leadStatuses.length, tone: "text-emerald-600" },
@@ -372,23 +409,28 @@ export default function ClientDashboard() {
 
       {/* Tasks overview */}
       {taskSummary && (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
           <div className="mb-4 flex items-center justify-between">
-            <h3 className="font-semibold text-slate-900">Tasks</h3>
+            <h3 className="flex items-center gap-2 font-semibold text-slate-900">
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-100 text-amber-600">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </span>
+              Tasks
+            </h3>
             <Link href="/client/tasks" className="text-sm font-medium text-emerald-600 hover:text-emerald-700">Manage tasks →</Link>
           </div>
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
-              { label: "Total", value: taskSummary.total, tone: "text-slate-900" },
-              { label: "Open", value: taskSummary.open, tone: "text-slate-700" },
-              { label: "In Progress", value: taskSummary.in_progress, tone: "text-sky-700" },
-              { label: "Done", value: taskSummary.done, tone: "text-emerald-700" },
-              { label: "Overdue", value: taskSummary.overdue, tone: "text-red-700" },
+              { label: "Total", value: taskSummary.total, tone: "text-slate-900", bg: "bg-slate-50" },
+              { label: "Open", value: taskSummary.open, tone: "text-slate-700", bg: "bg-slate-100/70" },
+              { label: "In Progress", value: taskSummary.in_progress, tone: "text-sky-700", bg: "bg-sky-50" },
+              { label: "Done", value: taskSummary.done, tone: "text-emerald-700", bg: "bg-emerald-50" },
+              { label: "Overdue", value: taskSummary.overdue, tone: "text-red-700", bg: "bg-red-50" },
             ].map((b) => (
-              <div key={b.label} className="rounded-xl bg-slate-50 px-3 py-3 text-center">
+              <div key={b.label} className={`rounded-xl ${b.bg} px-3 py-3 text-center transition hover:scale-[1.03]`}>
                 <div className={`text-2xl font-bold ${b.tone}`}>{b.value}</div>
-                <div className="text-xs text-slate-500">{b.label}</div>
+                <div className="text-xs font-medium text-slate-500">{b.label}</div>
               </div>
             ))}
           </div>
@@ -438,9 +480,14 @@ export default function ClientDashboard() {
       )}
 
       {/* Subscription */}
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="font-semibold text-slate-900">Subscription</h3>
+          <h3 className="flex items-center gap-2 font-semibold text-slate-900">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-100 text-violet-600">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 10h18M3 7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2zM7 15h3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </span>
+            Subscription
+          </h3>
           <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${v.tone === "red" ? "bg-red-100 text-red-700" : v.tone === "amber" ? "bg-amber-100 text-amber-700" : v.tone === "emerald" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{v.text}</span>
         </div>
         <div className="grid gap-4 sm:grid-cols-3">
@@ -475,7 +522,7 @@ export default function ClientDashboard() {
         </div>
 
         {/* Features */}
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
           <h3 className="mb-4 font-semibold text-slate-900">Enabled features</h3>
           {enabled.length === 0 ? (
             <p className="text-sm text-slate-400">No add-on features enabled yet.</p>

@@ -13,7 +13,8 @@ import {
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
-import { Card, EmptyState, Drawer, PageHeader, Spinner } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+import { Card, EmptyState, Drawer, PageHeader, SkeletonCards } from "../../admin/ui";
 
 const label = (m: string) => m.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const ACTIONS: (keyof Perm)[] = ["view", "create", "update", "delete"];
@@ -67,6 +68,7 @@ const ICON = {
 export default function RolesPage() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { can } = useClient();
   const router = useRouter();
   const [roles, setRoles] = useState<Role[] | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -172,11 +174,11 @@ export default function RolesPage() {
       <PageHeader
         title="Roles & Permissions"
         subtitle="Create roles and control what each can view, create, update and delete"
-        action={<button onClick={openCreate} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>New role</button>}
+        action={can("roles", "create") ? <button onClick={openCreate} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"><svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>New role</button> : undefined}
       />
 
       {roles === null ? (
-        <Card><Spinner /></Card>
+        <SkeletonCards count={6} />
       ) : roles.length === 0 ? (
         <Card><EmptyState title="No roles yet" hint="Create your first role to assign permissions to staff." /></Card>
       ) : (
@@ -227,8 +229,8 @@ export default function RolesPage() {
                   )}
                   <div className="ml-auto flex items-center gap-0.5">
                     <IconBtn title="View" onClick={() => openRole(r, "view")} icon={ICON.view} />
-                    <IconBtn title="Edit" onClick={() => openRole(r, "edit")} icon={ICON.edit} />
-                    <IconBtn title="Delete" danger onClick={() => remove(r)} icon={ICON.trash} />
+                    {can("roles", "update") && <IconBtn title="Edit" onClick={() => openRole(r, "edit")} icon={ICON.edit} />}
+                    {can("roles", "delete") && <IconBtn title="Delete" danger onClick={() => remove(r)} icon={ICON.trash} />}
                   </div>
                 </div>
               </div>

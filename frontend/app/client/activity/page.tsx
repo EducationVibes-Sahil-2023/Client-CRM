@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getClientActivity, type ClientActivity, type ClientActivityStats } from "../../lib/client";
-import { EmptyState, PageHeader, Spinner, fmtDate, fmtDateTime, timeAgo } from "../../admin/ui";
+import { EmptyState, PageHeader, SkeletonBlock, fmtDate, fmtDateTime, timeAgo } from "../../admin/ui";
 import { APP_TZ, parseServer } from "../../lib/datetime";
 
 type Filter = "all" | "created" | "updated" | "deleted" | "login";
@@ -168,7 +168,9 @@ export default function ClientActivityPage() {
       </div>
 
       {loading ? (
-        <Spinner />
+        <div className="space-y-3">
+          {Array.from({ length: 6 }).map((_, i) => <SkeletonBlock key={i} className="h-16" />)}
+        </div>
       ) : items.length === 0 ? (
         <EmptyState title="No activity yet" hint="Actions like creating staff, roles and tasks will show up here." />
       ) : (

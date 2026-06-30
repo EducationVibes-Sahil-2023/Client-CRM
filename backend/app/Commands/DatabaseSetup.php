@@ -39,8 +39,11 @@ class DatabaseSetup extends BaseCommand
     protected $group       = 'Database';
     protected $name        = 'db:setup';
     protected $description = 'Create + load schema + migrate + seed the main DB and sync all client databases in one command.';
-    protected $usage       = 'db:setup [--fresh]';
-    protected $options     = ['--fresh' => 'Drop the main database first, then rebuild it from scratch (DESTRUCTIVE).'];
+    protected $usage       = 'db:setup [--fresh] [--force]';
+    protected $options     = [
+        '--fresh' => 'Drop the main database first, then rebuild it from scratch (DESTRUCTIVE).',
+        '--force' => 'Allow running on a production environment (off by default for safety).',
+    ];
 
     /** bcrypt of "Password123!" — fallback if database/seed.sql is missing. */
     private const ADMIN_HASH = '$2y$10$ABwydUsAwRU1LZ4591ylCO.pEvr4sJkQ9ht.mcJZb3hZcp4/gWx6K';
@@ -48,6 +51,19 @@ class DatabaseSetup extends BaseCommand
     public function run(array $params)
     {
         $fresh = array_key_exists('fresh', $params) || in_array('--fresh', $params, true);
+        $force = array_key_exists('force', $params) || in_array('--force', $params, true);
+
+        // Safety: db:setup re-seeds (resets the super-admin password) and --fresh
+        // DROPS the database. Neither is safe on live data — block on production
+        // and point to the additive `db:upgrade` instead.
+        if (ENVIRONMENT === 'production' && ! $force) {
+            CLI::error('Refusing to run db:setup on production.');
+            CLI::write('  • For a normal update use:  php spark db:upgrade   (additive — never removes data)', 'yellow');
+            CLI::write('  • db:setup re-seeds the admin account' . ($fresh ? ' and --fresh DROPS the database' : '') . '.', 'dark_gray');
+            CLI::write('  • If you really mean it, re-run with --force.', 'dark_gray');
+
+            return EXIT_ERROR;
+        }
 
         try {
             $this->createMainDatabase($fresh);

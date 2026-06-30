@@ -16,7 +16,7 @@ class AssetModel extends TenantModel
         'client_id', 'asset_code', 'name', 'quantity', 'unit', 'series_model',
         'asset_group', 'managed_by', 'asset_location', 'purchase_date',
         'warranty_months', 'unit_price', 'depreciation_months', 'supplier_name',
-        'supplier_phone', 'supplier_address', 'description', 'attachment', 'status',
+        'supplier_phone', 'supplier_address', 'description', 'attachment', 'status', 'custom_fields',
     ];
 
     protected $validationRules = [

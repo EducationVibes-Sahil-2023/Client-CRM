@@ -735,7 +735,7 @@ class ChatController extends ApiController
                     ->where('role', 'client_admin')->where('client_id', $conv['client_id'])->findAll();
                 $title = 'New message from support';
                 foreach ($recipients as $r) {
-                    $this->notifyParty('user', (int) $r['id'], $title, $snippet, '/client/chat');
+                    $this->notifyParty('user', (int) $r['id'], $title, $snippet, '/client/chat', (int) $conv['client_id']);
                 }
             } else {
                 // Notify all super admins.
@@ -761,7 +761,7 @@ class ChatController extends ApiController
             ->groupStart()->where('party_type !=', $me['type'])->orWhere('party_id !=', $me['id'])->groupEnd()
             ->first();
         if ($other) {
-            $this->notifyParty((string) $other['party_type'], (int) $other['party_id'], 'New message from ' . $senderName, $snippet);
+            $this->notifyParty((string) $other['party_type'], (int) $other['party_id'], 'New message from ' . $senderName, $snippet, null, $conv['client_id'] !== null ? (int) $conv['client_id'] : null);
         }
     }
 
@@ -772,7 +772,7 @@ class ChatController extends ApiController
             if ($me['type'] === 'user' && (int) $u['id'] === $me['id']) {
                 continue;
             }
-            $this->notifyParty('user', (int) $u['id'], $title, $body);
+            $this->notifyParty('user', (int) $u['id'], $title, $body, null, $clientId);
         }
         foreach ($this->staffModel()->where('client_id', $clientId)->findAll() as $st) {
             if (($st['status'] ?? 'active') !== 'active') {
@@ -781,7 +781,7 @@ class ChatController extends ApiController
             if ($me['type'] === 'staff' && (int) $st['id'] === $me['id']) {
                 continue;
             }
-            $this->notifyParty('staff', (int) $st['id'], $title, $body);
+            $this->notifyParty('staff', (int) $st['id'], $title, $body, null, $clientId);
         }
     }
 
@@ -789,18 +789,24 @@ class ChatController extends ApiController
      * Insert one chat notification for a party. The deep-link defaults to the
      * party's own chat area when not given (staff vs client admin).
      */
-    private function notifyParty(string $type, int $id, string $title, string $body, ?string $link = null): void
+    private function notifyParty(string $type, int $id, string $title, string $body, ?string $link = null, ?int $clientId = null): void
     {
         $link ??= $type === 'staff' ? '/staff/chat' : '/client/chat';
+        $snippet = mb_substr($body, 0, 140);
 
         (new AppNotificationModel())->insert([
             'recipient_type' => $type,
             'recipient_id'   => $id,
             'type'           => 'chat_message',
             'title'          => $title,
-            'body'           => mb_substr($body, 0, 140),
+            'body'           => $snippet,
             'link'           => $link,
         ]);
+
+        // Web push only for client-side recipients (super admins excluded).
+        if ($clientId !== null && $clientId > 0) {
+            \App\Libraries\PushService::sendToRecipient($clientId, $type, $id, $title, $snippet, $link);
+        }
     }
 
     /** Display name for a single party (user or staff). */

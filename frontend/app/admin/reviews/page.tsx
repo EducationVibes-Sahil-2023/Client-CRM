@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { getLanding, saveLanding, type Testimonial } from "../../lib/admin";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, EmptyState, PageHeader, Spinner } from "../ui";
+import { Card, EmptyState, PageHeader, SkeletonCards } from "../ui";
 
 export default function ReviewsPage() {
   const toast = useToast();
@@ -36,7 +36,7 @@ export default function ReviewsPage() {
     }
   }
 
-  if (!items) return (<><PageHeader title="Customer Reviews" /><Card><Spinner /></Card></>);
+  if (!items) return (<><PageHeader title="Customer Reviews" /><SkeletonCards count={6} /></>);
 
   return (
     <>

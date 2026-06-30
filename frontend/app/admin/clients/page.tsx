@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { adminGet, adminPost, deleteClient, type Client } from "../../lib/admin";
+import { adminGet, adminPost, deleteClient, loginAsClient, type Client } from "../../lib/admin";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { Badge, Drawer, PageHeader, ValidityBadge, fmtDate } from "../ui";
@@ -117,6 +117,16 @@ export default function ClientsPage() {
     }
   }
 
+  async function loginAs(c: Client) {
+    try {
+      await loginAsClient(c.id);
+      toast.success(`Opening ${c.name}…`);
+      window.location.href = "/client";
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not log in as this client");
+    }
+  }
+
   async function remove(c: Client) {
     const ok = await confirm({
       danger: true,
@@ -160,6 +170,7 @@ export default function ClientsPage() {
   const actions = (c: Client): RowAction<Client>[] => [
     { label: "Details", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4m0-4h.01" strokeLinecap="round" /></svg>, onClick: () => setSelected(c) },
     { label: "Edit", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>, onClick: () => setEditing(c) },
+    ...(c.status === "active" ? [{ label: "Log in as client", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" strokeLinecap="round" strokeLinejoin="round" /></svg>, onClick: () => loginAs(c) }] : []),
     c.status === "active"
       ? { label: "Suspend", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9 9h6v6H9z" /></svg>, onClick: () => setStatus(c, "suspended") }
       : { label: "Activate", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>, onClick: () => setStatus(c, "active") },
@@ -244,6 +255,11 @@ export default function ClientsPage() {
             <IconButton title="Edit" onClick={() => setEditing(c)}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </IconButton>
+            {c.status === "active" && (
+              <IconButton title="Log in as client" onClick={() => loginAs(c)}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
             {c.status === "active" ? (
               <IconButton title="Suspend" onClick={() => setStatus(c, "suspended")}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9 9h6v6H9z" /></svg>

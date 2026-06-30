@@ -36,6 +36,10 @@ export interface TableConfigApi<T> {
   setLabel: (key: string, label: string) => void;
   /** The custom name for a column, or "" when it uses its built-in header. */
   labelOf: (key: string) => string;
+  /** The user's saved rows-per-page for this table, or undefined to use the client default. */
+  pageSize?: number;
+  /** Persist a rows-per-page choice for this table (per user). */
+  setPageSize: (n: number) => void;
 }
 
 const emptyConfig: TableConfig = {};
@@ -200,6 +204,10 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
     });
   }, [orderedKeys, update]);
 
+  const setPageSize = useCallback((n: number) => {
+    update((c) => ({ ...c, pageSize: n }));
+  }, [update]);
+
   const reset = useCallback(() => { update(() => ({})); }, [update]);
 
   const customized = useMemo(
@@ -216,10 +224,11 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
       toggleHidden: () => {}, setAlign: () => {}, setWidth: () => {}, moveBefore: () => {}, reset: () => {},
       customized: false,
       canRename: false, setLabel: () => {}, labelOf: () => "",
+      pageSize: undefined, setPageSize: () => {},
     };
   }
 
-  return { ready, columns: visibleColumns, allColumns, toggleHidden, setAlign, setWidth, moveBefore, reset, customized, canRename, setLabel, labelOf };
+  return { ready, columns: visibleColumns, allColumns, toggleHidden, setAlign, setWidth, moveBefore, reset, customized, canRename, setLabel, labelOf, pageSize: config.pageSize, setPageSize };
 }
 
 // ---------------------------------------------------------------- settings UI

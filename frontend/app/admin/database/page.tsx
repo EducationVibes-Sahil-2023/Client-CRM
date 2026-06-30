@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   adminGet,
+  backupClientDb,
+  backupMainDb,
   getClientSchema,
   getClientTableData,
   type Client,
@@ -10,7 +12,9 @@ import {
   type SchemaTable,
   type TableData,
 } from "../../lib/admin";
-import { EmptyState, PageHeader, Spinner } from "../ui";
+import { EmptyState, PageHeader, SkeletonBlock } from "../ui";
+import { useToast } from "../../components/toast/ToastProvider";
+import AutoBackupPanel from "./AutoBackupPanel";
 
 /** Human-readable byte size, e.g. "12.4 KB". */
 function fmtBytes(n: number): string {
@@ -151,7 +155,7 @@ function TableDataBrowser({ clientId, table }: { clientId: number; table: string
         {error ? (
           <div className="p-6 text-sm text-rose-700">{error}</div>
         ) : !data ? (
-          <Spinner />
+          <SkeletonBlock className="h-64" />
         ) : data.rows.length === 0 ? (
           <EmptyState title="No rows" hint={debounced ? "No rows match your search." : "This table is empty."} />
         ) : (
@@ -210,8 +214,10 @@ function TableDataBrowser({ clientId, table }: { clientId: number; table: string
 }
 
 export default function DatabasePage() {
+  const toast = useToast();
   const [clients, setClients] = useState<Client[]>([]);
   const [clientId, setClientId] = useState<number | null>(null);
+  const [backuping, setBackuping] = useState<"main" | "client" | null>(null);
   const [schema, setSchema] = useState<ClientSchema | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -269,23 +275,55 @@ export default function DatabasePage() {
         title="Database"
         subtitle="Inspect the structure of any client's isolated database"
         action={
-          <label className="flex items-center gap-2 text-sm">
-            <span className="font-medium text-slate-500">Client</span>
-            <select
-              value={clientId ?? ""}
-              onChange={(e) => setClientId(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={async () => {
+                setBackuping("main");
+                try { await backupMainDb(); toast.success("Main database backup downloaded."); }
+                catch (e) { toast.error(e instanceof Error ? e.message : "Backup failed"); }
+                finally { setBackuping(null); }
+              }}
+              disabled={backuping !== null}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
             >
-              {clients.length === 0 && <option value="">No clients</option>}
-              {clients.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </label>
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              {backuping === "main" ? "Backing up…" : "Backup main DB"}
+            </button>
+            <button
+              onClick={async () => {
+                if (!clientId) return;
+                const c = clients.find((x) => x.id === clientId);
+                setBackuping("client");
+                try { await backupClientDb(clientId, (c?.name ?? "client").replace(/\s+/g, "-").toLowerCase()); toast.success(`Backup of ${c?.name ?? "client"} downloaded.`); }
+                catch (e) { toast.error(e instanceof Error ? e.message : "Backup failed"); }
+                finally { setBackuping(null); }
+              }}
+              disabled={backuping !== null || !clientId}
+              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              {backuping === "client" ? "Backing up…" : "Backup this client"}
+            </button>
+            <label className="flex items-center gap-2 text-sm">
+              <span className="font-medium text-slate-500">Client</span>
+              <select
+                value={clientId ?? ""}
+                onChange={(e) => setClientId(Number(e.target.value))}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+              >
+                {clients.length === 0 && <option value="">No clients</option>}
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </label>
+          </div>
         }
       />
 
-      {loading && <Spinner />}
+      <AutoBackupPanel />
+
+      {loading && <SkeletonBlock className="h-64" />}
 
       {!loading && error && (
         <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700">

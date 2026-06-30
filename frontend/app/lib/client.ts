@@ -1,6 +1,21 @@
-import { API_URL } from "./api";
+import { API_URL, redirectToLogin } from "./api";
+
+// ---- automatic database backup schedule (no client download; admin-set only) ----
+export interface BackupSchedule {
+  enabled: boolean;
+  frequency: "daily" | "weekly" | "monthly";
+  hour: number; // 0–23, the time of day backups run
+  retention_days: number;
+  last_run: string | null;
+  last_status: string | null;
+}
 
 async function handle(res: Response) {
+  // 401 = no/expired session → bounce to login (covers initial load + tab clicks).
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error("Your session has expired. Please sign in again.");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msgs = (data as Record<string, unknown>)?.messages;
@@ -20,6 +35,11 @@ export const clientPost = <T = unknown>(path: string, body?: Record<string, unkn
     credentials: "include",
     body: JSON.stringify(body ?? {}),
   }).then(handle) as Promise<T>;
+
+export const getBackupSchedule = () =>
+  clientGet<{ schedule: BackupSchedule; frequencies: string[] }>("/backup-schedule");
+export const saveBackupSchedule = (b: Partial<BackupSchedule>) =>
+  clientPost<{ schedule: BackupSchedule }>("/backup-schedule", b as Record<string, unknown>);
 
 // ---- types ----
 export interface ClientInfo {
@@ -78,6 +98,7 @@ export interface Staff {
   department: string | null;
   has_password: boolean;
   extra_permissions?: Record<string, Perm>;
+  custom_fields?: Record<string, string>;
 }
 
 export interface LookupItem {
@@ -130,6 +151,8 @@ export interface Asset {
   status: string;
   allocated_to: string | null;
   allocated_to_id: number | null;
+  /** Values for admin-defined custom fields, keyed by field key. */
+  custom_fields?: Record<string, string>;
 }
 
 export interface AssetAllocation {
@@ -202,6 +225,7 @@ export interface Lead {
   follow_flag: "upcoming" | "overdue" | "done" | null;
   /** Latest connected (answered) call to this lead's phone, or null if none. */
   last_call_at?: string | null;
+  custom_fields?: Record<string, string>;
 }
 
 /** A logged phone call, ingested from a client's external call-tracking app. */
@@ -335,11 +359,126 @@ export const getFollowupDashboard = (params: Record<string, string | undefined> 
   return clientGet<FollowupDashboard>(`/followup-dashboard${q ? `?${q}` : ""}`);
 };
 
+// ---- Reports hub ----
+// Shared filter params for every report (created-date range + multi-id filters).
+export interface ReportParams {
+  from?: string; to?: string;
+  lead_status?: string; lead_source?: string; lead_type?: string; assign?: string;
+  [k: string]: string | undefined;
+}
+export interface LeadByRow { id: number | string; label: string; color: string; count: number; pct: number }
+export interface PipelineRow { id: number; label: string; color: string; statuses: string; count: number; pct: number; win_pct: number; weighted: number }
+export interface RepPerfRow { id: number; name: string; total: number; won: number; won_pct: number }
+
+const reportQs = (params: Record<string, string | undefined>) =>
+  Object.entries(params).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v as string)}`).join("&");
+
+export const getReportLeadsBy = (group: string, params: ReportParams = {}) =>
+  clientGet<{ group: string; total: number; rows: LeadByRow[] }>(`/reports/leads-by?${reportQs({ group, ...params })}`);
+export const getReportPipeline = (params: ReportParams = {}) =>
+  clientGet<{ total: number; weighted_total: number; rows: PipelineRow[] }>(`/reports/pipeline${reportQs(params) ? `?${reportQs(params)}` : ""}`);
+export const getReportRepPerformance = (params: ReportParams = {}) =>
+  clientGet<{ win_pct: number; rows: RepPerfRow[] }>(`/reports/rep-performance${reportQs(params) ? `?${reportQs(params)}` : ""}`);
+
+// ---- Lead transfer ----
+export type TransferStatus = "pending" | "approved" | "rejected" | "cancelled";
+export interface LeadTransfer {
+  id: number;
+  lead_id: number;
+  lead_name: string | null;
+  from_staff_id: number | null;
+  from_name: string | null;
+  to_staff_id: number;
+  to_name: string | null;
+  requested_by: number | null;
+  requested_name: string | null;
+  reason: string | null;
+  status: TransferStatus;
+  decided_by: number | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  created_at: string;
+}
+export const getLeadTransfers = () =>
+  clientGet<{ transfers: LeadTransfer[]; mode: "direct" | "approval"; can_decide: boolean; my_staff_id: number }>("/lead-transfers");
+export const createLeadTransfer = (b: { lead_id: number; to_staff_id: number; reason?: string }) =>
+  clientPost<{ message: string; id: number; status: TransferStatus }>("/lead-transfers", b);
+export const approveLeadTransfer = (id: number, note?: string) => clientPost(`/lead-transfers/${id}/approve`, { note });
+export const rejectLeadTransfer = (id: number, note?: string) => clientPost(`/lead-transfers/${id}/reject`, { note });
+export const cancelLeadTransfer = (id: number) => clientPost(`/lead-transfers/${id}/cancel`);
+export const saveLeadTransferMode = (mode: "direct" | "approval") =>
+  clientPost<{ message: string; mode: "direct" | "approval" }>("/lead-transfer-mode", { mode });
+
+// ---- Visitor requests ----
+export interface VisitorType { id: number; name: string; color: string; sequence: number; enabled: number | boolean }
+export interface VisitorStatus { id: number; name: string; color: string; is_final: number | boolean; sequence: number; enabled: number | boolean }
+export interface Visitor {
+  id: number;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  type_id: number | null;
+  type_name: string | null;
+  type_color: string;
+  status_id: number | null;
+  status_name: string | null;
+  status_color: string;
+  status_final: boolean;
+  lead_id: number | null;
+  lead_name: string | null;
+  assigned_to: number | null;
+  assigned_name: string | null;
+  purpose: string | null;
+  visit_date: string | null;
+  notes: string | null;
+  created_by: number | null;
+  created_at: string;
+  custom_fields?: Record<string, string>;
+}
+export const getVisitorSetup = () => clientGet<{ types: VisitorType[]; statuses: VisitorStatus[]; can_manage: boolean }>("/visitor-setup");
+export const getVisitors = () => clientGet<{ visitors: Visitor[]; can_manage: boolean }>("/visitors");
+export const createVisitor = (b: Record<string, unknown>) => clientPost("/visitors", b);
+export const updateVisitor = (id: number, b: Record<string, unknown>) => clientPost(`/visitors/${id}`, b);
+export const deleteVisitor = (id: number) => clientPost(`/visitors/${id}/delete`);
+export const createVisitorType = (b: Record<string, unknown>) => clientPost("/visitor-types", b);
+export const updateVisitorType = (id: number, b: Record<string, unknown>) => clientPost(`/visitor-types/${id}`, b);
+export const deleteVisitorType = (id: number) => clientPost(`/visitor-types/${id}/delete`);
+export const createVisitorStatus = (b: Record<string, unknown>) => clientPost("/visitor-statuses", b);
+export const updateVisitorStatus = (id: number, b: Record<string, unknown>) => clientPost(`/visitor-statuses/${id}`, b);
+export const deleteVisitorStatus = (id: number) => clientPost(`/visitor-statuses/${id}/delete`);
+
 export interface LeadImportResult {
   inserted: number;
   failed: number;
   errors: { row: number; message: string }[];
+  /** staff id → number of leads assigned to them in this import. */
+  assigned?: Record<string, number>;
 }
+
+/** Batch choices applied to every imported lead (chosen at upload, not in the sheet). */
+export interface LeadImportOptions {
+  status_id: number;
+  sub_status_id?: number | null;
+  source_id?: number | null;
+  lead_type_id?: number | null;
+  assign_mode: "single" | "robin";
+  assignees: number[];
+  notify: boolean;
+}
+
+/** One configurable column of the import template. */
+export interface LeadImportColumn {
+  key: string;
+  label: string;
+  include: boolean;
+  required: boolean;
+  custom: boolean;
+  locked?: boolean;
+}
+export const getLeadImportSetup = () =>
+  clientGet<{ columns: LeadImportColumn[]; can_manage: boolean }>("/lead-import-setup");
+export const saveLeadImportSetup = (columns: { key: string; include: boolean; required: boolean }[]) =>
+  clientPost<{ message: string; columns: LeadImportColumn[] }>("/lead-import-setup", { columns });
 
 export interface LeadCount {
   /** The grouped entity's id (status/sub-status/type/source id), when applicable. */
@@ -364,8 +503,12 @@ export const getLeadAnalytics = () => clientGet<LeadAnalytics>("/lead-analytics"
 export const createLead = (b: Record<string, unknown>) => clientPost("/leads", b);
 export const updateLead = (id: number, b: Record<string, unknown>) => clientPost(`/leads/${id}`, b);
 export const deleteLead = (id: number) => clientPost(`/leads/${id}/delete`);
-export const importLeads = (rows: Record<string, string>[]) =>
-  clientPost<LeadImportResult>("/leads/import", { rows });
+export const importLeads = (rows: Record<string, string>[], options: LeadImportOptions) =>
+  clientPost<LeadImportResult>("/leads/import", { rows, options } as Record<string, unknown>);
+
+/** Bulk-update selected leads (assign + change status/sub/source/type/created date). */
+export const bulkUpdateLeads = (b: Record<string, unknown>) =>
+  clientPost<{ message: string; updated: number; assigned: Record<string, number> }>("/leads/bulk", b);
 
 export interface LeadReminder {
   id: number;
@@ -461,6 +604,24 @@ export interface FollowupGroup {
   lead_statuses: { id: number; name: string; color: string }[];
 }
 
+export interface State {
+  id: number;
+  name: string;
+  color: string;
+  sequence: number;
+  enabled: number | boolean;
+}
+
+export interface City {
+  id: number;
+  name: string;
+  color: string;
+  sequence: number;
+  state_id: number | null;
+  state: string | null;
+  enabled: number | boolean;
+}
+
 export interface AnnouncementAttachment {
   url: string;
   name: string;
@@ -513,7 +674,52 @@ export interface Task {
   updated_at?: string | null;
   overdue?: boolean;
   comment_count?: number;
+  /** Values for admin-defined custom fields, keyed by field key. */
+  custom_fields?: Record<string, string>;
 }
+
+/** A custom task-form field type. */
+export type TaskFieldType = "text" | "textarea" | "number" | "date" | "select";
+
+/** An admin-defined custom field on the task form. */
+export interface TaskCustomField {
+  key: string;
+  label: string;
+  type: TaskFieldType;
+  required: boolean;
+  options: string[];
+}
+
+/** Built-in task fields an admin can mark mandatory (title is always required). */
+export const TASK_REQUIRABLE_FIELDS: { key: string; label: string }[] = [
+  { key: "description", label: "Description" },
+  { key: "assigned_to", label: "Assignee" },
+  { key: "due_date", label: "Due date" },
+  { key: "start_date", label: "Start date" },
+  { key: "priority", label: "Priority" },
+  { key: "type", label: "Type" },
+];
+
+export const getTaskSetup = () =>
+  clientGet<{ required_fields: string[]; custom_fields: TaskCustomField[] }>("/task-setup");
+export const saveTaskFieldSettings = (body: { required_fields: string[]; custom_fields: TaskCustomField[] }) =>
+  clientPost<{ message: string; required_fields: string[]; custom_fields: TaskCustomField[] }>("/task-field-settings", body as unknown as Record<string, unknown>);
+
+// ---- Generic form-field setup (mandatory + custom fields, any form) ----
+/** A custom field on any form (same shape as TaskCustomField). */
+export type CustomField = TaskCustomField;
+/** The form keys the unified Form Setup supports. */
+export type FormKey = "lead" | "task" | "asset" | "visitor" | "staff";
+export interface FormSetup {
+  form: FormKey;
+  requirable: { key: string; label: string }[];
+  required_fields: string[];
+  custom_fields: CustomField[];
+  can_manage: boolean;
+}
+export const getFormSetup = (form: FormKey) => clientGet<FormSetup>(`/form-setup/${form}`);
+export const saveFormFields = (form: FormKey, body: { required_fields: string[]; custom_fields: CustomField[] }) =>
+  clientPost<{ message: string; required_fields: string[]; custom_fields: CustomField[] }>(`/form-field-settings/${form}`, body as unknown as Record<string, unknown>);
 
 export interface TaskComment {
   id: number;
@@ -546,8 +752,8 @@ export interface ClientActivity {
 }
 
 export const MODULES = [
-  "dashboard", "leads", "leads_setup", "team", "roles", "tasks", "assets",
-  "announcements", "chat", "notifications", "email_config", "settings",
+  "dashboard", "leads", "leads_setup", "followups", "team", "roles", "tasks", "assets",
+  "calls", "reports", "announcements", "chat", "notifications", "email_config", "settings",
 ] as const;
 
 // ---- endpoints ----
@@ -561,13 +767,53 @@ export const getFeatures = () =>
 
 // ---- current user access (admin vs staff, effective permissions) ----
 export interface MeInfo {
-  user: { id: number; email: string; role: string; name?: string; staff_id?: number; role_id?: number | null; client_id?: number | null };
+  user: { id: number; email: string; role: string; name?: string; staff_id?: number; role_id?: number | null; client_id?: number | null; must_change_password?: boolean };
   is_admin: boolean;
   role: string;
   permissions: Record<string, Perm>;
   modules: string[];
+  /** Super-admin "login as client" state (drives the impersonation banner). */
+  impersonating?: boolean;
+  impersonator_name?: string | null;
+  client_name?: string | null;
 }
 export const getMe = () => clientGet<MeInfo>("/me");
+
+/** Exit super-admin impersonation, restoring the admin session. Raw fetch (not /client-prefixed). */
+export const stopImpersonation = () =>
+  fetch(`${API_URL}/auth/stop-impersonation`, { method: "POST", credentials: "include" }).then(handle) as Promise<{ restored: boolean }>;
+
+// ---- my profile (own account; works for both the client admin and staff) ----
+export interface ProfileInfo {
+  name: string;
+  email: string;
+  avatar: string;
+  phone: string;
+  designation: string;
+  /** Admins edit a platform account; staff edit their team profile (can set phone). */
+  is_admin: boolean;
+}
+export const getProfile = () => clientGet<{ profile: ProfileInfo }>("/profile");
+export const updateProfile = (body: { name?: string; email?: string; phone?: string; avatar?: string }) =>
+  clientPost<{ message: string; profile: ProfileInfo }>("/profile", body);
+export const changePassword = (body: { current_password: string; new_password: string }) =>
+  clientPost<{ message: string }>("/password", body);
+
+// ---- global search (top bar) ----
+export interface SearchItem {
+  id: number;
+  title: string;
+  subtitle: string;
+  /** In-app link to the section/record. */
+  href: string;
+}
+export interface SearchGroup {
+  key: string;
+  label: string;
+  items: SearchItem[];
+}
+export const globalSearch = (q: string) =>
+  clientGet<{ query: string; groups: SearchGroup[] }>(`/search?q=${encodeURIComponent(q)}`);
 
 // ---- per-user table layout (visible columns, order, widths, alignment) ----
 /** Saved layout for one data table; `null` keys fall back to the column default. */
@@ -580,6 +826,8 @@ export interface TableConfig {
   widths?: Record<string, number>;
   /** Alignment per column key. */
   aligns?: Record<string, "left" | "center" | "right">;
+  /** The user's chosen rows-per-page for this table (overrides the client default). */
+  pageSize?: number;
 }
 export const getTableConfig = (tableKey: string) =>
   clientGet<{ config: TableConfig | null }>(`/table-prefs/${tableKey}`);
@@ -597,6 +845,14 @@ import type { Branding } from "./theme";
 export const getBranding = () => clientGet<{ branding: Branding }>("/branding");
 export const saveBranding = (b: Partial<Branding>) =>
   clientPost<{ message: string; branding: Branding }>("/settings", b as Record<string, unknown>);
+
+// ---- web push (browser notifications; gated per client by the web_push feature) ----
+export const getPushPublicKey = () =>
+  clientGet<{ key: string; enabled: boolean }>("/push/public-key");
+export const savePushSubscription = (subscription: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
+  clientPost<{ message: string }>("/push/subscribe", { subscription } as Record<string, unknown>);
+export const deletePushSubscription = (endpoint: string) =>
+  clientPost<{ message: string }>("/push/unsubscribe", { endpoint });
 
 // ---- billing ----
 export interface PlanCatalogItem {
@@ -672,7 +928,12 @@ export interface StaffLeads {
 export const getStaffLeads = (id: number) => clientGet<StaffLeads>(`/staff/${id}/leads`);
 export const createStaff = (b: Record<string, unknown>) => clientPost("/staff", b);
 export const updateStaff = (id: number, b: Record<string, unknown>) => clientPost(`/staff/${id}`, b);
-export const deleteStaff = (id: number) => clientPost(`/staff/${id}/delete`);
+export const deleteStaff = (id: number, body?: Record<string, unknown>) => clientPost(`/staff/${id}/delete`, body);
+/** How many active leads are assigned to a member (delete guard). */
+export const getStaffLeadLoad = (id: number) => clientGet<{ assigned_leads: number }>(`/staff/${id}/lead-load`);
+/** Transfer a member's leads to one or more members (round-robin) before deleting them. */
+export const reassignStaffLeads = (id: number, body: { targets: number[]; update_assigned_date?: boolean; notify?: boolean; status_id?: number; lead_type_id?: number; source_id?: number }) =>
+  clientPost<{ message: string; moved: number; per_target: Record<string, number> }>(`/staff/${id}/reassign-leads`, body as unknown as Record<string, unknown>);
 
 export const getLeadStatuses = () => clientGet<{ lead_statuses: LeadStatus[] }>("/lead-statuses");
 export const createLeadStatus = (b: Record<string, unknown>) => clientPost("/lead-statuses", b);
@@ -689,7 +950,30 @@ export const getLeadsSetup = () =>
     lead_types: LeadType[];
     conversion_types: ConversionType[];
     followup_groups: FollowupGroup[];
+    states: State[];
+    cities: City[];
+    required_fields: string[];
   }>("/leads-setup");
+
+// Which lead-form fields are mandatory (admin-configured). Returns the cleaned list.
+export const saveLeadRequiredFields = (fields: string[]) =>
+  clientPost<{ message: string; required_fields: string[] }>("/lead-field-settings", { fields });
+
+// Lead-form fields an admin can mark mandatory. `phone` and `status` are always
+// required and so are not listed here. Keep keys in sync with the backend's
+// CONFIGURABLE_REQUIRED_FIELDS and the lead form's Draft field names.
+export const LEAD_REQUIRABLE_FIELDS: { key: string; label: string }[] = [
+  { key: "name", label: "Name" },
+  { key: "reference_name", label: "Reference name" },
+  { key: "alt_phone", label: "Alternative phone" },
+  { key: "sub_status_id", label: "Sub status" },
+  { key: "source_id", label: "Lead source" },
+  { key: "lead_type_id", label: "Lead type" },
+  { key: "email", label: "Email" },
+  { key: "assigned_to", label: "Assigned to" },
+  { key: "city", label: "City" },
+  { key: "state", label: "State" },
+];
 
 export const getLeadTypes = () => clientGet<{ lead_types: LeadType[] }>("/lead-types");
 export const createLeadType = (b: Record<string, unknown>) => clientPost("/lead-types", b);
@@ -709,6 +993,18 @@ export const updateFollowupGroup = (id: number, b: Record<string, unknown>) => c
 export const deleteFollowupGroup = (id: number) => clientPost(`/followup-groups/${id}/delete`);
 export const reorderFollowupGroups = (order: number[]) => clientPost("/followup-groups/reorder", { order });
 
+export const getStates = () => clientGet<{ states: State[] }>("/states");
+export const createState = (b: Record<string, unknown>) => clientPost("/states", b);
+export const updateState = (id: number, b: Record<string, unknown>) => clientPost(`/states/${id}`, b);
+export const deleteState = (id: number) => clientPost(`/states/${id}/delete`);
+export const reorderStates = (order: number[]) => clientPost("/states/reorder", { order });
+
+export const getCities = () => clientGet<{ cities: City[] }>("/cities");
+export const createCity = (b: Record<string, unknown>) => clientPost("/cities", b);
+export const updateCity = (id: number, b: Record<string, unknown>) => clientPost(`/cities/${id}`, b);
+export const deleteCity = (id: number) => clientPost(`/cities/${id}/delete`);
+export const reorderCities = (order: number[]) => clientPost("/cities/reorder", { order });
+
 export const getMarketingTypes = () => clientGet<{ marketing_types: MarketingType[] }>("/marketing-types");
 export const createMarketingType = (b: Record<string, unknown>) => clientPost("/marketing-types", b);
 export const updateMarketingType = (id: number, b: Record<string, unknown>) => clientPost(`/marketing-types/${id}`, b);
@@ -721,10 +1017,31 @@ export const updateLeadSource = (id: number, b: Record<string, unknown>) => clie
 export const deleteLeadSource = (id: number) => clientPost(`/lead-sources/${id}/delete`);
 export const reorderLeadSources = (order: number[]) => clientPost("/lead-sources/reorder", { order });
 
-export const getAnnouncements = (params: { limit?: number; offset?: number } = {}) => {
+export interface AnnouncementQuery {
+  limit?: number;
+  offset?: number;
+  /** Free-text search over title + body. */
+  q?: string;
+  /** Comma-separated audience subset: "all,department,staff". */
+  audience?: string;
+  /** "1" to show only pinned announcements. */
+  pinned?: string;
+  /** "1" to show only announcements that require acknowledgement. */
+  require_ack?: string;
+  /** Created-date range (inclusive, YYYY-MM-DD). */
+  from?: string;
+  to?: string;
+}
+export const getAnnouncements = (params: AnnouncementQuery = {}) => {
   const q = new URLSearchParams();
   if (params.limit) q.set("limit", String(params.limit));
   if (params.offset) q.set("offset", String(params.offset));
+  if (params.q) q.set("q", params.q);
+  if (params.audience) q.set("audience", params.audience);
+  if (params.pinned) q.set("pinned", params.pinned);
+  if (params.require_ack) q.set("require_ack", params.require_ack);
+  if (params.from) q.set("from", params.from);
+  if (params.to) q.set("to", params.to);
   return clientGet<{
     announcements: Announcement[];
     has_more: boolean;
@@ -732,6 +1049,8 @@ export const getAnnouncements = (params: { limit?: number; offset?: number } = {
     staff?: { id: number; name: string; department_id: number | null }[];
   }>(`/announcements?${q.toString()}`);
 };
+export const getAnnouncementsUnread = () => clientGet<{ unread: number }>("/announcements/unread-count");
+export const markAllAnnouncementsRead = () => clientPost<{ message: string }>("/announcements/read-all");
 export const createAnnouncement = (b: Record<string, unknown>) => clientPost("/announcements", b);
 export const deleteAnnouncement = (id: number) => clientPost(`/announcements/${id}/delete`);
 export const getAnnouncementReaders = (id: number) =>
@@ -806,6 +1125,23 @@ export const restoreOfficeLocation = (id: number) => clientPost(`/office-locatio
 
 // ---- assets ----
 export const getAssets = () => clientGet<{ assets: Asset[] }>("/assets");
+
+/** Built-in asset fields an admin can mark mandatory (name is always required). */
+export const ASSET_REQUIRABLE_FIELDS: { key: string; label: string }[] = [
+  { key: "series_model", label: "Series / model" },
+  { key: "asset_group", label: "Asset group" },
+  { key: "managed_by", label: "Managed by" },
+  { key: "asset_location", label: "Location" },
+  { key: "purchase_date", label: "Purchase date" },
+  { key: "warranty_months", label: "Warranty (months)" },
+  { key: "unit_price", label: "Unit price" },
+  { key: "supplier_name", label: "Supplier name" },
+];
+export const getAssetSetup = () =>
+  clientGet<{ required_fields: string[]; custom_fields: TaskCustomField[] }>("/asset-setup");
+export const saveAssetFieldSettings = (body: { required_fields: string[]; custom_fields: TaskCustomField[] }) =>
+  clientPost<{ message: string; required_fields: string[]; custom_fields: TaskCustomField[] }>("/asset-field-settings", body as unknown as Record<string, unknown>);
+
 export const createAsset = (b: Record<string, unknown>) => clientPost("/assets", b);
 export const updateAsset = (id: number, b: Record<string, unknown>) => clientPost(`/assets/${id}`, b);
 export const deleteAsset = (id: number) => clientPost(`/assets/${id}/delete`);

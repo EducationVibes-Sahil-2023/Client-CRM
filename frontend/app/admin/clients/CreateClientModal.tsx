@@ -20,11 +20,12 @@ interface Form {
   admin_name: string;
   admin_email: string;
   admin_password: string;
+  email_credentials: boolean;
 }
 
 const empty: Form = {
   name: "", email: "", phone: "", plan: "starter", status: "active",
-  admin_name: "", admin_email: "", admin_password: "",
+  admin_name: "", admin_email: "", admin_password: "", email_credentials: true,
 };
 
 interface CreateResult {
@@ -32,6 +33,8 @@ interface CreateResult {
   db_name: string;
   db_provisioned: boolean;
   admin_email: string | null;
+  email_sent?: boolean;
+  email_error?: string | null;
 }
 
 export default function CreateClientModal({
@@ -87,10 +90,13 @@ export default function CreateClientModal({
         await saveClientFeatures(res.client_id, features.map((f) => ({ key: f.key, enabled: f.enabled, limit: f.limit })))
           .catch(() => {});
       }
+      const emailNote = form.email_credentials
+        ? (res.email_sent ? " Credentials emailed." : ` Credentials not emailed (${res.email_error ?? "email not configured"}).`)
+        : "";
       toast.success(
-        res.db_provisioned
+        (res.db_provisioned
           ? `Database "${res.db_name}" provisioned. Admin: ${res.admin_email}`
-          : `Client created. Database "${res.db_name}" needs manual setup.`,
+          : `Client created. Database "${res.db_name}" needs manual setup.`) + emailNote,
         { title: "Client created 🎉", duration: 7000 },
       );
       reset();
@@ -180,6 +186,10 @@ export default function CreateClientModal({
               </div>
             </FieldRow>
           </div>
+          <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+            <input type="checkbox" checked={form.email_credentials} onChange={(e) => setForm((f) => ({ ...f, email_credentials: e.target.checked }))} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+            Email these login details to the client
+          </label>
         </section>
 
         {/* Features & limits */}

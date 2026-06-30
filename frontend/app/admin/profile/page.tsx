@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { adminUpload, changePassword, getProfile, updateProfile } from "../../lib/admin";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, PageHeader, Spinner } from "../ui";
+import { Card, PageHeader, SkeletonText } from "../ui";
 
 export default function ProfilePage() {
   const toast = useToast();
@@ -66,7 +66,7 @@ export default function ProfilePage() {
     }
   }
 
-  if (!loaded) return (<><PageHeader title="My Profile" /><Card><Spinner /></Card></>);
+  if (!loaded) return (<><PageHeader title="My Profile" /><Card><SkeletonText lines={5} /></Card></>);
 
   const inputCls = "w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
 

@@ -1,6 +1,10 @@
-import { API_URL } from "./api";
+import { API_URL, redirectToLogin } from "./api";
 
 async function handle(res: Response) {
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error("Your session has expired. Please sign in again.");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msgs = (data as Record<string, unknown>)?.messages;

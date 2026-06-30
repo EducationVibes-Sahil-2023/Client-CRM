@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Spinner, EmptyState } from "./ui";
+import { Skeleton, SkeletonCard, EmptyState } from "./ui";
 import { useTableConfig, ColumnSettings } from "./tableConfig";
+import { PAGE_SIZE_OPTIONS } from "../lib/theme";
 
 export type DataView = "list" | "grid";
 
@@ -47,6 +48,19 @@ interface DataTableProps<T> {
   totalPages?: number;
   onPage?: (p: number) => void;
   total?: number;
+  /**
+   * Self-contained client-side pagination: DataTable slices `rows` itself,
+   * renders the page bar + a rows-per-page selector, and (when `tableKey` is
+   * set) persists the chosen size per user. Ignored when an external `onPage`
+   * is provided (the page owns pagination then, e.g. the leads filter drawer).
+   */
+  paginate?: boolean;
+  /** Default rows-per-page for internal pagination (usually the client setting). */
+  defaultPageSize?: number;
+  /** Controlled rows-per-page for EXTERNAL pagination (pages that own onPage). */
+  pageSize?: number;
+  /** Called when the user picks a new rows-per-page (external pagination). */
+  onPageSize?: (n: number) => void;
   /** When provided, a grid (details) view becomes available alongside the list. */
   card?: (row: T) => React.ReactNode;
   /** Initial view; defaults to "list". */
@@ -57,6 +71,14 @@ interface DataTableProps<T> {
   /** Enables a built-in search box that filters rows on these fields. */
   searchKeys?: (row: T) => (string | null | undefined)[];
   searchPlaceholder?: string;
+  /** Initial value for the built-in search box (e.g. a global-search deep link). */
+  initialSearch?: string;
+  /**
+   * In grid (card) view, reveal cards progressively as the user scrolls instead
+   * of showing a page bar. Only affects the grid view; the list view keeps its
+   * normal pagination. Requires `paginate` + a `card` renderer.
+   */
+  infiniteScroll?: boolean;
   /** Extra controls rendered on the left of the toolbar. */
   toolbar?: React.ReactNode;
   /**
@@ -97,11 +119,17 @@ export function DataTable<T>({
   totalPages = 1,
   onPage,
   total,
+  paginate,
+  defaultPageSize,
+  pageSize: controlledPageSize,
+  onPageSize,
   card,
   defaultView = "list",
   view: controlledView,
   searchKeys,
   searchPlaceholder = "Search…",
+  initialSearch = "",
+  infiniteScroll,
   toolbar,
   tableKey,
   nowrap,
@@ -112,7 +140,7 @@ export function DataTable<T>({
   canRenameColumns,
 }: DataTableProps<T>) {
   const [internalView, setInternalView] = useState<DataView>(defaultView);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialSearch);
   const isControlled = controlledView !== undefined;
   const view = isControlled ? controlledView : internalView;
   const setView = setInternalView;
@@ -156,16 +184,72 @@ export function DataTable<T>({
     return rows.filter((r) => searchKeys(r).some((v) => (v ?? "").toLowerCase().includes(q)));
   }, [rows, searchKeys, query]);
 
+  // Self-contained client-side pagination. Active only when `paginate` is set
+  // and the page hasn't taken over pagination via its own `onPage`. The chosen
+  // rows-per-page persists per user when a tableKey is present; otherwise it
+  // lives in component state (resets on reload).
+  const internalPaginate = !!paginate && !onPage;
+  const [internalPage, setInternalPage] = useState(1);
+  const [localPageSize, setLocalPageSize] = useState<number | undefined>(undefined);
+  const effectivePageSize =
+    (customize ? tc.pageSize : localPageSize) ?? defaultPageSize ?? 15;
+  const setPageSize = (n: number) => {
+    if (customize) tc.setPageSize(n);
+    else setLocalPageSize(n);
+    setInternalPage(1);
+  };
+
+  // Reset to page 1 whenever the result set changes shape (search/page-size).
+  useEffect(() => { setInternalPage(1); }, [query, effectivePageSize]);
+
+  const internalTotalPages = internalPaginate
+    ? Math.max(1, Math.ceil(visible.length / effectivePageSize))
+    : 1;
+  const safeInternalPage = Math.min(internalPage, internalTotalPages);
+  const displayRows = useMemo(() => {
+    if (!internalPaginate) return visible;
+    const start = (safeInternalPage - 1) * effectivePageSize;
+    return visible.slice(start, start + effectivePageSize);
+  }, [internalPaginate, visible, safeInternalPage, effectivePageSize]);
+
+  // Grid-view infinite scroll: progressively reveal cards (in page-size batches)
+  // as a sentinel near the end of the list scrolls into view. Only kicks in for
+  // the grid view with internal pagination; the list view keeps its page bar.
+  const infinite = !!infiniteScroll && !!card && view === "grid" && internalPaginate;
+  const batch = Math.max(1, effectivePageSize);
+  const [visibleCount, setVisibleCount] = useState(batch);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // Reset the revealed window when the result set or batch size changes.
+  useEffect(() => { if (infinite) setVisibleCount(batch); }, [infinite, batch, query, visible.length]);
+
+  // Reveal the next batch whenever the sentinel is in view (re-observes after
+  // each reveal so a sentinel that's still visible keeps loading).
+  useEffect(() => {
+    if (!infinite) return;
+    const el = sentinelRef.current;
+    if (!el || visibleCount >= visible.length) return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries[0]?.isIntersecting) setVisibleCount((c) => Math.min(c + batch, visible.length)); },
+      { rootMargin: "240px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [infinite, batch, visible.length, visibleCount]);
+
+  const gridRows = infinite ? visible.slice(0, visibleCount) : displayRows;
+  const hasMore = infinite && visibleCount < visible.length;
+
   // Bulk-selection state (only active when selectable). Select-all toggles the
-  // currently visible rows so it plays nicely with search/pagination.
+  // rows on the current page so it plays nicely with search/pagination.
   const selected = selectedKeys ?? EMPTY_SELECTION;
-  const allSelected = selectable && visible.length > 0 && visible.every((r) => selected.has(getKey(r)));
-  const someSelected = selectable && !allSelected && visible.some((r) => selected.has(getKey(r)));
+  const allSelected = selectable && displayRows.length > 0 && displayRows.every((r) => selected.has(getKey(r)));
+  const someSelected = selectable && !allSelected && displayRows.some((r) => selected.has(getKey(r)));
   const toggleAll = () => {
     if (!onSelectionChange) return;
     const next = new Set(selected);
-    if (allSelected) visible.forEach((r) => next.delete(getKey(r)));
-    else visible.forEach((r) => next.add(getKey(r)));
+    if (allSelected) displayRows.forEach((r) => next.delete(getKey(r)));
+    else displayRows.forEach((r) => next.add(getKey(r)));
     onSelectionChange(next);
   };
   const toggleRow = (key: string | number) => {
@@ -181,24 +265,84 @@ export function DataTable<T>({
   const showToolbar = !isControlled && !!(card || searchKeys || toolbar);
   const shell = "overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm";
 
-  const pager = !loading && visible.length > 0 && onPage && (
-    <Pagination page={page} totalPages={totalPages} onPage={onPage} total={total} count={visible.length} align={pageAlign} />
+  const pager = !loading && visible.length > 0 && (
+    onPage ? (
+      <Pagination page={page} totalPages={totalPages} onPage={onPage} total={total} count={visible.length} align={pageAlign} pageSize={controlledPageSize} onPageSize={onPageSize} />
+    ) : internalPaginate ? (
+      <Pagination
+        page={safeInternalPage}
+        totalPages={internalTotalPages}
+        onPage={setInternalPage}
+        total={visible.length}
+        count={visible.length}
+        align={pageAlign}
+        pageSize={effectivePageSize}
+        onPageSize={setPageSize}
+      />
+    ) : null
   );
+
+  // Has-actions / leading-checkbox flags, reused by the skeleton + real table.
+  const hasActionsCol = !!(rowActions || quickActions);
 
   let body: React.ReactNode;
   if (loading) {
-    body = <div className={shell}><Spinner /></div>;
+    // Content-shaped skeleton: real headers (so columns don't jump when data
+    // arrives) over shimmering placeholder rows, or placeholder cards in grid view.
+    body = activeView === "grid" && card ? (
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
+      </div>
+    ) : (
+      <div className={shell}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                {selectable && <th className="w-11 px-4 py-2.5" />}
+                {cols.map((c) => (
+                  <th key={c.key} className={`px-4 py-2.5 ${c.className ?? ""}`}><span className="truncate">{c.header}</span></th>
+                ))}
+                {hasActionsCol && <th className="px-4 py-2.5 text-right">Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: 7 }).map((_, r) => (
+                <tr key={r} className="border-b border-slate-100 last:border-0">
+                  {selectable && <td className="px-4 py-3"><Skeleton className="h-4 w-4" /></td>}
+                  {cols.map((c, ci) => (
+                    <td key={c.key} className="px-4 py-3"><Skeleton className={`h-3.5 ${ci === 0 ? "w-32" : "w-20"}`} /></td>
+                  ))}
+                  {hasActionsCol && <td className="px-4 py-3"><Skeleton className="ml-auto h-6 w-12" /></td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
   } else if (visible.length === 0) {
     body = <div className={shell}><EmptyState title={emptyTitle} hint={emptyHint} /></div>;
   } else if (activeView === "grid" && card) {
     body = (
       <>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {visible.map((row) => (
+          {gridRows.map((row) => (
             <div key={getKey(row)}>{card(row)}</div>
           ))}
         </div>
-        {pager && <div className={`mt-4 ${shell}`}>{pager}</div>}
+        {infinite ? (
+          hasMore ? (
+            <div ref={sentinelRef} className="flex items-center justify-center gap-2 py-6 text-sm text-slate-400">
+              <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" /></svg>
+              Loading more…
+            </div>
+          ) : (
+            visible.length > batch && <div className="py-6 text-center text-xs text-slate-400">All {visible.length} shown</div>
+          )
+        ) : (
+          pager && <div className={`mt-4 ${shell}`}>{pager}</div>
+        )}
       </>
     );
   } else {
@@ -273,7 +417,7 @@ export function DataTable<T>({
               </tr>
             </thead>
             <tbody>
-              {visible.map((row) => (
+              {displayRows.map((row) => (
                 <tr
                   key={getKey(row)}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}
@@ -382,17 +526,20 @@ export function IconButton({
   onClick,
   children,
   danger = false,
+  disabled = false,
 }: {
   title: string;
   onClick?: () => void;
   children: React.ReactNode;
   danger?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       title={title}
       onClick={onClick}
-      className={`flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition ${
+      disabled={disabled}
+      className={`flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition disabled:cursor-not-allowed disabled:opacity-50 ${
         danger
           ? "hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
           : "hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600"
@@ -449,6 +596,8 @@ export function Pagination({
   total,
   count,
   align = "between",
+  pageSize,
+  onPageSize,
 }: {
   page: number;
   totalPages: number;
@@ -457,8 +606,25 @@ export function Pagination({
   count?: number;
   /** "between" spreads Prev / pages / Next; "right" groups them on the right. */
   align?: "between" | "right";
+  /** Current rows-per-page; renders a selector when paired with onPageSize. */
+  pageSize?: number;
+  onPageSize?: (n: number) => void;
 }) {
   const pages = pageList(page, totalPages);
+  const sizePicker = pageSize !== undefined && onPageSize && (
+    <label className="flex items-center gap-1.5 text-[13px] text-slate-500">
+      <span className="hidden sm:inline">Rows</span>
+      <select
+        value={pageSize}
+        onChange={(e) => onPageSize(Number(e.target.value))}
+        className="rounded-lg border border-slate-200 bg-white py-1.5 pl-2 pr-6 text-[13px] font-medium text-slate-600 transition hover:bg-slate-50 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+      >
+        {PAGE_SIZE_OPTIONS.map((n) => (
+          <option key={n} value={n}>{n}</option>
+        ))}
+      </select>
+    </label>
+  );
   const prevBtn = (
     <button
       disabled={page <= 1}
@@ -504,7 +670,7 @@ export function Pagination({
   if (align === "right") {
     return (
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/40 px-4 py-2.5">
-        <div>{summary}</div>
+        <div className="flex items-center gap-3">{summary}{sizePicker}</div>
         <div className="flex items-center gap-2">{prevBtn}{numbers}{nextBtn}</div>
       </div>
     );
@@ -512,7 +678,7 @@ export function Pagination({
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/40 px-4 py-2.5">
-      {prevBtn}
+      <div className="flex items-center gap-2">{prevBtn}{sizePicker}</div>
       {numbers}
       {nextBtn}
     </div>

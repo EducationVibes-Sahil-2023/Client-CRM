@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getStaff, type Staff } from "../../lib/client";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
-import { PageHeader, Card, Spinner } from "../../admin/ui";
+import { PageHeader, Card, SkeletonBlock } from "../../admin/ui";
 
 export default function OrgChartPage() {
   const toast = useToast();
@@ -92,7 +92,7 @@ export default function OrgChartPage() {
       />
 
       {staff === null ? (
-        <Card><Spinner /></Card>
+        <SkeletonBlock className="h-96" />
       ) : staff.length === 0 ? (
         <Card><div className="py-12 text-center text-sm text-slate-400">No team members yet. Add staff and set their reporting person to see the hierarchy.</div></Card>
       ) : (

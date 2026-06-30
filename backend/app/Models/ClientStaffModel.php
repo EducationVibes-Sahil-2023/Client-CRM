@@ -10,7 +10,7 @@ class ClientStaffModel extends TenantModel
         'client_id', 'name', 'email', 'phone', 'avatar', 'emp_code', 'designation', 'alt_phone',
         'role_id', 'reports_to', 'lead_type_id', 'office_location_id', 'department_id',
         'facebook', 'linkedin', 'skype', 'email_signature', 'password', 'status',
-        'extra_permissions',
+        'extra_permissions', 'custom_fields',
     ];
 
     // Removing a staff member soft-deletes them (reversible); listings and the

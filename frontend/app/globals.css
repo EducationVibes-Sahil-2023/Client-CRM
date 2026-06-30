@@ -17,6 +17,14 @@
      client shell so the rest of the app (public site, admin) is untouched.
    ===================================================================== */
 
+/* ---- Typeface ----
+   The chosen font is set as --app-font on the client shell (inline style); the
+   whole panel inherits it. Falls back to the default sans stack. The base
+   font-size is applied to <html> by the shell (scales rem-based text). */
+.client-shell {
+  font-family: var(--app-font, var(--font-sans));
+}
+
 /* ---- Density ---- */
 .client-shell[data-density="compact"] main {
   padding: 0.85rem 1rem;
@@ -101,6 +109,18 @@ html {
 html::-webkit-scrollbar {
   width: 2px;
   height: 0;
+}
+
+/* Opt-in: fully hide the scrollbar on an element while keeping it scrollable
+   (used by the sidebar menu). */
+.no-scrollbar {
+  scrollbar-width: none;             /* Firefox */
+  -ms-overflow-style: none;          /* old Edge / IE */
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;                     /* Chromium / WebKit */
 }
 
 /* ---------- Rich text editor ---------- */
@@ -504,6 +524,35 @@ html::-webkit-scrollbar {
   );
   animation: shimmer 2s infinite;
 }
+
+/* =====================================================================
+   Animated icons — a lightweight motion layer that works on any icon
+   (inline SVG or lucide-react). Put `anim-ico` on an icon inside a
+   `.group` container (nav links, cards, buttons) and it plays on hover.
+   Variants pick the motion; `anim-ico-loop` animates continuously.
+   ===================================================================== */
+@keyframes ico-pop    { 0% { transform: scale(1); } 45% { transform: scale(1.22); } 100% { transform: scale(1); } }
+@keyframes ico-wiggle { 0%,100% { transform: rotate(0); } 20% { transform: rotate(-13deg); } 60% { transform: rotate(11deg); } 80% { transform: rotate(-5deg); } }
+@keyframes ico-bounce { 0%,100% { transform: translateY(0); } 40% { transform: translateY(-3px); } 70% { transform: translateY(-1px); } }
+@keyframes ico-float  { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
+@keyframes ico-spin   { to { transform: rotate(360deg); } }
+@keyframes ico-tada   { 0% { transform: scale(1); } 15% { transform: scale(.92) rotate(-4deg); } 40% { transform: scale(1.12) rotate(5deg); } 70% { transform: scale(1.05) rotate(-3deg); } 100% { transform: scale(1) rotate(0); } }
+
+.anim-ico { transition: transform .2s ease, color .2s ease; transform-origin: center; will-change: transform; }
+
+/* Hover-triggered (default = pop). Fires when the icon's `.group` ancestor is hovered. */
+.group:hover .anim-ico            { animation: ico-pop    .4s ease; }
+.group:hover .anim-ico-wiggle     { animation: ico-wiggle .5s ease; }
+.group:hover .anim-ico-bounce     { animation: ico-bounce .5s ease; }
+.group:hover .anim-ico-tada       { animation: ico-tada   .6s ease; }
+/* Also support hovering the icon itself (no group needed). */
+.anim-ico-hover:hover             { animation: ico-pop    .4s ease; }
+
+/* Continuous loops — for live/feedback icons (empty states, badges). */
+.anim-ico-loop-float  { animation: ico-float 2.6s ease-in-out infinite; }
+.anim-ico-loop-bounce { animation: ico-bounce 1.8s ease-in-out infinite; }
+.anim-ico-loop-spin   { animation: ico-spin 1s linear infinite; }
+.anim-ico-loop-tada   { animation: ico-tada 2.4s ease-in-out infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   *,

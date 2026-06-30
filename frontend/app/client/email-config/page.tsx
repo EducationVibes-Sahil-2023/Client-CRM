@@ -14,7 +14,7 @@ import {
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
-import { PageHeader, Card, Field, Spinner } from "../../admin/ui";
+import { PageHeader, Card, Field, SkeletonText } from "../../admin/ui";
 
 function StatusPill({ connected }: { connected?: boolean }) {
   return (
@@ -144,7 +144,7 @@ function GmailCard() {
     }
   }
 
-  if (loading) return <Card className="lg:col-span-3"><Spinner /></Card>;
+  if (loading) return <Card className="lg:col-span-3"><SkeletonText lines={5} /></Card>;
 
   return (
     <>
@@ -295,7 +295,7 @@ function GoogleCalendarCard() {
     }
   }
 
-  if (loading) return <Card className="lg:col-span-3"><Spinner /></Card>;
+  if (loading) return <Card className="lg:col-span-3"><SkeletonText lines={5} /></Card>;
 
   return (
     <>

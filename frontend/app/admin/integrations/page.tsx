@@ -15,7 +15,7 @@ import {
   type GoogleCalendarSettings,
 } from "../../lib/admin";
 import { useToast } from "../../components/toast/ToastProvider";
-import { PageHeader, Card, Field, Spinner } from "../ui";
+import { PageHeader, Card, Field, SkeletonText } from "../ui";
 import RichTextEditor from "../RichTextEditor";
 
 function StatusPill({ connected }: { connected?: boolean }) {
@@ -130,7 +130,7 @@ function GmailCard() {
     }
   }
 
-  if (loading) return <Card className="lg:col-span-3"><Spinner /></Card>;
+  if (loading) return <Card className="lg:col-span-3"><SkeletonText lines={4} /></Card>;
 
   return (
     <>
@@ -263,7 +263,7 @@ function SignatureCard() {
       </div>
 
       {loading ? (
-        <Spinner />
+        <SkeletonText lines={4} />
       ) : (
         <div className="space-y-4">
           <RichTextEditor key={initial} initialHTML={initial} onChange={setHtml} placeholder="e.g. Best regards,&#10;Acme Team · support@acme.com" minHeight={150} />
@@ -339,7 +339,7 @@ function GoogleCalendarCard() {
     }
   }
 
-  if (loading) return <Card className="lg:col-span-3"><Spinner /></Card>;
+  if (loading) return <Card className="lg:col-span-3"><SkeletonText lines={4} /></Card>;
 
   return (
     <>

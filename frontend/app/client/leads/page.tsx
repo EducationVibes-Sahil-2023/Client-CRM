@@ -2,25 +2,37 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  getLeads, createLead, updateLead, deleteLead, importLeads,
+  getLeads, createLead, updateLead, deleteLead, importLeads, bulkUpdateLeads, getLeadImportSetup,
   getLeadsSetup, getStaff, getMe, getLeadAnalytics,
   getLeadDetail, createLeadReminder, deleteLeadReminder, createLeadNote, deleteLeadNote,
+  getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS,
   type Lead, type LeadStatus, type LeadSource, type LeadType, type Staff, type LeadImportResult, type LeadDetail,
-  type LeadAnalytics, type LeadCount,
+  type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
+  type LeadImportColumn,
 } from "../../lib/client";
 import { requestNotifyPermission } from "../../lib/notify";
+import { useClient } from "../ClientContext";
+import { CustomFieldInputs, customFieldErrors } from "../CustomFields";
+import RichTextEditor from "../../admin/RichTextEditor";
+
+/** Plain text from rich-text HTML — for "is it empty" checks before saving. */
+const stripHtml = (h: string) => h.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+import TransfersTab from "./TransfersTab";
+import TransferModal from "./TransferModal";
+import VisitorsTab from "./VisitorsTab";
+import VisitorModal, { visitorDraftFromLead, type VDraft } from "./VisitorModal";
+import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../../admin/ui";
 import { DataTable, IconButton, type Column } from "../../admin/DataTable";
 import { DonutSelect } from "../../admin/Charts";
-import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
+import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { useHiddenPrefs, VisibilityMenu } from "../../admin/tableConfig";
 import { FieldRow, inputCls, isEmail } from "../../admin/clients/formKit";
+import { INDIA_STATES, INDIA_CITIES } from "../../lib/india";
 import { CallActivityItem } from "../../admin/CallActivity";
-
-const PER_PAGE = 15;
 
 // The full leads filter set. `draft` is what the user is editing; `applied` is
 // what actually filters the table — they sync only when the user clicks Apply.
@@ -55,6 +67,11 @@ const FILTER_DEFS: { id: string; label: string }[] = [
   { id: "follow", label: "Follow-up date" },
 ];
 
+// Field key → label, for messages on admin-configured mandatory fields.
+const LEAD_FIELD_LABELS: Record<string, string> = Object.fromEntries(
+  LEAD_REQUIRABLE_FIELDS.map((f) => [f.key, f.label]),
+);
+
 // Options for the follow-up status multi-select filter.
 const FOLLOW_STATUS_OPTIONS: SelectOption[] = [
   { value: "upcoming", label: "Upcoming" },
@@ -76,18 +93,25 @@ const filtersActive = (f: LeadFilters): boolean =>
   !!(f.status.length || f.sub.length || f.source.length || f.assigned.length || f.leadType.length ||
     f.followStatus.length || f.reference.trim() || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow));
 
+// How many filter groups are active — drives the count badge on the Filters button.
+const countActiveFilters = (f: LeadFilters): number =>
+  [f.status.length, f.sub.length, f.source.length, f.assigned.length, f.leadType.length,
+    f.followStatus.length, f.reference.trim(), rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow)]
+    .filter(Boolean).length;
+
 interface Draft {
   id?: number;
   name: string; phone: string; alt_phone: string;
-  status_id: string; sub_status_id: string; source_id: string;
+  status_id: string; sub_status_id: string; source_id: string; lead_type_id: string;
   reference_name: string; email: string;
   assigned_to: string; assigned_date: string;
   city: string; state: string; follow_date: string; created_date: string;
+  custom: Record<string, string>;
 }
 const blank: Draft = {
-  name: "", phone: "", alt_phone: "", status_id: "", sub_status_id: "", source_id: "",
+  name: "", phone: "", alt_phone: "", status_id: "", sub_status_id: "", source_id: "", lead_type_id: "",
   reference_name: "", email: "", assigned_to: "", assigned_date: "",
-  city: "", state: "", follow_date: "", created_date: "",
+  city: "", state: "", follow_date: "", created_date: "", custom: {},
 };
 
 const DOT: Record<string, string> = {
@@ -116,6 +140,7 @@ function toDraft(l: Lead): Draft {
     status_id: l.status_id ? String(l.status_id) : "",
     sub_status_id: l.sub_status_id ? String(l.sub_status_id) : "",
     source_id: l.source_id ? String(l.source_id) : "",
+    lead_type_id: l.lead_type_id ? String(l.lead_type_id) : "",
     reference_name: l.reference_name ?? "",
     email: l.email ?? "",
     assigned_to: l.assigned_to ? String(l.assigned_to) : "",
@@ -124,6 +149,7 @@ function toDraft(l: Lead): Draft {
     state: l.state ?? "",
     follow_date: l.follow_date ? l.follow_date.slice(0, 10) : "",
     created_date: l.created_date ? l.created_date.slice(0, 10) : "",
+    custom: { ...(l.custom_fields ?? {}) },
   };
 }
 
@@ -169,10 +195,6 @@ const HEADER_ALIAS: Record<string, string> = {
 };
 const normHeader = (h: string) => h.trim().toLowerCase().replace(/[\s./-]+/g, "_").replace(/^_+|_+$/g, "");
 
-const TEMPLATE_HEADERS = [
-  "name", "phone", "alternative phone", "status", "sub status", "reference name",
-  "email", "assigned", "assigned date", "city", "state", "follow date", "created date",
-];
 
 /** Local "YYYY-MM-DDTHH:MM" for a datetime-local input's min/value. */
 function toLocalInput(d: Date): string {
@@ -252,13 +274,33 @@ function activityStyle(action: string): { ring: string; dot: string; icon: strin
 export default function ClientLeads() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { can, hasFeature, defaultPageSize } = useClient();
+  // The Calls tab/column needs both the plan feature AND the call-tracking
+  // permission (admins implicitly hold it; staff must be granted it).
+  const canViewCalls = hasFeature("call_tracking") && can("calls");
+  // Lead transfer: the Transfers tab + the per-row "Transfer" action need the
+  // plan feature AND the lead_transfer permission.
+  const canTransfer = hasFeature("lead_transfer") && can("lead_transfer");
+  const canVisitors = hasFeature("visitors") && can("visitors");
+  const [leadTab, setLeadTab] = useState<"leads" | "transfers" | "visitors">("leads");
+  const [transferLead, setTransferLead] = useState<{ id: number; name: string } | null>(null);
+  const [transferMode, setTransferMode] = useState<"direct" | "approval">("approval");
+  // Per-lead "Log visitor" — opens the shared VisitorModal pre-filled from the lead.
+  const [visitorDraft, setVisitorDraft] = useState<VDraft | null>(null);
+  const [visitorTypes, setVisitorTypes] = useState<VisitorType[]>([]);
+  const [visitorStatuses, setVisitorStatuses] = useState<VisitorStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false); // client admin → may rename columns
   const [leads, setLeads] = useState<Lead[]>([]);
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
   const [leadTypes, setLeadTypes] = useState<LeadType[]>([]);
+  const [states, setStates] = useState<State[]>([]);
+  const [cities, setCities] = useState<City[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
+  // Lead-form fields the admin has marked mandatory (keys match Draft fields).
+  const [requiredFields, setRequiredFields] = useState<Set<string>>(new Set());
+  const [leadCustomFields, setLeadCustomFields] = useState<CustomField[]>([]);
 
   // Lead-volume summary (counts by dimension) shown between filters and table.
   const [analytics, setAnalytics] = useState<LeadAnalytics | null>(null);
@@ -279,14 +321,19 @@ export default function ClientLeads() {
   const [savingReminder, setSavingReminder] = useState(false);
   const [noteBody, setNoteBody] = useState("");
   const [savingNote, setSavingNote] = useState(false);
+  // Bumped after adding a note/reminder to remount (and clear) the rich editors.
+  const [composerKey, setComposerKey] = useState(0);
 
   // Search applies instantly; every other filter is staged in `filters` and
   // only takes effect (→ `appliedFilters`) when the user clicks Apply.
-  const [search, setSearch] = useState("");
+  // Seed from a global-search deep link (?q=...) when present.
+  const [search, setSearch] = useState(() => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("q") ?? "" : ""));
   const [filters, setFilters] = useState<LeadFilters>(BLANK_FILTERS);
   const [appliedFilters, setAppliedFilters] = useState<LeadFilters>(BLANK_FILTERS);
   const [applying, setApplying] = useState(false);
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(defaultPageSize);
   const filterPrefs = useHiddenPrefs("leads_filters");
   // One updater for any single filter field.
   function setFilter<K extends keyof LeadFilters>(key: K, value: LeadFilters[K]) {
@@ -297,6 +344,20 @@ export default function ClientLeads() {
   const [selectedIds, setSelectedIds] = useState<Set<string | number>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
 
+  // Bulk-edit modal: per-field "change" toggles + values + assignment mode.
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [bChg, setBChg] = useState({ status: false, sub: false, source: false, type: false, created: false, assign: false });
+  const [bStatus, setBStatus] = useState("");
+  const [bSub, setBSub] = useState("");
+  const [bSource, setBSource] = useState("");
+  const [bType, setBType] = useState("");
+  const [bCreated, setBCreated] = useState("");
+  const [bMode, setBMode] = useState<"single" | "robin">("single");
+  const [bAssignees, setBAssignees] = useState<string[]>([]);
+  const [bNotify, setBNotify] = useState(true);
+  const toggleChg = (k: keyof typeof bChg) => setBChg((c) => ({ ...c, [k]: !c[k] }));
+
   // Import modal
   const [importOpen, setImportOpen] = useState(false);
   const [importRows, setImportRows] = useState<Record<string, string>[]>([]);
@@ -304,23 +365,56 @@ export default function ClientLeads() {
   const [importResult, setImportResult] = useState<LeadImportResult | null>(null);
   const [importing, setImporting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Admin-configured template columns + the batch choices applied to every row.
+  const [importCols, setImportCols] = useState<LeadImportColumn[]>([]);
+  const [iStatus, setIStatus] = useState("");
+  const [iSub, setISub] = useState("");
+  const [iSource, setISource] = useState("");
+  const [iType, setIType] = useState("");
+  const [iMode, setIMode] = useState<"single" | "robin">("single");
+  const [iAssignees, setIAssignees] = useState<string[]>([]);
+  const [iNotify, setINotify] = useState(true);
 
   const load = useCallback(() => {
     // The summary counts load in parallel and refresh after any change.
     getLeadAnalytics().then(setAnalytics).catch(() => {});
-    return Promise.all([getLeads(), getLeadsSetup(), getStaff()])
-      .then(([l, setup, s]) => {
+    // Reference data (setup) and the staff directory are best-effort: a user who
+    // can view leads but lacks leads_setup / team still gets their leads — just
+    // with fewer filter/assignee options — instead of the whole page failing.
+    const setupP = getLeadsSetup().catch(() => null);
+    const staffP = getStaff().catch(() => null);
+    return getLeads()
+      .then(async (l) => {
         setLeads(l.leads ?? []);
-        setStatuses(setup.lead_statuses ?? []);
-        setSources(setup.lead_sources ?? []);
-        setLeadTypes(setup.lead_types ?? []);
-        setStaff(s.staff ?? []);
+        const setup = await setupP;
+        if (setup) {
+          setStatuses(setup.lead_statuses ?? []);
+          setSources(setup.lead_sources ?? []);
+          setLeadTypes(setup.lead_types ?? []);
+          setStates(setup.states ?? []);
+          setCities(setup.cities ?? []);
+          setRequiredFields(new Set(setup.required_fields ?? []));
+        }
+        const s = await staffP;
+        if (s) setStaff(s.staff ?? []);
       })
       .catch(() => toast.error("Could not load leads."))
       .finally(() => setLoading(false));
   }, [toast]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { getMe().then((m) => setIsAdmin(!!m.is_admin)).catch(() => {}); }, []);
+  // Admin-defined custom fields for the lead form (Form Setup).
+  useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
+  // Deep-link to a sub-tab (e.g. notifications link to ?tab=transfers).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t === "transfers" || t === "visitors") setLeadTab(t);
+  }, []);
+  // Know the transfer mode so the request modal shows the right wording.
+  useEffect(() => { if (canTransfer) getLeadTransfers().then((d) => setTransferMode(d.mode)).catch(() => {}); }, [canTransfer]);
+  // Visitor types/statuses for the per-lead "Log visitor" modal.
+  useEffect(() => { if (canVisitors) getVisitorSetup().then((d) => { setVisitorTypes(d.types ?? []); setVisitorStatuses(d.statuses ?? []); }).catch(() => {}); }, [canVisitors]);
 
   // A sub-status has one or more parents; top-level statuses have none.
   const isSub = (s: LeadStatus) => (s.parent_ids?.length ?? 0) > 0 || !!s.parent_id;
@@ -384,6 +478,79 @@ export default function ClientLeads() {
     [staff],
   );
 
+  // Options for the searchable selects in the Add/Edit lead form. These differ
+  // from the filter options: each carries a blank "none" row and the form's
+  // sub-status list is narrowed to the status picked in the draft.
+  const formSubOptions = useMemo<SelectOption[]>(
+    () => [{ value: "", label: "— None —" }, ...subOptions.map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }))],
+    [subOptions],
+  );
+  const formSourceOptions = useMemo<SelectOption[]>(
+    () => [{ value: "", label: "— None —" }, ...sources.map((s) => ({ value: String(s.id), label: s.marketing_type ? `${s.name} · ${s.marketing_type}` : s.name, prefix: statusDot(s.color) }))],
+    [sources],
+  );
+  const formAssignedOptions = useMemo<SelectOption[]>(
+    () => [{ value: "", label: "— Unassigned —" }, ...staff.map((s) => ({ value: String(s.id), label: s.name }))],
+    [staff],
+  );
+  const formLeadTypeOptions = useMemo<SelectOption[]>(
+    () => [{ value: "", label: "— None —" }, ...leadTypes.map((t) => ({ value: String(t.id), label: t.name, prefix: statusDot(t.color) }))],
+    [leadTypes],
+  );
+  // Bulk-edit: sub-statuses under the chosen bulk status; team members for round-robin.
+  const bulkSubOptions = useMemo<SelectOption[]>(
+    () => [{ value: "", label: "— None —" }, ...allSubStatuses
+      .filter((s) => !bStatus || (s.parent_ids ?? []).map(String).includes(bStatus) || String(s.parent_id ?? "") === bStatus)
+      .map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }))],
+    [allSubStatuses, bStatus],
+  );
+  const robinOptions = useMemo<SelectOption[]>(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
+  // Lead options for the per-lead "Log visitor" modal's optional lead link.
+  const leadVisitorOpts = useMemo<SelectOption[]>(
+    () => [{ value: "", label: "— Not linked —" }, ...leads.map((l) => ({ value: String(l.id), label: l.name?.trim() || l.phone }))],
+    [leads],
+  );
+  // State/City selects store the chosen NAME (kept in the lead's city/state text).
+  // City is cascaded: only cities under the selected state show. A legacy/free-text
+  // value not in the managed lists is preserved as its own option so editing never
+  // silently drops it.
+  // City/State are creatable: the datalists below suggest all-India states +
+  // cities, merged with this client's configured lookups and any values already
+  // used on existing leads (so a freshly-typed value is "remembered" next time).
+  // Free typing is always accepted — the lead just stores the text.
+  const leadStateValues = useMemo(
+    () => Array.from(new Set(leads.map((l) => (l.state ?? "").trim()).filter(Boolean))),
+    [leads],
+  );
+  const leadCitiesByState = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const l of leads) {
+      const city = (l.city ?? "").trim();
+      if (!city) continue;
+      const st = (l.state ?? "").trim();
+      if (!m.has(st)) m.set(st, new Set());
+      m.get(st)!.add(city);
+    }
+    return m;
+  }, [leads]);
+  const stateSuggestions = useMemo(
+    () => Array.from(new Set([...INDIA_STATES, ...states.map((s) => s.name), ...leadStateValues])).sort((a, b) => a.localeCompare(b)),
+    [states, leadStateValues],
+  );
+  const citySuggestions = useMemo(() => {
+    const st = (draft?.state ?? "").trim();
+    const set = new Set<string>();
+    if (st) {
+      (INDIA_CITIES[st] ?? []).forEach((c) => set.add(c));
+      cities.filter((c) => c.state === st).forEach((c) => set.add(c.name));
+      (leadCitiesByState.get(st) ?? new Set<string>()).forEach((c) => set.add(c));
+    } else {
+      cities.forEach((c) => set.add(c.name));
+      leadCitiesByState.forEach((s) => s.forEach((c) => set.add(c)));
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [draft?.state, cities, leadCitiesByState]);
+
   // Apply search (instant) + the applied filter set, then paginate.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -410,19 +577,21 @@ export default function ClientLeads() {
     });
   }, [leads, search, appliedFilters]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
   // Clamp the page in render (no effect needed) so a shrinking result set never
   // strands the user on an empty page.
   const safePage = Math.min(page, totalPages);
-  const pageRows = useMemo(() => filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE), [filtered, safePage]);
+  const pageRows = useMemo(() => filtered.slice((safePage - 1) * perPage, safePage * perPage), [filtered, safePage, perPage]);
 
   // Keep the selection in step with the data — drop ids that no longer exist.
   const selectedLeads = useMemo(() => leads.filter((l) => selectedIds.has(l.id)), [leads, selectedIds]);
 
   const draftDirty = useMemo(() => JSON.stringify(filters) !== JSON.stringify(appliedFilters), [filters, appliedFilters]);
   const activeFilters = !!search || filtersActive(appliedFilters);
+  const appliedFilterCount = useMemo(() => countActiveFilters(appliedFilters), [appliedFilters]);
 
   // Commit the staged filters with a brief loader so the change reads as work.
+  // The rail stays open so the table updates beside it.
   function applyFilters() {
     setApplying(true);
     setTimeout(() => {
@@ -497,9 +666,9 @@ export default function ClientLeads() {
     if (new Date(remindAt).getTime() <= Date.now()) { setReminderErr("Choose a future date and time."); return; }
     setSavingReminder(true);
     try {
-      await createLeadReminder(viewing.id, { remind_at: remindAt, note: reminderNote.trim() || undefined });
+      await createLeadReminder(viewing.id, { remind_at: remindAt, note: stripHtml(reminderNote) ? reminderNote : undefined });
       requestNotifyPermission(); // so the alert can fire when it's due
-      setRemindAt(followReminderDefault(viewing)); setReminderNote("");
+      setRemindAt(followReminderDefault(viewing)); setReminderNote(""); setComposerKey((k) => k + 1);
       toast.success("Reminder set.");
       await loadDetail(viewing.id);
     } catch (e) {
@@ -526,11 +695,11 @@ export default function ClientLeads() {
   }
 
   async function addNote() {
-    if (!viewing || !noteBody.trim()) return;
+    if (!viewing || !stripHtml(noteBody)) return;
     setSavingNote(true);
     try {
-      await createLeadNote(viewing.id, noteBody.trim());
-      setNoteBody("");
+      await createLeadNote(viewing.id, noteBody);
+      setNoteBody(""); setComposerKey((k) => k + 1);
       toast.success("Note added.");
       await loadDetail(viewing.id);
     } catch (e) {
@@ -563,6 +732,8 @@ export default function ClientLeads() {
         const next = { ...d, [key]: v };
         // Changing status invalidates a sub-status that no longer belongs to it.
         if (key === "status_id") next.sub_status_id = "";
+        // Changing state clears a city that belonged to the previous state.
+        if (key === "state") next.city = "";
         return next;
       });
   }
@@ -576,12 +747,21 @@ export default function ClientLeads() {
     if (altDigits.length > 0 && altDigits.length !== 10) e.alt_phone = "Enter a 10-digit phone number (without +91).";
     if (!draft.status_id) e.status_id = "Status is required.";
     if (draft.email.trim() && !isEmail(draft.email)) e.email = "Enter a valid email address.";
+    // Admin-configured mandatory fields (Leads Setup → Required Fields).
+    for (const key of requiredFields) {
+      if (e[key]) continue; // a format error already covers this field
+      const val = (draft as unknown as Record<string, unknown>)[key];
+      if (typeof val === "string" ? !val.trim() : !val) {
+        e[key] = `${LEAD_FIELD_LABELS[key] ?? key} is required.`;
+      }
+    }
+    Object.assign(e, customFieldErrors(leadCustomFields, draft.custom));
     setErrors(e);
     if (Object.keys(e).length) return;
 
     setSaving(true);
     try {
-      const body = { ...draft, phone: digits, alt_phone: altDigits };
+      const body = { ...draft, phone: digits, alt_phone: altDigits, custom_fields: draft.custom };
       if (draft.id) await updateLead(draft.id, body);
       else await createLead(body);
       toast.success(draft.id ? "Lead updated." : "Lead added.");
@@ -641,39 +821,132 @@ export default function ClientLeads() {
     }
   }
 
+  function openBulk() {
+    setBChg({ status: false, sub: false, source: false, type: false, created: false, assign: false });
+    setBStatus(""); setBSub(""); setBSource(""); setBType(""); setBCreated("");
+    setBMode("single"); setBAssignees([]); setBNotify(true);
+    setBulkOpen(true);
+  }
+
+  async function applyBulk() {
+    const ids = selectedLeads.map((l) => l.id);
+    if (!ids.length) return;
+    if (!Object.values(bChg).some(Boolean)) { toast.warning("Tick at least one field to change."); return; }
+    if (bChg.status && !bStatus) { toast.warning("Pick a status to apply."); return; }
+    if (bChg.assign && bMode === "robin" && bAssignees.length < 2) { toast.warning("Pick 2+ members for round-robin."); return; }
+    setBulkSaving(true);
+    try {
+      const body: Record<string, unknown> = {
+        ids,
+        change_status: bChg.status, status_id: bStatus,
+        change_sub_status: bChg.sub, sub_status_id: bSub,
+        change_source: bChg.source, source_id: bSource,
+        change_type: bChg.type, lead_type_id: bType,
+        change_created: bChg.created, created_date: bCreated,
+        change_assignee: bChg.assign, assign_mode: bMode, assignees: bMode === "single" ? (bAssignees[0] ? [bAssignees[0]] : []) : bAssignees,
+        notify: bNotify,
+      };
+      const res = await bulkUpdateLeads(body);
+      toast.success(res.message);
+      setBulkOpen(false);
+      setSelectedIds(new Set());
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Bulk update failed.");
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
   // ---- import ----
+  function openImport() {
+    setImportResult(null); setImportRows([]); setImportInfo(null);
+    setIStatus(""); setISub(""); setISource(""); setIType(""); setIMode("single"); setIAssignees([]); setINotify(true);
+    getLeadImportSetup().then((d) => setImportCols(d.columns)).catch(() => {});
+    setImportOpen(true);
+  }
   function pickFile() { setImportResult(null); fileRef.current?.click(); }
 
-  function onFile(file: File) {
-    setImportResult(null);
-    const reader = new FileReader();
-    reader.onload = () => {
-      const grid = parseCSV(String(reader.result ?? ""));
-      if (grid.length < 2) {
-        setImportRows([]); setImportInfo("The file has a header but no data rows.");
-        return;
-      }
-      const headers = grid[0].map((h) => HEADER_ALIAS[normHeader(h)] ?? normHeader(h));
-      const rows = grid.slice(1).map((cells) => {
-        const obj: Record<string, string> = {};
-        headers.forEach((key, idx) => { obj[key] = (cells[idx] ?? "").trim(); });
-        return obj;
-      });
-      setImportRows(rows);
-      const missing = ["phone", "status"].filter((k) => !headers.includes(k));
-      setImportInfo(
-        `${rows.length} row${rows.length === 1 ? "" : "s"} found` +
-        (missing.length ? `. ⚠ Missing required column${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` : "."),
-      );
-    };
-    reader.readAsText(file);
+  // The headers the sheet may use → our column keys (built-ins + custom labels/keys).
+  const headerAlias = useMemo(() => {
+    const m: Record<string, string> = { ...HEADER_ALIAS };
+    importCols.forEach((c) => { m[normHeader(c.label)] = c.key; m[normHeader(c.key)] = c.key; });
+    return m;
+  }, [importCols]);
+
+  function gridToRows(grid: string[][]) {
+    if (grid.length < 2) { setImportRows([]); setImportInfo("The file has a header but no data rows."); return; }
+    const headers = grid[0].map((h) => headerAlias[normHeader(String(h))] ?? normHeader(String(h)));
+    const rows = grid.slice(1).map((cells) => {
+      const obj: Record<string, string> = {};
+      headers.forEach((key, idx) => { obj[key] = String(cells[idx] ?? "").trim(); });
+      return obj;
+    });
+    setImportRows(rows);
+    setImportInfo(`${rows.length} row${rows.length === 1 ? "" : "s"} found.`);
   }
+
+  async function onFile(file: File) {
+    setImportResult(null);
+    const isCsv = /\.csv$/i.test(file.name);
+    if (isCsv) {
+      const reader = new FileReader();
+      reader.onload = () => gridToRows(parseCSV(String(reader.result ?? "")));
+      reader.readAsText(file);
+      return;
+    }
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const grid = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: "", raw: false, blankrows: false });
+      gridToRows(grid as unknown as string[][]);
+    } catch {
+      toast.error("Could not read that file. Upload a .xlsx or .csv.");
+    }
+  }
+
+  // Client-side preview of which rows will be skipped (server re-validates).
+  const importIssues = useMemo(() => {
+    const req = importCols.filter((c) => c.required && c.key !== "phone");
+    const out: { row: number; message: string }[] = [];
+    importRows.forEach((r, i) => {
+      const line = i + 2;
+      const phone = (r.phone ?? "").replace(/\D/g, "");
+      if (!phone) { out.push({ row: line, message: "Contact (phone) is required." }); return; }
+      if (phone.length !== 10) { out.push({ row: line, message: "Phone must be exactly 10 digits." }); return; }
+      const email = (r.email ?? "").trim();
+      if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { out.push({ row: line, message: "Invalid email address." }); return; }
+      const miss = req.filter((c) => !(r[c.key] ?? "").trim()).map((c) => c.label);
+      if (miss.length) out.push({ row: line, message: `${miss.join(", ")} ${miss.length > 1 ? "are" : "is"} required.` });
+    });
+    return out;
+  }, [importRows, importCols]);
+  const readyCount = importRows.length - importIssues.length;
+
+  const importSubOptions = useMemo<SelectOption[]>(() => {
+    const sid = Number(iStatus);
+    return statuses.filter((s) => (s.parent_ids ?? []).includes(sid)).map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }));
+  }, [statuses, iStatus]);
+  const staffOptions = useMemo<SelectOption[]>(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
 
   async function runImport() {
     if (!importRows.length) return;
+    if (!iStatus) { toast.warning("Pick a status to apply to the imported leads."); return; }
+    if (iMode === "robin" && iAssignees.length < 2) { toast.warning("Round-robin needs at least 2 members."); return; }
     setImporting(true); setImportResult(null);
     try {
-      const r = await importLeads(importRows);
+      const assignees = (iMode === "single" ? iAssignees.slice(0, 1) : iAssignees).map(Number).filter(Boolean);
+      const r = await importLeads(importRows, {
+        status_id: Number(iStatus),
+        sub_status_id: iSub ? Number(iSub) : null,
+        source_id: iSource ? Number(iSource) : null,
+        lead_type_id: iType ? Number(iType) : null,
+        assign_mode: iMode,
+        assignees,
+        notify: iNotify,
+      });
       setImportResult(r);
       if (r.inserted) {
         toast.success(`Imported ${r.inserted} lead${r.inserted === 1 ? "" : "s"}.`);
@@ -688,14 +961,29 @@ export default function ClientLeads() {
     }
   }
 
-  function downloadTemplate() {
-    const example = ["John Doe", "9876543210", "", topStatuses[0]?.name ?? "New", "", "Website", "john@example.com", "", "", "Mumbai", "Maharashtra", "", ""];
-    const csv = TEMPLATE_HEADERS.join(",") + "\n" + example.map(csvCell).join(",") + "\n";
+  // Template = only the columns the admin chose to include.
+  function templateParts() {
+    const cols = importCols.filter((c) => c.include);
+    const headers = cols.map((c) => c.label);
+    const example = cols.map((c) => (c.key === "phone" ? "9876543210" : c.key === "email" ? "john@example.com" : c.key === "name" ? "John Doe" : c.key === "city" ? "Mumbai" : ""));
+    return { headers, example };
+  }
+  function downloadTemplateCsv() {
+    const { headers, example } = templateParts();
+    const csv = headers.map(csvCell).join(",") + "\n" + example.map(csvCell).join(",") + "\n";
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
     const a = document.createElement("a");
     a.href = url; a.download = "leads-import-template.csv";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+  }
+  async function downloadTemplateXlsx() {
+    const { headers, example } = templateParts();
+    const XLSX = await import("xlsx");
+    const ws = XLSX.utils.aoa_to_sheet([headers, example]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Leads");
+    XLSX.writeFile(wb, "leads-import-template.xlsx");
   }
 
   function closeImport() {
@@ -740,7 +1028,7 @@ export default function ClientLeads() {
     );
   };
 
-  const columns: Column<Lead>[] = [
+  const allColumns: Column<Lead>[] = [
     { key: "name", header: "Name", width: 180, lockVisible: true, render: (l) => <span className="font-medium text-slate-800">{l.name?.trim() || dash}</span> },
     { key: "phone", header: "Phone", width: 130, render: (l) => <span className="tabular-nums text-slate-600">{l.phone}</span> },
     { key: "status", header: "Status", width: 210, render: statusChip },
@@ -764,8 +1052,42 @@ export default function ClientLeads() {
     { key: "reference_name", header: "Reference", width: 150, defaultHidden: true, render: (l) => l.reference_name ?? dash },
     { key: "state", header: "State", width: 120, defaultHidden: true, render: (l) => l.state ?? dash },
   ];
+  // Hide the "Last call" column for users without the call-tracking permission.
+  const columns = canViewCalls ? allColumns : allColumns.filter((c) => c.key !== "last_call");
 
   const selCls = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
+
+  // Leads | Transfers | Visitors tab bar (only when those features are enabled).
+  const leadSubTabs: [typeof leadTab, string][] = [["leads", "Leads"]];
+  if (canTransfer) leadSubTabs.push(["transfers", "Transfers"]);
+  if (canVisitors) leadSubTabs.push(["visitors", "Visitors"]);
+  const leadTabsBar = leadSubTabs.length > 1 ? (
+    <div className="mb-4 inline-flex rounded-xl border border-slate-200 bg-white p-1">
+      {leadSubTabs.map(([v, lbl]) => (
+        <button key={v} onClick={() => setLeadTab(v)} className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${leadTab === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100"}`}>{lbl}</button>
+      ))}
+    </div>
+  ) : null;
+
+  // Sub-tabs render standalone so the heavy leads UI stays untouched.
+  if (canTransfer && leadTab === "transfers") {
+    return (
+      <>
+        <PageHeader title="Leads" subtitle="Transfer requests — request, approve and track lead hand-offs." />
+        {leadTabsBar}
+        <TransfersTab />
+      </>
+    );
+  }
+  if (canVisitors && leadTab === "visitors") {
+    return (
+      <>
+        <PageHeader title="Leads" subtitle="Visitor requests — log office / seminar / other visits and track their status." />
+        {leadTabsBar}
+        <VisitorsTab />
+      </>
+    );
+  }
 
   return (
     <>
@@ -774,116 +1096,125 @@ export default function ClientLeads() {
         subtitle="Your leads database — add, assign and track every lead."
         action={
           <div className="flex items-center gap-2">
-            <button onClick={() => { setImportResult(null); setImportRows([]); setImportInfo(null); setImportOpen(true); }} className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0-12L8 7m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              Import
-            </button>
-            <button onClick={openNew} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
-              Add lead
-            </button>
+            {can("leads", "create") && (
+              <button onClick={openImport} className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0-12L8 7m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                Import
+              </button>
+            )}
+            {can("leads", "create") && (
+              <button onClick={openNew} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
+                Add lead
+              </button>
+            )}
           </div>
         }
       />
 
-      {/* Filters — apply on “Apply”; the search above the table stays instant. */}
-      <Card className="mb-4">
-        <div className="flex flex-wrap items-start gap-3">
-          {!filterPrefs.isHidden("status") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Status</span>
-              <MultiSelect ariaLabel="Filter by status" value={filters.status}
-                onChange={(v) => setFilters((f) => ({ ...f, status: v, sub: v.length ? f.sub.filter((id) => allSubStatuses.some((s) => String(s.id) === id && ((s.parent_ids ?? []).map(String).some((p) => v.includes(p)) || v.includes(String(s.parent_id ?? ""))))) : f.sub }))}
-                options={statusFilterOptions} placeholder="All statuses" searchPlaceholder="Search status…" />
-            </label>
-          )}
+      {leadTabsBar}
 
-          {!filterPrefs.isHidden("sub") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Sub status</span>
-              <MultiSelect ariaLabel="Filter by sub status" value={filters.sub} onChange={(v) => setFilter("sub", v)} options={subFilterOptions} placeholder="All sub statuses" searchPlaceholder="Search sub status…" />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("source") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Source</span>
-              <MultiSelect ariaLabel="Filter by source" value={filters.source} onChange={(v) => setFilter("source", v)} options={sourceFilterOptions} placeholder="All sources" searchPlaceholder="Search source…" />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("assigned") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Assigned to</span>
-              <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => setFilter("assigned", v)} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("leadType") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Lead type</span>
-              <MultiSelect ariaLabel="Filter by lead type" value={filters.leadType} onChange={(v) => setFilter("leadType", v)} options={leadTypeFilterOptions} placeholder="All types" searchPlaceholder="Search type…" />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("followStatus") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Follow-up status</span>
-              <MultiSelect ariaLabel="Filter by follow-up status" value={filters.followStatus} onChange={(v) => setFilter("followStatus", v)} options={FOLLOW_STATUS_OPTIONS} placeholder="Any status" searchPlaceholder="Search status…" />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("reference") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Reference name</span>
-              <input value={filters.reference} onChange={(e) => setFilter("reference", e.target.value)} placeholder="Reference…" className={`${selCls} w-full`} />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("created") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Date created</span>
-              <DateRangeFilter ariaLabel="Date created" value={filters.created} onChange={(v) => setFilter("created", v)} />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("assignedDate") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Assigned date</span>
-              <DateRangeFilter ariaLabel="Assigned date" value={filters.assignedDate} onChange={(v) => setFilter("assignedDate", v)} />
-            </label>
-          )}
-
-          {!filterPrefs.isHidden("follow") && (
-            <label className="flex w-44 flex-col gap-1">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Follow-up date</span>
-              <DateRangeFilter ariaLabel="Follow-up date" value={filters.follow} onChange={(v) => setFilter("follow", v)} />
-            </label>
-          )}
-        </div>
-
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+      {/* Filters open a full-height right rail (shared FilterRail); this slim bar
+          toggles it and shows what's applied. The table search stays instant. */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <FilterToggle open={filterDrawerOpen} count={appliedFilterCount} onClick={() => { if (!filterDrawerOpen) setFilters(appliedFilters); setFilterDrawerOpen((o) => !o); }} />
+        <div className="flex items-center gap-3">
           <p className="text-xs text-slate-400">
             {filtered.length} of {leads.length} lead{leads.length === 1 ? "" : "s"}{activeFilters ? " match your filters" : ""}.
-            {draftDirty && <span className="ml-1 font-medium text-amber-600">Unapplied changes — click Apply.</span>}
           </p>
-          <div className="flex items-center gap-2">
-            <VisibilityMenu api={filterPrefs} items={FILTER_DEFS} buttonLabel="Filters" title="Show filters" />
-            {(activeFilters || draftDirty) && (
-              <button onClick={clearFilters} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>
-            )}
-            <button
-              onClick={applyFilters}
-              disabled={!draftDirty || applying}
-              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {applying && <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" /></svg>}
-              {applying ? "Applying…" : "Apply filters"}
-            </button>
-          </div>
+          {activeFilters && (
+            <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>
+          )}
         </div>
-      </Card>
+      </div>
 
+      <FilterRail
+        open={filterDrawerOpen}
+        onClose={() => setFilterDrawerOpen(false)}
+        dirty={draftDirty}
+        onReset={() => setFilters(BLANK_FILTERS)}
+        resetDisabled={!filtersActive(filters)}
+        onApply={applyFilters}
+        applying={applying}
+      >
+        <div className="flex items-center justify-end">
+          <VisibilityMenu api={filterPrefs} items={FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
+        </div>
+
+        {!filterPrefs.isHidden("status") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Status</FilterLabel>
+            <MultiSelect ariaLabel="Filter by status" value={filters.status}
+              onChange={(v) => setFilters((f) => ({ ...f, status: v, sub: v.length ? f.sub.filter((id) => allSubStatuses.some((s) => String(s.id) === id && ((s.parent_ids ?? []).map(String).some((p) => v.includes(p)) || v.includes(String(s.parent_id ?? ""))))) : f.sub }))}
+              options={statusFilterOptions} placeholder="All statuses" searchPlaceholder="Search status…" />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("sub") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Sub status</FilterLabel>
+            <MultiSelect ariaLabel="Filter by sub status" value={filters.sub} onChange={(v) => setFilter("sub", v)} options={subFilterOptions} placeholder="All sub statuses" searchPlaceholder="Search sub status…" />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("source") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Source</FilterLabel>
+            <MultiSelect ariaLabel="Filter by source" value={filters.source} onChange={(v) => setFilter("source", v)} options={sourceFilterOptions} placeholder="All sources" searchPlaceholder="Search source…" />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("assigned") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Assigned to</FilterLabel>
+            <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => setFilter("assigned", v)} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("leadType") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Lead type</FilterLabel>
+            <MultiSelect ariaLabel="Filter by lead type" value={filters.leadType} onChange={(v) => setFilter("leadType", v)} options={leadTypeFilterOptions} placeholder="All types" searchPlaceholder="Search type…" />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("followStatus") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Follow-up status</FilterLabel>
+            <MultiSelect ariaLabel="Filter by follow-up status" value={filters.followStatus} onChange={(v) => setFilter("followStatus", v)} options={FOLLOW_STATUS_OPTIONS} placeholder="Any status" searchPlaceholder="Search status…" />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("reference") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Reference name</FilterLabel>
+            <input value={filters.reference} onChange={(e) => setFilter("reference", e.target.value)} placeholder="Reference…" className={`${selCls} w-full`} />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("created") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Date created</FilterLabel>
+            <DateRangeFilter ariaLabel="Date created" value={filters.created} onChange={(v) => setFilter("created", v)} />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("assignedDate") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Assigned date</FilterLabel>
+            <DateRangeFilter ariaLabel="Assigned date" value={filters.assignedDate} onChange={(v) => setFilter("assignedDate", v)} />
+          </label>
+        )}
+
+        {!filterPrefs.isHidden("follow") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Follow-up date</FilterLabel>
+            <DateRangeFilter ariaLabel="Follow-up date" value={filters.follow} onChange={(v) => setFilter("follow", v)} />
+          </label>
+        )}
+      </FilterRail>
+
+      <div className={filterRailPad(filterDrawerOpen)}>
       {/* Lead summary — counts by dimension; click a bar to filter the table */}
       <Card className="mb-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -938,14 +1269,25 @@ export default function ClientLeads() {
             >
               Clear
             </button>
-            <button
-              onClick={bulkRemove}
-              disabled={bulkBusy}
-              className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
-            >
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              {bulkBusy ? "Deleting…" : `Delete selected`}
-            </button>
+            {can("leads", "update") && (
+              <button
+                onClick={openBulk}
+                className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-700"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                Bulk edit / assign
+              </button>
+            )}
+            {can("leads", "delete") && (
+              <button
+                onClick={bulkRemove}
+                disabled={bulkBusy}
+                className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                {bulkBusy ? "Deleting…" : `Delete selected`}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -974,21 +1316,38 @@ export default function ClientLeads() {
         totalPages={totalPages}
         onPage={setPage}
         total={filtered.length}
+        pageSize={perPage}
+        onPageSize={(n) => { setPerPage(n); setPage(1); }}
         pageAlign="right"
         quickActions={(l) => (
           <>
             <IconButton title="View details" onClick={() => openView(l)}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
             </IconButton>
-            <IconButton title="Edit" onClick={() => openEdit(l)}>
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </IconButton>
-            <IconButton title="Delete" danger onClick={() => remove(l)}>
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </IconButton>
+            {can("leads", "update") && (
+              <IconButton title="Edit" onClick={() => openEdit(l)}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
+            {canTransfer && (
+              <IconButton title="Transfer to another rep" onClick={() => setTransferLead({ id: l.id, name: l.name?.trim() || l.phone })}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 3l4 4-4 4M20 7H8M8 21l-4-4 4-4M4 17h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
+            {canVisitors && (
+              <IconButton title="Log a visitor for this lead" onClick={() => setVisitorDraft(visitorDraftFromLead(l, visitorTypes, visitorStatuses))}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-1a6 6 0 0112 0v1M19 8v6M22 11h-6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
+            {can("leads", "delete") && (
+              <IconButton title="Delete" danger onClick={() => remove(l)}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
           </>
         )}
       />
+      </div>
 
       {/* Create / edit — right-side drawer */}
       <Drawer
@@ -1009,53 +1368,79 @@ export default function ClientLeads() {
       >
         {draft && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <FieldRow label="Name"><input className={inputCls()} placeholder="Lead name" value={draft.name} onChange={(e) => setField("name")(e.target.value)} /></FieldRow>
-            <FieldRow label="Reference name"><input className={inputCls()} value={draft.reference_name} onChange={(e) => setField("reference_name")(e.target.value)} /></FieldRow>
+            <FieldRow label="Name" required={requiredFields.has("name")} error={errors.name}>
+              <input className={inputCls(errors.name)} placeholder="Lead name" value={draft.name} onChange={(e) => setField("name")(e.target.value)} />
+            </FieldRow>
+            <FieldRow label="Reference name" required={requiredFields.has("reference_name")} error={errors.reference_name}>
+              <input className={inputCls(errors.reference_name)} value={draft.reference_name} onChange={(e) => setField("reference_name")(e.target.value)} />
+            </FieldRow>
 
             <FieldRow label="Phone" required error={errors.phone} hint="10 digits, without +91">
               <input className={inputCls(errors.phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.phone} onChange={(e) => setField("phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
             </FieldRow>
-            <FieldRow label="Alternative phone" error={errors.alt_phone} hint="Optional · 10 digits, without +91">
+            <FieldRow label="Alternative phone" required={requiredFields.has("alt_phone")} error={errors.alt_phone} hint={requiredFields.has("alt_phone") ? "10 digits, without +91" : "Optional · 10 digits, without +91"}>
               <input className={inputCls(errors.alt_phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.alt_phone} onChange={(e) => setField("alt_phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
             </FieldRow>
 
             <FieldRow label="Status" required error={errors.status_id}>
-              <select className={inputCls(errors.status_id)} value={draft.status_id} onChange={(e) => setField("status_id")(e.target.value)}>
-                <option value="">— Select —</option>
-                {topStatuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
+              <SearchSelect ariaLabel="Select status" value={draft.status_id} onChange={setField("status_id")} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" className={errors.status_id ? "ring-2 ring-red-500/30" : ""} />
             </FieldRow>
-            <FieldRow label="Sub status" hint={draft.status_id ? (subOptions.length ? undefined : "No sub-statuses for this status") : "Pick a status first"}>
-              <select className={inputCls()} value={draft.sub_status_id} disabled={!subOptions.length} onChange={(e) => setField("sub_status_id")(e.target.value)}>
-                <option value="">— None —</option>
-                {subOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
+            <FieldRow label="Sub status" required={requiredFields.has("sub_status_id")} error={errors.sub_status_id} hint={draft.status_id ? (subOptions.length ? undefined : "No sub-statuses for this status") : "Pick a status first"}>
+              {subOptions.length ? (
+                <SearchSelect ariaLabel="Select sub status" value={draft.sub_status_id} onChange={setField("sub_status_id")} options={formSubOptions} placeholder="— None —" searchPlaceholder="Search sub status…" className={errors.sub_status_id ? "ring-2 ring-red-500/30" : ""} />
+              ) : (
+                <div className={readonlyCls}>—</div>
+              )}
             </FieldRow>
 
-            <FieldRow label="Lead source" hint="Where this lead came from. Manage sources in Leads Setup.">
-              <select className={inputCls()} value={draft.source_id} onChange={(e) => setField("source_id")(e.target.value)}>
-                <option value="">— None —</option>
-                {sources.map((s) => <option key={s.id} value={s.id}>{s.marketing_type ? `${s.name} · ${s.marketing_type}` : s.name}</option>)}
-              </select>
+            <FieldRow label="Lead source" required={requiredFields.has("source_id")} error={errors.source_id} hint="Where this lead came from. Manage sources in Leads Setup.">
+              <SearchSelect ariaLabel="Select lead source" value={draft.source_id} onChange={setField("source_id")} options={formSourceOptions} placeholder="— None —" searchPlaceholder="Search source…" className={errors.source_id ? "ring-2 ring-red-500/30" : ""} />
             </FieldRow>
 
-            <FieldRow label="Email" error={errors.email}>
+            <FieldRow label="Lead type" required={requiredFields.has("lead_type_id")} error={errors.lead_type_id} hint="Categorise this lead. Manage types in Leads Setup.">
+              <SearchSelect ariaLabel="Select lead type" value={draft.lead_type_id} onChange={setField("lead_type_id")} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" className={errors.lead_type_id ? "ring-2 ring-red-500/30" : ""} />
+            </FieldRow>
+
+            <FieldRow label="Email" required={requiredFields.has("email")} error={errors.email}>
               <input className={inputCls(errors.email)} type="email" placeholder="lead@example.com" value={draft.email} onChange={(e) => setField("email")(e.target.value)} />
             </FieldRow>
-            <FieldRow label="Assigned to">
-              <select className={inputCls()} value={draft.assigned_to} onChange={(e) => setField("assigned_to")(e.target.value)}>
-                <option value="">— Unassigned —</option>
-                {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
+            <FieldRow label="Assigned to" required={requiredFields.has("assigned_to")} error={errors.assigned_to}>
+              <SearchSelect ariaLabel="Select assignee" value={draft.assigned_to} onChange={setField("assigned_to")} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" className={errors.assigned_to ? "ring-2 ring-red-500/30" : ""} />
             </FieldRow>
 
             <FieldRow label="Assigned date" hint="Set automatically when the lead is assigned"><div className={readonlyCls}>{draft.assigned_date ? fmtDate(draft.assigned_date) : "—"}</div></FieldRow>
             <FieldRow label="Follow-up date" hint="Set from the lead's reminders"><div className={readonlyCls}>{draft.follow_date ? fmtDate(draft.follow_date) : "—"}</div></FieldRow>
 
-            <FieldRow label="City"><input className={inputCls()} value={draft.city} onChange={(e) => setField("city")(e.target.value)} /></FieldRow>
-            <FieldRow label="State"><input className={inputCls()} value={draft.state} onChange={(e) => setField("state")(e.target.value)} /></FieldRow>
+            <FieldRow label="State" required={requiredFields.has("state")} error={errors.state} hint="Pick from the list or type a new one.">
+              <input
+                list="lead-state-list"
+                value={draft.state}
+                onChange={(e) => setDraft((d) => d && { ...d, state: e.target.value })}
+                placeholder="Start typing a state…"
+                autoComplete="off"
+                className={inputCls(errors.state)}
+              />
+              <datalist id="lead-state-list">
+                {stateSuggestions.map((s) => <option key={s} value={s} />)}
+              </datalist>
+            </FieldRow>
+            <FieldRow label="City" required={requiredFields.has("city")} error={errors.city} hint="Pick from the list or type a new one.">
+              <input
+                list="lead-city-list"
+                value={draft.city}
+                onChange={(e) => setField("city")(e.target.value)}
+                placeholder="Start typing a city…"
+                autoComplete="off"
+                className={inputCls(errors.city)}
+              />
+              <datalist id="lead-city-list">
+                {citySuggestions.map((c) => <option key={c} value={c} />)}
+              </datalist>
+            </FieldRow>
 
             <FieldRow label="Created date" hint="Set automatically when the lead is created"><div className={readonlyCls}>{draft.created_date ? fmtDate(draft.created_date) : draft.id ? "—" : "Today"}</div></FieldRow>
+
+            <CustomFieldInputs fields={leadCustomFields} values={draft.custom} onChange={(k, v) => setDraft((d) => d && { ...d, custom: { ...d.custom, [k]: v } })} errors={errors} />
           </div>
         )}
       </Drawer>
@@ -1087,7 +1472,8 @@ export default function ClientLeads() {
                   ["info", "Information", null],
                   ["reminders", "Reminders", detail?.reminders.length ?? 0],
                   ["notes", "Notes", detail?.notes.length ?? 0],
-                  ["calls", "Calls", detail?.calls.length ?? 0],
+                  // Calls tab only for users with the call-tracking permission.
+                  ...(canViewCalls ? [["calls", "Calls", detail?.calls.length ?? 0]] : []),
                   ["activity", "Activity", detail?.activity.length ?? 0],
                 ] as [typeof viewTab, string, number | null][])).map(([key, label, count]) => (
                   <button key={key} onClick={() => setViewTab(key)} className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-medium transition ${viewTab === key ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
@@ -1108,6 +1494,7 @@ export default function ClientLeads() {
                     ["Status", lead.status || "—"],
                     ["Sub status", lead.sub_status || "—"],
                     ["Lead source", lead.source || "—"],
+                    ["Lead type", lead.lead_type || "—"],
                     ["Reference name", lead.reference_name || "—"],
                     ["Email", lead.email || "—"],
                     ["Assigned to", lead.assigned_to_name || "Unassigned"],
@@ -1137,7 +1524,7 @@ export default function ClientLeads() {
                     </label>
                     <button onClick={addReminder} disabled={savingReminder} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingReminder ? "Setting…" : "Set reminder"}</button>
                   </div>
-                  <input value={reminderNote} onChange={(e) => setReminderNote(e.target.value)} placeholder="Optional note (e.g. Call back about pricing)" className={`${inputCls()} mt-2`} />
+                  <div className="mt-2"><RichTextEditor key={`rem-${viewing?.id ?? "x"}-${composerKey}`} initialHTML={reminderNote} onChange={setReminderNote} placeholder="Optional note (e.g. Call back about pricing)" minHeight={80} /></div>
                   {reminderErr && <p className="mt-1 text-xs text-rose-600">{reminderErr}</p>}
                   <p className="mt-1 text-xs text-slate-400">
                     {lead.follow_date ? <>Pre-filled from this lead&apos;s follow-up date ({fmtDate(lead.follow_date)}) — adjust if needed. </> : null}
@@ -1153,7 +1540,7 @@ export default function ClientLeads() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="text-sm font-medium text-slate-800">{fmtDateTime(r.remind_at)}</div>
-                        {r.note && <div className="text-xs text-slate-500">{r.note}</div>}
+                        {stripHtml(r.note ?? "") && <div className="rte-content text-xs text-slate-500" dangerouslySetInnerHTML={{ __html: r.note ?? "" }} />}
                         <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">{r.notified_at ? "Notified" : r.due ? "Due" : "Upcoming"}</div>
                       </div>
                       <button onClick={() => removeReminder(r.id)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-500" aria-label="Delete reminder">
@@ -1170,8 +1557,8 @@ export default function ClientLeads() {
               {viewTab === "notes" && (
               <section>
                 <div className="flex items-start gap-2">
-                  <textarea value={noteBody} onChange={(e) => setNoteBody(e.target.value)} rows={2} placeholder="Add a note about this lead…" className={inputCls()} />
-                  <button onClick={addNote} disabled={savingNote || !noteBody.trim()} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingNote ? "Adding…" : "Add"}</button>
+                  <div className="flex-1"><RichTextEditor key={`note-${viewing?.id ?? "x"}-${composerKey}`} initialHTML={noteBody} onChange={setNoteBody} placeholder="Add a note about this lead…" minHeight={90} /></div>
+                  <button onClick={addNote} disabled={savingNote || !stripHtml(noteBody)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingNote ? "Adding…" : "Add"}</button>
                 </div>
                 <ul className="mt-3 space-y-2">
                   {(detail?.notes ?? []).map((n) => (
@@ -1185,7 +1572,7 @@ export default function ClientLeads() {
                           </button>
                         </div>
                       </div>
-                      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{n.body}</p>
+                      <div className="rte-content mt-1 text-sm text-slate-700" dangerouslySetInnerHTML={{ __html: n.body }} />
                     </li>
                   ))}
                   {detail && detail.notes.length === 0 && <li className="text-sm text-slate-400">No notes yet.</li>}
@@ -1249,29 +1636,147 @@ export default function ClientLeads() {
         })()}
       </Drawer>
 
-      {/* Import from CSV */}
-      <Modal open={importOpen} onClose={closeImport} title="Import leads from CSV">
+      {/* Bulk edit / assign selected leads */}
+      <Modal open={bulkOpen} onClose={() => !bulkSaving && setBulkOpen(false)} title={`Bulk edit ${selectedLeads.length} lead${selectedLeads.length === 1 ? "" : "s"}`}>
+        <div className="space-y-4">
+          <p className="text-sm text-slate-500">Tick a field to change it on all selected leads. Unticked fields are left as they are.</p>
+
+          {/* Status + Sub-status */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <BulkField checked={bChg.status} onToggle={() => toggleChg("status")} label="Status">
+              <SearchSelect ariaLabel="Status" value={bStatus} onChange={(v) => { setBStatus(v); setBSub(""); }} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" />
+            </BulkField>
+            <BulkField checked={bChg.sub} onToggle={() => toggleChg("sub")} label="Sub status">
+              <SearchSelect ariaLabel="Sub status" value={bSub} onChange={setBSub} options={bulkSubOptions} placeholder="— None —" searchPlaceholder="Search…" />
+            </BulkField>
+            <BulkField checked={bChg.source} onToggle={() => toggleChg("source")} label="Source">
+              <SearchSelect ariaLabel="Source" value={bSource} onChange={setBSource} options={formSourceOptions} placeholder="— None —" searchPlaceholder="Search source…" />
+            </BulkField>
+            <BulkField checked={bChg.type} onToggle={() => toggleChg("type")} label="Lead type">
+              <SearchSelect ariaLabel="Lead type" value={bType} onChange={setBType} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" />
+            </BulkField>
+            <BulkField checked={bChg.created} onToggle={() => toggleChg("created")} label="Created date">
+              <input type="date" value={bCreated} onChange={(e) => setBCreated(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
+            </BulkField>
+          </div>
+
+          {/* Assignment */}
+          <BulkField checked={bChg.assign} onToggle={() => toggleChg("assign")} label="Assignment">
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                {([["single", "Single user"], ["robin", "Round-robin"]] as const).map(([m, lbl]) => (
+                  <button key={m} type="button" onClick={() => setBMode(m)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${bMode === m ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}>{lbl}</button>
+                ))}
+              </div>
+              {bMode === "single" ? (
+                <SearchSelect ariaLabel="Assign to" value={bAssignees[0] ?? ""} onChange={(v) => setBAssignees(v ? [v] : [])} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" />
+              ) : (
+                <>
+                  <MultiSelect ariaLabel="Round-robin members" value={bAssignees} onChange={setBAssignees} options={robinOptions} placeholder="Pick 2 or more members" searchPlaceholder="Search team…" />
+                  <p className="text-xs text-slate-400">Selected leads are split evenly across these members, in order.</p>
+                </>
+              )}
+            </div>
+          </BulkField>
+
+          <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2.5 text-sm">
+            <span>
+              <span className="font-medium text-slate-700">Notify assigned member(s)</span>
+              <span className="block text-xs text-slate-400">In-app + web-push when assignment changes.</span>
+            </span>
+            <input type="checkbox" checked={bNotify} onChange={(e) => setBNotify(e.target.checked)} className="h-5 w-5 flex-shrink-0 cursor-pointer accent-emerald-600" />
+          </label>
+
+          <div className="flex justify-end gap-2 pt-1">
+            <button onClick={() => setBulkOpen(false)} disabled={bulkSaving} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60">Cancel</button>
+            <button onClick={applyBulk} disabled={bulkSaving} className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{bulkSaving ? "Applying…" : `Apply to ${selectedLeads.length} lead${selectedLeads.length === 1 ? "" : "s"}`}</button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Import from Excel / CSV */}
+      <Modal open={importOpen} onClose={closeImport} title="Import leads from Excel / CSV">
         <div className="space-y-4">
           <p className="text-sm text-slate-500">
-            Upload a CSV (export your Excel sheet as <b>.csv</b>). Each row must have a <b>10-digit phone</b> and a <b>status</b> matching one of your lead statuses; email is validated when present. Invalid rows are skipped and reported.
+            Upload an <b>.xlsx</b> or <b>.csv</b> file. Status, source, type and assignment are chosen below — not columns in the sheet. Every row needs a valid <b>10-digit phone</b>; emails are validated. Invalid rows are skipped and reported.
           </p>
 
-          <button onClick={downloadTemplate} className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-600 hover:text-emerald-700">
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            Download CSV template
-          </button>
+          <div className="flex flex-wrap gap-4 text-sm font-medium text-emerald-600">
+            <button onClick={downloadTemplateXlsx} className="inline-flex items-center gap-1.5 hover:text-emerald-700">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              Excel template
+            </button>
+            <button onClick={downloadTemplateCsv} className="inline-flex items-center gap-1.5 hover:text-emerald-700">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              CSV template
+            </button>
+          </div>
 
           <div className="rounded-xl border border-dashed border-slate-300 p-4 text-center">
-            <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-            <button onClick={pickFile} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">Choose CSV file</button>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
+            <button onClick={pickFile} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">Choose .xlsx / .csv file</button>
             {importInfo && <p className="mt-2 text-sm text-slate-500">{importInfo}</p>}
           </div>
+
+          {importRows.length > 0 && !importResult && (
+            <>
+              <div className={`rounded-lg p-3 text-sm ${importIssues.length ? "bg-amber-50" : "bg-emerald-50"}`}>
+                <p className="font-medium text-slate-700">{readyCount} ready · {importIssues.length} will be skipped</p>
+                {importIssues.length > 0 && (
+                  <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto text-xs text-amber-700">
+                    {importIssues.slice(0, 30).map((er, i) => <li key={i}>Row {er.row}: {er.message}</li>)}
+                  </ul>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Status <span className="text-red-500">*</span></span>
+                  <SearchSelect ariaLabel="Status" value={iStatus} onChange={(v) => { setIStatus(v); setISub(""); }} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" /></label>
+                <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Sub status</span>
+                  <SearchSelect ariaLabel="Sub status" value={iSub} onChange={setISub} options={[{ value: "", label: "— None —" }, ...importSubOptions]} placeholder={iStatus ? "— None —" : "Pick a status first"} searchPlaceholder="Search…" /></label>
+                <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Source</span>
+                  <SearchSelect ariaLabel="Source" value={iSource} onChange={setISource} options={formSourceOptions} placeholder="— None —" searchPlaceholder="Search source…" /></label>
+                <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Type</span>
+                  <SearchSelect ariaLabel="Type" value={iType} onChange={setIType} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" /></label>
+              </div>
+
+              <div className="space-y-2">
+                <span className="block text-sm font-medium text-slate-600">Assignment</span>
+                <div className="flex gap-2">
+                  {([["single", "Single user"], ["robin", "Round-robin"]] as const).map(([m, lbl]) => (
+                    <button key={m} type="button" onClick={() => setIMode(m)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${iMode === m ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}>{lbl}</button>
+                  ))}
+                </div>
+                {iMode === "single" ? (
+                  <SearchSelect ariaLabel="Assign to" value={iAssignees[0] ?? ""} onChange={(v) => setIAssignees(v ? [v] : [])} options={[{ value: "", label: "— Unassigned —" }, ...staffOptions]} placeholder="— Unassigned —" searchPlaceholder="Search team…" />
+                ) : (
+                  <>
+                    <MultiSelect ariaLabel="Round-robin members" value={iAssignees} onChange={setIAssignees} options={staffOptions} placeholder="Pick 2 or more members" searchPlaceholder="Search team…" />
+                    <p className="text-xs text-slate-400">Leads are split evenly across the selected members, in order.</p>
+                  </>
+                )}
+              </div>
+
+              <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2.5 text-sm">
+                <span>
+                  <span className="font-medium text-slate-700">Notify assigned member(s)</span>
+                  <span className="block text-xs text-slate-400">Send an in-app + web-push notification about their new leads.</span>
+                </span>
+                <input type="checkbox" checked={iNotify} onChange={(e) => setINotify(e.target.checked)} className="h-5 w-5 flex-shrink-0 cursor-pointer accent-emerald-600" />
+              </label>
+            </>
+          )}
 
           {importResult && (
             <div className="rounded-lg bg-slate-50 p-3 text-sm">
               <p className={importResult.inserted ? "font-medium text-emerald-700" : "font-medium text-amber-700"}>
                 Imported {importResult.inserted} · Skipped {importResult.failed}
               </p>
+              {importResult.assigned && Object.keys(importResult.assigned).length > 0 && (
+                <p className="mt-1 text-xs text-slate-500">
+                  Assigned: {Object.entries(importResult.assigned).map(([sid, n]) => `${staff.find((s) => String(s.id) === sid)?.name ?? "Member"} (${n})`).join(", ")}
+                </p>
+              )}
               {importResult.errors.length > 0 && (
                 <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs text-amber-700">
                   {importResult.errors.map((er, i) => <li key={i}>Row {er.row}: {er.message}</li>)}
@@ -1282,12 +1787,49 @@ export default function ClientLeads() {
 
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={closeImport} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
-            <button onClick={runImport} disabled={importing || !importRows.length} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">
-              {importing ? "Importing…" : `Import ${importRows.length || ""} lead${importRows.length === 1 ? "" : "s"}`.trim()}
-            </button>
+            {!importResult && (
+              <button onClick={runImport} disabled={importing || !readyCount || !iStatus} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">
+                {importing ? "Importing…" : `Import ${readyCount || ""} lead${readyCount === 1 ? "" : "s"}`.trim()}
+              </button>
+            )}
           </div>
         </div>
       </Modal>
+
+      {/* Transfer a lead to another rep (request or direct, per the client's mode) */}
+      <TransferModal
+        open={!!transferLead}
+        lead={transferLead}
+        staff={staff}
+        mode={transferMode}
+        onClose={() => setTransferLead(null)}
+        onDone={() => { setTransferLead(null); load(); }}
+      />
+
+      {/* Log a visitor pre-filled from a lead (shared with the Visitors tab) */}
+      <VisitorModal
+        draft={visitorDraft}
+        setDraft={setVisitorDraft}
+        types={visitorTypes}
+        statuses={visitorStatuses}
+        staff={staff}
+        leadOpts={leadVisitorOpts}
+        canManage={isAdmin}
+        onDone={() => setVisitorDraft(null)}
+      />
     </>
+  );
+}
+
+/** One bulk-edit field: a checkbox to enable the change + the control (dimmed when off). */
+function BulkField({ checked, onToggle, label, children }: { checked: boolean; onToggle: () => void; label: string; children: React.ReactNode }) {
+  return (
+    <div className={`rounded-xl border p-3 transition ${checked ? "border-emerald-300 bg-emerald-50/30" : "border-slate-200"}`}>
+      <label className="flex cursor-pointer items-center gap-2">
+        <input type="checkbox" checked={checked} onChange={onToggle} className="h-4 w-4 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+        <span className="text-sm font-medium text-slate-700">{label}</span>
+      </label>
+      <div className={`mt-2 ${checked ? "" : "pointer-events-none opacity-40"}`}>{children}</div>
+    </div>
   );
 }
