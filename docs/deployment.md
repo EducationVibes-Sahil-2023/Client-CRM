@@ -68,18 +68,25 @@ server {
 
     client_max_body_size 25M;          # allow file/asset uploads
 
+    # ── Uploaded files, served straight from disk. This MUST be its own block.
+    #    The generic /api/ location below uses alias + try_files, and nginx's
+    #    documented alias+try_files behaviour looks for the file at
+    #    public/api/uploads/… (the /api/ prefix is NOT stripped) — so real upload
+    #    URLs would 404 and fall through to CodeIgniter. `^~` makes this exact
+    #    prefix win over the regex/alias block. There is no fastcgi_pass here, so
+    #    nothing in this directory is ever executed; together with the backend's
+    #    extension allow-list (no php/phtml/svg/html/js can be stored) uploads are
+    #    inert. nginx ignores .htaccess, so this replaces public/uploads/.htaccess.
+    location ^~ /api/uploads/ {
+        alias /var/www/crm/backend/public/uploads/;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
     # ── API → CodeIgniter (php-fpm). The trailing slashes strip the /api prefix
     #    so CI sees /auth/login, not /api/auth/login. ──────────────────────────
     location /api/ {
         alias /var/www/crm/backend/public/;
         try_files $uri $uri/ @ci;
-
-        # SECURITY: never execute uploaded files. The Apache .htaccess in
-        # public/uploads does NOT apply under nginx — this rule replaces it.
-        location ~* ^/api/uploads/.*\.(php|phtml|phar|cgi|pl|py|sh|html?)$ {
-            default_type text/plain;
-            add_header X-Content-Type-Options nosniff;
-        }
     }
     location @ci {
         rewrite ^/api/(.*)$ /index.php/$1 break;

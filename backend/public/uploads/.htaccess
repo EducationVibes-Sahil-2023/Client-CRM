@@ -1,13 +1,24 @@
 # Security: never execute code from the uploads directory. Serve files as data
 # only. This is defense-in-depth on top of the server-side extension allow-list.
+#
+# IMPORTANT: `php_flag` / `php_admin_flag` are ONLY valid when PHP runs as an
+# Apache module (mod_php). Under PHP-FPM / FastCGI (the common production setup)
+# those directives are unknown, and a BARE `php_flag` line makes Apache return
+# HTTP 500 for every request that reads this file — i.e. every GET of an uploaded
+# image. So each one MUST be wrapped in an <IfModule> guard. The guards below
+# cover the php5/php7/php8 module names and are simply skipped under PHP-FPM.
+<IfModule mod_php.c>
 php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+php_flag engine off
+</IfModule>
+<IfModule mod_php5.c>
+php_flag engine off
+</IfModule>
+
 AddType text/plain .php .phtml .php3 .php4 .php5 .php7 .phps .pht .phar .cgi .pl .py .sh .asp .aspx .jsp .htm .html
 
 <IfModule mod_rewrite.c>
 RewriteEngine Off
-</IfModule>
-
-# Apache 2.4+: also strip any handler that might run scripts here.
-<IfModule mod_php.c>
-php_admin_flag engine off
 </IfModule>
