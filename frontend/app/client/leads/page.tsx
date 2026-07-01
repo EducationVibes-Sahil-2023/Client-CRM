@@ -144,7 +144,8 @@ function toDraft(l: Lead): Draft {
     reference_name: l.reference_name ?? "",
     email: l.email ?? "",
     assigned_to: l.assigned_to ? String(l.assigned_to) : "",
-    assigned_date: l.assigned_date ? l.assigned_date.slice(0, 10) : "",
+    // Keep the full date+time (read-only display); it's system-managed on save.
+    assigned_date: l.assigned_date ?? "",
     city: l.city ?? "",
     state: l.state ?? "",
     follow_date: l.follow_date ? l.follow_date.slice(0, 10) : "",
@@ -274,7 +275,7 @@ function activityStyle(action: string): { ring: string; dot: string; icon: strin
 export default function ClientLeads() {
   const toast = useToast();
   const confirm = useConfirm();
-  const { can, hasFeature, defaultPageSize } = useClient();
+  const { can, hasFeature, defaultPageSize, isAgent } = useClient();
   // The Calls tab/column needs both the plan feature AND the call-tracking
   // permission (admins implicitly hold it; staff must be granted it).
   const canViewCalls = hasFeature("call_tracking") && can("calls");
@@ -818,6 +819,9 @@ export default function ClientLeads() {
     // Admin-configured mandatory fields (Leads Setup → Required Fields).
     for (const key of requiredFields) {
       if (e[key]) continue; // a format error already covers this field
+      // Skip the assignee requirement whenever the field is masked: agents never
+      // see it, and on create a staff member's lead is auto-assigned to them.
+      if (key === "assigned_to" && (isAgent || (!isAdmin && !draft.id))) continue;
       const val = (draft as unknown as Record<string, unknown>)[key];
       if (typeof val === "string" ? !val.trim() : !val) {
         e[key] = `${LEAD_FIELD_LABELS[key] ?? key} is required.`;
@@ -829,7 +833,11 @@ export default function ClientLeads() {
 
     setSaving(true);
     try {
-      const body = { ...draft, phone: digits, alt_phone: altDigits, custom_fields: draft.custom };
+      // Persist the reference's stable id (resolved from the chosen name) so the
+      // lead stays linked even if the reference is renamed later. Legacy free-text
+      // values that map to no reference send 0 and keep their name.
+      const referenceId = references.find((r) => r.name === draft.reference_name)?.id ?? 0;
+      const body = { ...draft, reference_id: referenceId, phone: digits, alt_phone: altDigits, custom_fields: draft.custom };
       if (draft.id) await updateLead(draft.id, body);
       else await createLead(body);
       toast.success(draft.id ? "Lead updated." : "Lead added.");
@@ -1120,8 +1128,14 @@ export default function ClientLeads() {
     { key: "reference_name", header: "Reference", width: 150, defaultHidden: true, render: (l) => l.reference_name ?? dash },
     { key: "state", header: "State", width: 120, defaultHidden: true, render: (l) => l.state ?? dash },
   ];
-  // Hide the "Last call" column for users without the call-tracking permission.
-  const columns = canViewCalls ? allColumns : allColumns.filter((c) => c.key !== "last_call");
+  // Hide the "Last call" column for users without the call-tracking permission,
+  // and hide assignment columns for reference-scoped agents (assignment doesn't
+  // govern their view — their leads are scoped by reference).
+  const hiddenColKeys = new Set<string>([
+    ...(canViewCalls ? [] : ["last_call"]),
+    ...(isAgent ? ["assigned", "assigned_date"] : []),
+  ]);
+  const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
 
   const selCls = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
 
@@ -1206,7 +1220,7 @@ export default function ClientLeads() {
         applying={applying}
       >
         <div className="flex items-center justify-end">
-          <VisibilityMenu api={filterPrefs} items={FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
+          <VisibilityMenu api={filterPrefs} items={isAgent ? FILTER_DEFS.filter((f) => f.id !== "assigned" && f.id !== "assignedDate") : FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
         </div>
 
         {!filterPrefs.isHidden("status") && (
@@ -1232,7 +1246,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!filterPrefs.isHidden("assigned") && (
+        {!isAgent && !filterPrefs.isHidden("assigned") && (
           <label className="flex flex-col gap-1">
             <FilterLabel>Assigned to</FilterLabel>
             <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => setFilter("assigned", v)} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
@@ -1267,7 +1281,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!filterPrefs.isHidden("assignedDate") && (
+        {!isAgent && !filterPrefs.isHidden("assignedDate") && (
           <label className="flex flex-col gap-1">
             <FilterLabel>Assigned date</FilterLabel>
             <DateRangeFilter ariaLabel="Assigned date" value={filters.assignedDate} onChange={(v) => setFilter("assignedDate", v)} />
@@ -1471,11 +1485,16 @@ export default function ClientLeads() {
             <FieldRow label="Email" required={requiredFields.has("email")} error={errors.email}>
               <input className={inputCls(errors.email)} type="email" placeholder="lead@example.com" value={draft.email} onChange={(e) => setField("email")(e.target.value)} />
             </FieldRow>
-            <FieldRow label="Assigned to" required={requiredFields.has("assigned_to")} error={errors.assigned_to}>
-              <SearchSelect ariaLabel="Select assignee" value={draft.assigned_to} onChange={setField("assigned_to")} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" className={errors.assigned_to ? "ring-2 ring-red-500/30" : ""} />
-            </FieldRow>
+            {/* Assignee is masked on create — a new lead is auto-assigned to whoever
+                captures it. Admins (who aren't staff) still pick explicitly; on edit
+                the field stays available to non-agents. */}
+            {!isAgent && (isAdmin || draft.id) && (
+              <FieldRow label="Assigned to" required={requiredFields.has("assigned_to")} error={errors.assigned_to}>
+                <SearchSelect ariaLabel="Select assignee" value={draft.assigned_to} onChange={setField("assigned_to")} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" className={errors.assigned_to ? "ring-2 ring-red-500/30" : ""} />
+              </FieldRow>
+            )}
 
-            <FieldRow label="Assigned date" hint="Set automatically when the lead is assigned"><div className={readonlyCls}>{draft.assigned_date ? fmtDate(draft.assigned_date) : "—"}</div></FieldRow>
+            {!isAgent && <FieldRow label="Assigned date" hint="Set automatically when the lead is assigned"><div className={readonlyCls}>{draft.assigned_date ? fmtDateTime(draft.assigned_date) : "—"}</div></FieldRow>}
             <FieldRow label="Follow-up date" hint="Set from the lead's reminders"><div className={readonlyCls}>{draft.follow_date ? fmtDate(draft.follow_date) : "—"}</div></FieldRow>
 
             <FieldRow label="State" required={requiredFields.has("state")} error={errors.state} hint="Pick from the list or type a new one.">
@@ -1565,12 +1584,15 @@ export default function ClientLeads() {
                     ["Reference name", lead.reference_name || "—"],
                     ["Email", lead.email || "—"],
                     ["Assigned to", lead.assigned_to_name || "Unassigned"],
-                    ["Assigned date", lead.assigned_date ? fmtDate(lead.assigned_date) : "—"],
+                    ["Assigned date", lead.assigned_date ? fmtDateTime(lead.assigned_date) : "—"],
                     ["City", lead.city || "—"],
                     ["State", lead.state || "—"],
                     ["Follow-up date", lead.follow_date ? fmtDate(lead.follow_date) : "—"],
                     ["Created date", fmtDateTime(lead.created_at ?? lead.created_date)],
-                  ] as [string, React.ReactNode][]).map(([label, value]) => (
+                  ] as [string, React.ReactNode][])
+                    // Agents don't deal with assignment — drop those rows for them.
+                    .filter(([label]) => !isAgent || (label !== "Assigned to" && label !== "Assigned date"))
+                    .map(([label, value]) => (
                     <div key={label}>
                       <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt>
                       <dd className="mt-0.5 text-sm text-slate-800">{value}</dd>

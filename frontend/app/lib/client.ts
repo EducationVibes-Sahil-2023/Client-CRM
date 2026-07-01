@@ -207,6 +207,7 @@ export interface Lead {
   source: string | null;
   lead_type_id: number | null;
   lead_type: string | null;
+  reference_id: number | null;
   reference_name: string | null;
   email: string | null;
   assigned_to: number | null;
@@ -812,6 +813,8 @@ export const getFeatures = () =>
 export interface MeInfo {
   user: { id: number; email: string; role: string; name?: string; staff_id?: number; role_id?: number | null; client_id?: number | null; must_change_password?: boolean };
   is_admin: boolean;
+  /** True when the signed-in user is a reference-scoped "agent". */
+  is_agent?: boolean;
   role: string;
   permissions: Record<string, Perm>;
   modules: string[];

@@ -54,6 +54,9 @@ interface Ctx {
   usageFor: (key: string) => number;
   // access control (admin vs staff + effective per-module permissions)
   isAdmin: boolean;
+  /** True when the signed-in user is a reference-scoped "agent" (sees only their
+   *  reference's leads; assignment doesn't apply, so the UI hides it). */
+  isAgent: boolean;
   permissionsLoaded: boolean;
   can: (module: string, action?: keyof Perm) => boolean;
   // super-admin "login as client" impersonation (null when not impersonating)
@@ -134,6 +137,7 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
 
   const [permissions, setPermissions] = useState<Record<string, Perm>>({});
   const [isAdmin, setIsAdmin] = useState(true); // assume admin until /me resolves
+  const [isAgent, setIsAgent] = useState(false);
   const [permissionsLoaded, setPermissionsLoaded] = useState(false);
   const [impersonation, setImpersonation] = useState<{ name: string | null; client: string | null } | null>(null);
 
@@ -149,6 +153,7 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
       .then((d) => {
         setUser({ id: d.user.id, email: d.user.email, role: d.user.role, name: d.user.name });
         setIsAdmin(d.is_admin);
+        setIsAgent(!!d.is_agent);
         setPermissions(d.permissions ?? {});
         setMustChangePassword(!!d.user.must_change_password);
         setImpersonation(d.impersonating ? { name: d.impersonator_name ?? null, client: d.client_name ?? null } : null);
@@ -352,6 +357,7 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
         limitFor,
         usageFor,
         isAdmin,
+        isAgent,
         permissionsLoaded,
         can,
         impersonation,

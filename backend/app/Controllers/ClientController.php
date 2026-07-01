@@ -222,6 +222,9 @@ class ClientController extends ApiController
     /** Memoised per-request reference scope (false = not resolved yet). */
     private string|false|null $refScope = false;
 
+    /** Memoised id of the current agent's reference (0 = resolved to none). */
+    private ?int $refIdScope = null;
+
     /**
      * The reference NAME the current user's lead view is locked to, or null when
      * reference-scoping doesn't apply (admins, and staff without a reference).
@@ -248,10 +251,20 @@ class ClientController extends ApiController
         if (! $refId) {
             return null;
         }
-        $ref            = (new LeadReferenceModel())->where('client_id', $this->clientId())->find((int) $refId);
-        $this->refScope = $ref['name'] ?? "\x00__deleted_reference__";
+        $this->refIdScope = (int) $refId;
+        $ref              = (new LeadReferenceModel())->where('client_id', $this->clientId())->find((int) $refId);
+        $this->refScope   = $ref['name'] ?? "\x00__deleted_reference__";
 
         return $this->refScope;
+    }
+
+    /** The current agent's reference id, or null when reference-scoping doesn't apply. */
+    private function currentReferenceId(): ?int
+    {
+        // currentReferenceName() populates $refIdScope as a side effect.
+        $this->currentReferenceName();
+
+        return $this->refIdScope;
     }
 
     /**
@@ -269,7 +282,17 @@ class ClientController extends ApiController
         }
         $refName = $this->currentReferenceName();
         if ($refName !== null) {
-            $q->where('reference_name', $refName);
+            // Match on the stable id, but also on the (live) name so legacy leads
+            // that predate reference_id — or imports tagged by free-text name —
+            // stay visible to their agent.
+            $refId = $this->currentReferenceId();
+            $q->groupStart();
+            if ($refId) {
+                $q->where('reference_id', $refId)->orWhere('reference_name', $refName);
+            } else {
+                $q->where('reference_name', $refName);
+            }
+            $q->groupEnd();
 
             return;
         }
@@ -286,6 +309,11 @@ class ClientController extends ApiController
         }
         $refName = $this->currentReferenceName();
         if ($refName !== null) {
+            $refId = $this->currentReferenceId();
+            if ($refId && (int) ($lead['reference_id'] ?? 0) === $refId) {
+                return true;
+            }
+
             return trim((string) ($lead['reference_name'] ?? '')) === $refName;
         }
         $sid   = $this->staffId();
@@ -302,6 +330,9 @@ class ClientController extends ApiController
         return $this->respond([
             'user'        => $u,
             'is_admin'    => $this->isAdmin(),
+            // An "agent" is a staff member locked to a reference: their lead view
+            // is scoped by reference (not assignment), so the UI hides assignment.
+            'is_agent'    => ! $this->isAdmin() && $this->currentReferenceName() !== null,
             'role'        => $this->role(),
             'permissions' => $this->effectivePermissions(),
             'modules'     => self::MODULES,
@@ -1684,6 +1715,7 @@ class ClientController extends ApiController
         $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
         $sourceNames = $this->idNameMap($this->lookupRows(LeadSourceModel::class, $cid));
         $typeNames   = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
+        $refNames    = $this->idNameMap($this->lookupRows(LeadReferenceModel::class, $cid));
 
         // Reminders & notes per lead — for the latest-reminder column and the
         // follow-up status flag (orange upcoming / red overdue / green done).
@@ -1714,6 +1746,12 @@ class ClientController extends ApiController
             $r['assigned_to_name'] = $r['assigned_to'] ? ($staffNames[(int) $r['assigned_to']] ?? null) : null;
             $r['source']           = $r['source_id'] ? ($sourceNames[(int) $r['source_id']] ?? null) : null;
             $r['lead_type']        = $r['lead_type_id'] ? ($typeNames[(int) $r['lead_type_id']] ?? null) : null;
+            // Reference name resolved live from the id, so renames reflect without
+            // rewriting leads; fall back to the stored snapshot for legacy rows.
+            $r['reference_id']     = $r['reference_id'] !== null ? (int) $r['reference_id'] : null;
+            if ($r['reference_id']) {
+                $r['reference_name'] = $refNames[$r['reference_id']] ?? $r['reference_name'];
+            }
 
             $rem = $remindersByLead[(int) $r['id']] ?? [];
             $r['last_reminder_at'] = $rem ? max($rem) : null;
@@ -2263,7 +2301,7 @@ class ClientController extends ApiController
             $row['decided_at'] = date('Y-m-d H:i:s');
             $id                = $model->insert($row);
 
-            (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d')]);
+            (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d H:i:s')]);
             $this->logActivity('transferred', 'lead', $leadId, "Lead transferred to {$toName}");
             $this->notifyStaff($toId, 'lead_transfer', 'Lead assigned to you', "{$leadName} was transferred to you.", '/client/leads');
 
@@ -2294,7 +2332,7 @@ class ClientController extends ApiController
             return $this->failNotFound('Pending transfer not found');
         }
         $model->update($id, ['status' => 'approved', 'decided_by' => $this->actorId() ?: null, 'decided_at' => date('Y-m-d H:i:s'), 'decision_note' => trim((string) $this->input('note')) ?: null]);
-        (new LeadModel())->update((int) $t['lead_id'], ['assigned_to' => (int) $t['to_staff_id'], 'assigned_date' => date('Y-m-d'), 'pending_transfer' => 0]);
+        (new LeadModel())->update((int) $t['lead_id'], ['assigned_to' => (int) $t['to_staff_id'], 'assigned_date' => date('Y-m-d H:i:s'), 'pending_transfer' => 0]);
 
         $leadName = $this->leadLabel($cid, (int) $t['lead_id']);
         $this->logActivity('transfer_approved', 'lead', (int) $t['lead_id'], 'Transfer approved');
@@ -2605,12 +2643,18 @@ class ClientController extends ApiController
         // Stamp who captured the lead (used by the team-member leads view).
         $data['created_by'] = $this->actorId() ?: null;
 
+        // On create, a staff member captures their own lead: force-assign it to the
+        // creator (the assignee picker is masked in the UI for them). Admins have no
+        // staff id, so they still assign explicitly via the form.
+        if (! $this->isAdmin() && $this->staffId()) {
+            $data['assigned_to'] = $this->staffId();
+        }
+
         // System-managed dates — not editable from the lead form. Created date is
-        // stamped today; assigned date is stamped only when the lead is assigned;
-        // the follow-up date is driven by the reminders flow, not the form.
-        $today                 = date('Y-m-d');
-        $data['created_date']  = $today;
-        $data['assigned_date'] = ! empty($data['assigned_to']) ? $today : null;
+        // stamped today; assigned date is stamped with the exact date+time when the
+        // lead is assigned; the follow-up date is driven by the reminders flow.
+        $data['created_date']  = date('Y-m-d');
+        $data['assigned_date'] = ! empty($data['assigned_to']) ? date('Y-m-d H:i:s') : null;
         $data['follow_date']   = null;
 
         $id = $model->insert($data);
@@ -2659,7 +2703,7 @@ class ClientController extends ApiController
         if ($newAssigned === 0) {
             $data['assigned_date'] = null;
         } elseif ($newAssigned !== $oldAssigned) {
-            $data['assigned_date'] = date('Y-m-d');
+            $data['assigned_date'] = date('Y-m-d H:i:s');
         } else {
             unset($data['assigned_date']);
         }
@@ -2819,7 +2863,7 @@ class ClientController extends ApiController
         }
 
         $notify      = ! empty($in['notify']);
-        $today       = date('Y-m-d');
+        $now         = date('Y-m-d H:i:s');
         $updated     = 0;
         $cursor      = 0; // round-robin position
         $perAssignee = [];
@@ -2830,7 +2874,7 @@ class ClientController extends ApiController
                 $assignTo = $assignees ? $assignees[$cursor % count($assignees)] : null;
                 $cursor++;
                 $data['assigned_to']   = $assignTo;
-                $data['assigned_date'] = $assignTo ? $today : null;
+                $data['assigned_date'] = $assignTo ? $now : null;
                 if ($assignTo && $assignTo !== (int) ($lead['assigned_to'] ?? 0)) {
                     $perAssignee[$assignTo] = ($perAssignee[$assignTo] ?? 0) + 1;
                 }
@@ -2906,7 +2950,7 @@ class ClientController extends ApiController
         $errors      = [];
         $perAssignee = [];
         $n           = 0; // round-robin cursor (advances per inserted lead)
-        $today       = date('Y-m-d');
+        $now         = date('Y-m-d H:i:s'); // assignment stamp (date+time, IST)
 
         foreach ($rows as $i => $row) {
             $line  = (int) $i + 2; // +1 header, +1 to be 1-based
@@ -2963,7 +3007,7 @@ class ClientController extends ApiController
                 'reference_name' => trim((string) ($row['reference_name'] ?? '')) ?: null,
                 'email'          => $email !== '' ? $email : null,
                 'assigned_to'    => $assignTo,
-                'assigned_date'  => $assignTo ? $today : null,
+                'assigned_date'  => $assignTo ? $now : null,
                 'city'           => trim((string) ($row['city'] ?? '')) ?: null,
                 'state'          => trim((string) ($row['state'] ?? '')) ?: null,
                 'created_by'     => $this->actorId() ?: null,
@@ -3092,6 +3136,18 @@ class ClientController extends ApiController
         $srcId    = $this->input('source_id');
         $assigned = $this->input('assigned_to');
 
+        // Reference: the id is the stable source of truth. When a real reference
+        // is chosen we store its id + a snapshot of its current name; otherwise we
+        // keep whatever free-text name was given (legacy / import that maps to no
+        // reference) with a null id.
+        $refId   = (int) $this->input('reference_id') ?: null;
+        $refName = trim((string) $this->input('reference_name')) ?: null;
+        if ($refId !== null) {
+            $ref     = (new LeadReferenceModel())->where('client_id', $cid)->find($refId);
+            $refId   = $ref ? (int) $ref['id'] : null;
+            $refName = $ref ? $ref['name'] : $refName;
+        }
+
         return [
             'client_id'      => $cid,
             // Stored as '' (not null) when blank: some tenant `leads` tables
@@ -3103,7 +3159,8 @@ class ClientController extends ApiController
             'sub_status_id'  => $subId ? (int) $subId : null,
             'lead_type_id'   => $typeId ? (int) $typeId : null,
             'source_id'      => $srcId ? (int) $srcId : null,
-            'reference_name' => trim((string) $this->input('reference_name')) ?: null,
+            'reference_id'   => $refId,
+            'reference_name' => $refName,
             'email'          => trim((string) $this->input('email')) ?: null,
             'assigned_to'    => $assigned ? (int) $assigned : null,
             'assigned_date'  => $this->normalizeDate($this->input('assigned_date')),
@@ -3158,6 +3215,12 @@ class ClientController extends ApiController
         $lead['status']           = $lead['status_id'] ? ($statusNames[(int) $lead['status_id']] ?? null) : null;
         $lead['sub_status']       = $lead['sub_status_id'] ? ($statusNames[(int) $lead['sub_status_id']] ?? null) : null;
         $lead['assigned_to_name'] = $lead['assigned_to'] ? ($staffNames[(int) $lead['assigned_to']] ?? null) : null;
+        // Reference name resolved live from the stable id (renames reflect at read).
+        $lead['reference_id']     = $lead['reference_id'] !== null ? (int) $lead['reference_id'] : null;
+        if ($lead['reference_id']) {
+            $refNames = $this->idNameMap($this->lookupRows(LeadReferenceModel::class, $cid));
+            $lead['reference_name'] = $refNames[$lead['reference_id']] ?? $lead['reference_name'];
+        }
 
         $now       = date('Y-m-d H:i:s');
         $reminders = (new LeadReminderModel())->where('client_id', $cid)->where('lead_id', $id)
@@ -4583,8 +4646,10 @@ class ClientController extends ApiController
 
         $resp = $this->saveLookup(LeadReferenceModel::class, 'reference', fn () => [], $id);
 
-        // If the name changed, keep every lead tagged with the old name in sync so
-        // reference-scoped agents don't lose visibility of their leads.
+        // Reference id is the source of truth, so a rename normally needs no lead
+        // rewrite. But legacy leads tagged only by the old free-text name have no
+        // id yet — link them to this id now (so they stay stable through future
+        // renames) and refresh their stored name snapshot for exports/search.
         if ($old && $resp->getStatusCode() === 200) {
             $newName = trim((string) $this->input('name'));
             $oldName = (string) ($old['name'] ?? '');
@@ -4592,7 +4657,8 @@ class ClientController extends ApiController
                 (new LeadModel())->builder()
                     ->where('client_id', $cid)
                     ->where('reference_name', $oldName)
-                    ->update(['reference_name' => $newName]);
+                    ->groupStart()->where('reference_id', null)->orWhere('reference_id', $id)->groupEnd()
+                    ->update(['reference_id' => $id, 'reference_name' => $newName]);
             }
         }
 
@@ -4606,8 +4672,13 @@ class ClientController extends ApiController
 
         // Detach the reference from any staff who had it, so they fall back to the
         // normal assigned-to visibility instead of scoping to a deleted reference.
+        // Leads keep their free-text `reference_name` snapshot (now unlinked).
         if ($resp->getStatusCode() === 200) {
             (new ClientStaffModel())->builder()
+                ->where('client_id', $cid)
+                ->where('reference_id', $id)
+                ->update(['reference_id' => null]);
+            (new LeadModel())->builder()
                 ->where('client_id', $cid)
                 ->where('reference_id', $id)
                 ->update(['reference_id' => null]);
@@ -5469,7 +5540,7 @@ class ClientController extends ApiController
             }
             // Move every lead off the departing member onto the chosen one.
             $leadModel->where('client_id', $cid)->where('assigned_to', $id)
-                ->set(['assigned_to' => $reassignTo, 'assigned_date' => date('Y-m-d')])->update();
+                ->set(['assigned_to' => $reassignTo, 'assigned_date' => date('Y-m-d H:i:s')])->update();
             $this->logActivity('updated', 'lead', null, "Reassigned {$assigned} lead(s) from {$staff['name']} to {$target['name']} before deleting the member", $cid);
         }
 
@@ -5527,7 +5598,7 @@ class ClientController extends ApiController
             $to  = $targets[$i % $count];
             $upd = ['assigned_to' => $to];
             if ($updateDate) {
-                $upd['assigned_date'] = date('Y-m-d');
+                $upd['assigned_date'] = date('Y-m-d H:i:s');
             }
             if ($statusId) {
                 $upd['status_id'] = $statusId;

@@ -49,10 +49,16 @@ const permsKey = (p: Record<string, Perm>): string =>
     .join("|");
 const permsEqual = (a: Record<string, Perm>, b: Record<string, Perm>) => permsKey(a) === permsKey(b);
 
+// A member is either normal "staff" or a reference-scoped "agent". The type is
+// derived from whether a reference is set — an agent MUST have a reference (that
+// reference gates which leads they see); staff never carry one.
+type StaffType = "staff" | "agent";
+
 interface Draft {
   id?: number;
   name: string; email: string; phone: string; alt_phone: string; emp_code: string; designation: string;
   avatar: string; role_id: string; reports_to: string; lead_type_id: string; reference_id: string;
+  staff_type: StaffType;
   office_location_id: string; department_id: string;
   facebook: string; linkedin: string; skype: string; email_signature: string;
   password: string; status: string;
@@ -61,7 +67,7 @@ interface Draft {
 }
 const blank: Draft = {
   name: "", email: "", phone: "", alt_phone: "", emp_code: "", designation: "", avatar: "",
-  role_id: "", reports_to: "", lead_type_id: "", reference_id: "", office_location_id: "", department_id: "",
+  role_id: "", reports_to: "", lead_type_id: "", reference_id: "", staff_type: "staff", office_location_id: "", department_id: "",
   facebook: "", linkedin: "", skype: "", email_signature: "", password: "", status: "active",
   permissions: {}, custom: {},
 };
@@ -98,6 +104,7 @@ function toDraft(s: Staff): Draft {
     id: s.id, name: s.name, email: s.email ?? "", phone: s.phone ?? "", alt_phone: s.alt_phone ?? "",
     emp_code: s.emp_code ?? "", designation: s.designation ?? "", avatar: s.avatar ?? "", role_id: s.role_id ? String(s.role_id) : "",
     reports_to: s.reports_to ? String(s.reports_to) : "", lead_type_id: s.lead_type_id ? String(s.lead_type_id) : "", reference_id: s.reference_id ? String(s.reference_id) : "",
+    staff_type: s.reference_id ? "agent" : "staff",
     office_location_id: s.office_location_id ? String(s.office_location_id) : "", department_id: s.department_id ? String(s.department_id) : "",
     facebook: s.facebook ?? "", linkedin: s.linkedin ?? "", skype: s.skype ?? "", email_signature: s.email_signature ?? "",
     password: "", status: s.status, permissions: s.extra_permissions ?? {}, custom: { ...(s.custom_fields ?? {}) },
@@ -197,6 +204,7 @@ export default function TeamPage() {
     if (d.alt_phone && !isPhone(d.alt_phone)) e.alt_phone = "Enter a valid phone number.";
     if (!d.id && d.password.length < 8) e.password = "Set a login password (min 8 characters).";
     else if (d.password && d.password.length < 8) e.password = "Password must be at least 8 characters.";
+    if (d.staff_type === "agent" && !d.reference_id) e.reference_id = "An agent must be tied to a reference.";
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -222,7 +230,9 @@ export default function TeamPage() {
       const body = {
         name: draft.name, email: draft.email, phone: draft.phone, alt_phone: draft.alt_phone,
         emp_code: draft.emp_code, designation: draft.designation, avatar: draft.avatar, role_id: num(draft.role_id),
-        reports_to: num(draft.reports_to), lead_type_id: num(draft.lead_type_id), reference_id: num(draft.reference_id),
+        reports_to: num(draft.reports_to), lead_type_id: num(draft.lead_type_id),
+        // Only agents carry a reference; staff never do (it gates lead visibility).
+        reference_id: draft.staff_type === "agent" ? num(draft.reference_id) : 0,
         office_location_id: num(draft.office_location_id), department_id: num(draft.department_id),
         facebook: draft.facebook, linkedin: draft.linkedin, skype: draft.skype,
         email_signature: draft.email_signature, password: draft.password, status: draft.status,
@@ -643,10 +653,26 @@ export default function TeamPage() {
                   <SearchSelect ariaLabel="Lead type" value={draft.lead_type_id} onChange={set("lead_type_id")} placeholder="— Select —" searchPlaceholder="Search…"
                     options={[{ value: "", label: "— None —" }, ...(lookups.lead_type ?? []).map((o) => ({ value: String(o.id), label: o.name }))]} />
                 </FieldRow>
-                <FieldRow label="Reference" hint="If set, this member only sees leads under this reference (instead of just their assigned leads).">
-                  <SearchSelect ariaLabel="Reference" value={draft.reference_id} onChange={set("reference_id")} placeholder="— Select —" searchPlaceholder="Search references…"
-                    options={[{ value: "", label: "— None (see assigned leads) —" }, ...(lookups.reference ?? []).map((o) => ({ value: String(o.id), label: o.name }))]} />
+                <FieldRow label="User type" hint="Agents see only their reference's leads (no assignment); staff see their assigned leads." full>
+                  <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-sm font-medium">
+                    {(["staff", "agent"] as const).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setDraft((d) => d && ({ ...d, staff_type: t, reference_id: t === "staff" ? "" : d.reference_id }))}
+                        className={`rounded-md px-4 py-1.5 capitalize transition ${draft.staff_type === t ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
                 </FieldRow>
+                {draft.staff_type === "agent" && (
+                  <FieldRow label="Reference" required error={errors.reference_id} hint="This agent will only see leads under this reference." full>
+                    <SearchSelect ariaLabel="Reference" value={draft.reference_id} onChange={set("reference_id")} placeholder="— Select a reference —" searchPlaceholder="Search references…"
+                      options={[{ value: "", label: "— Select a reference —" }, ...(lookups.reference ?? []).map((o) => ({ value: String(o.id), label: o.name }))]} />
+                  </FieldRow>
+                )}
                 <FieldRow label="Office location">
                   <SearchSelect ariaLabel="Office location" value={draft.office_location_id} onChange={set("office_location_id")} placeholder="— Select —" searchPlaceholder="Search offices…"
                     options={[{ value: "", label: "— None —" }, ...(lookups.office_location ?? []).map((o) => ({ value: String(o.id), label: o.name }))]} />
