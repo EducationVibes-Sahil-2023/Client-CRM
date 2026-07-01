@@ -684,6 +684,9 @@ export default function TasksPage() {
         onSaved={(req, custom) => { setRequiredFields(new Set(req)); setCustomFields(custom); }}
       />
 
+      {/* ---- Stage manager (admin) — build the board's columns ---- */}
+      <StageManager open={stageMgrOpen} onClose={() => setStageMgrOpen(false)} stages={stages} onChanged={reloadStages} />
+
       {/* ---- Task detail drawer ---- */}
       <Drawer
         open={!!detail}
@@ -916,5 +919,143 @@ function ListView({
         </ul>
       )}
     </div>
+  );
+}
+
+// ---- Stage manager: admin CRUD + reorder for the board's columns ----
+interface StageDraft { id?: number; name: string; color: string; is_done: boolean; is_system: boolean }
+
+function StageManager({
+  open, onClose, stages, onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  stages: TaskStage[];
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [draft, setDraft] = useState<StageDraft | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<TaskStage | null>(null);
+  const [delBusy, setDelBusy] = useState(false);
+  const [reordering, setReordering] = useState(false);
+
+  const openNew = () => setDraft({ name: "", color: "slate", is_done: false, is_system: false });
+  const openEdit = (s: TaskStage) => setDraft({ id: s.id, name: s.name, color: s.color, is_done: s.is_done, is_system: s.is_system });
+
+  async function save() {
+    if (!draft) return;
+    if (draft.name.trim().length < 1) { toast.warning("Enter a stage name."); return; }
+    setBusy(true);
+    try {
+      const body = { name: draft.name.trim(), color: draft.color, is_done: draft.is_done };
+      if (draft.id) { await updateTaskStage(draft.id, body); toast.success("Stage updated."); }
+      else { await createTaskStage(body); toast.success("Stage added."); }
+      setDraft(null);
+      onChanged();
+    } catch (e) { toast.error(e instanceof Error ? e.message : "Could not save stage"); }
+    finally { setBusy(false); }
+  }
+
+  async function doDelete() {
+    if (!confirmDel) return;
+    setDelBusy(true);
+    try {
+      await deleteTaskStage(confirmDel.id);
+      toast.success("Stage deleted.");
+      setConfirmDel(null);
+      onChanged();
+    } catch (e) { toast.error(e instanceof Error ? e.message : "Could not delete stage"); setConfirmDel(null); }
+    finally { setDelBusy(false); }
+  }
+
+  // Swap a stage with its neighbour and persist the new order.
+  async function move(index: number, dir: -1 | 1) {
+    const next = index + dir;
+    if (next < 0 || next >= stages.length || reordering) return;
+    const order = stages.map((s) => s.id);
+    [order[index], order[next]] = [order[next], order[index]];
+    setReordering(true);
+    try { await reorderTaskStages(order); onChanged(); }
+    catch { toast.error("Could not reorder stages"); }
+    finally { setReordering(false); }
+  }
+
+  return (
+    <Drawer open={open} onClose={onClose} title="Board stages" subtitle="Create, rename, recolour and reorder your kanban columns" width="max-w-lg">
+      <div className="space-y-4">
+        <ul className="space-y-2">
+          {stages.map((s, i) => {
+            const cls = stageClasses(s.color);
+            return (
+              <li key={s.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                <div className="flex flex-col">
+                  <button onClick={() => move(i, -1)} disabled={i === 0 || reordering} className="text-slate-300 hover:text-slate-600 disabled:opacity-30" aria-label="Move up">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                  <button onClick={() => move(i, 1)} disabled={i === stages.length - 1 || reordering} className="text-slate-300 hover:text-slate-600 disabled:opacity-30" aria-label="Move down">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                </div>
+                <span className={`h-3 w-3 flex-shrink-0 rounded-full ${cls.dot}`} />
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800">{s.name}</span>
+                {s.is_done && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-600">Done</span>}
+                {s.is_system && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">System</span>}
+                <button onClick={() => openEdit(s)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Edit">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                </button>
+                {!s.is_system && (
+                  <button onClick={() => setConfirmDel(s)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-500" aria-label="Delete">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+
+        {draft ? (
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+            <div className="text-sm font-semibold text-slate-800">{draft.id ? "Edit stage" : "New stage"}</div>
+            <div>
+              <span className="mb-1 block text-sm font-medium text-slate-600">Name</span>
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. QA, Blocked, Deployed" className={field} autoFocus />
+            </div>
+            <div>
+              <span className="mb-1 block text-sm font-medium text-slate-600">Colour</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {STAGE_PALETTE.map((c) => (
+                  <button key={c} type="button" onClick={() => setDraft({ ...draft, color: c })} className={`h-7 w-7 rounded-full ${STAGE_COLORS[c].swatch} ${draft.color === c ? "ring-2 ring-offset-2 " + STAGE_COLORS[c].ring : ""}`} aria-label={c} />
+                ))}
+              </div>
+            </div>
+            <label className={`flex items-center gap-2 text-sm ${draft.is_system ? "text-slate-400" : "text-slate-700"}`}>
+              <input type="checkbox" checked={draft.is_done} disabled={draft.is_system} onChange={(e) => setDraft({ ...draft, is_done: e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+              Tasks in this stage count as completed
+              {draft.is_system && <span className="text-xs">(fixed for system stages)</span>}
+            </label>
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setDraft(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+              <button onClick={save} disabled={busy} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{busy ? "Saving…" : "Save"}</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={openNew} className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-3 text-sm font-medium text-slate-500 hover:border-emerald-400 hover:text-emerald-600">
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
+            Add stage
+          </button>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={!!confirmDel}
+        title="Delete stage?"
+        message={<><b className="text-slate-800">“{confirmDel?.name}”</b> will be removed from your board. Stages with tasks in them can’t be deleted until those tasks are moved.</>}
+        confirmLabel="Delete stage"
+        busy={delBusy}
+        onConfirm={doDelete}
+        onClose={() => !delBusy && setConfirmDel(null)}
+      />
+    </Drawer>
   );
 }
