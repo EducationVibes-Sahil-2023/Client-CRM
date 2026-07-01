@@ -13,9 +13,9 @@ import {
   createState, updateState, deleteState,
   createCity, updateCity, deleteCity,
   getLeadImportSetup, saveLeadImportSetup,
-  saveSubStatusRules,
+  saveSubStatusRules, saveLeadPhoneRules,
   type LeadStatus, type LeadType, type LeadReference, type LeadSource, type MarketingType, type ConversionType, type FollowupGroup,
-  type State, type City, type LeadImportColumn, type SubStatusRules,
+  type State, type City, type LeadImportColumn, type SubStatusRules, type LeadPhoneRules,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
@@ -97,6 +97,9 @@ export default function LeadsSetupPage() {
   // Admin rules for the "add sub-status" form (whether parent / type required).
   const [subRules, setSubRules] = useState<SubStatusRules>({ require_parent: true, require_type: false });
   const [subRulesSaving, setSubRulesSaving] = useState(false);
+  // Admin lead phone-uniqueness rules (Team is always enforced server-side).
+  const [phoneRules, setPhoneRules] = useState<LeadPhoneRules>({ unique_phone: false, unique_alt: false });
+  const [phoneRulesSaving, setPhoneRulesSaving] = useState(false);
 
   const [tab, setTab] = useState<EntityKey>("statuses");
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -142,6 +145,21 @@ export default function LeadsSetupPage() {
     }
   }
 
+  async function persistPhoneRules(next: LeadPhoneRules) {
+    const prev = phoneRules;
+    setPhoneRules(next); // optimistic
+    setPhoneRulesSaving(true);
+    try {
+      const d = await saveLeadPhoneRules(next);
+      setPhoneRules(d.phone_rules);
+    } catch (e) {
+      setPhoneRules(prev);
+      toast.error(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setPhoneRulesSaving(false);
+    }
+  }
+
   const load = useCallback(() => {
     return getLeadsSetup()
       .then((d) => {
@@ -155,6 +173,7 @@ export default function LeadsSetupPage() {
         setStates(d.states ?? []);
         setCities(d.cities ?? []);
         if (d.sub_status_rules) setSubRules(d.sub_status_rules);
+        if (d.phone_rules) setPhoneRules(d.phone_rules);
       })
       .catch(() => toast.error("Could not load leads setup."))
       .finally(() => setLoading(false));
@@ -340,6 +359,26 @@ export default function LeadsSetupPage() {
 
       <Card>
         <p className="mb-4 text-sm text-slate-500">{activeTab.hint}</p>
+        {tab === "statuses" && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">Lead phone rules</span>
+            <div className="flex flex-wrap gap-4">
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" disabled={!canUpdate || phoneRulesSaving} checked={phoneRules.unique_phone}
+                  onChange={(e) => persistPhoneRules({ ...phoneRules, unique_phone: e.target.checked })}
+                  className="h-4 w-4 cursor-pointer accent-emerald-600 disabled:opacity-50" />
+                No duplicate phone
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" disabled={!canUpdate || phoneRulesSaving} checked={phoneRules.unique_alt}
+                  onChange={(e) => persistPhoneRules({ ...phoneRules, unique_alt: e.target.checked })}
+                  className="h-4 w-4 cursor-pointer accent-emerald-600 disabled:opacity-50" />
+                No duplicate alternative phone
+              </label>
+            </div>
+            <span className="mt-2 block text-xs text-slate-400">When on, a lead can&apos;t be saved with a phone that already exists on another lead. A lead&apos;s primary and alternative phone must always differ. (Team members always enforce both.)</span>
+          </div>
+        )}
         {tab === "sub_statuses" && (
           <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
             <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">Required when adding a sub-status</span>

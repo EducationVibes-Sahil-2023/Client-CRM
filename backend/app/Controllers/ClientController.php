@@ -2643,6 +2643,10 @@ class ClientController extends ApiController
         if ($errs = $this->formFieldErrors('lead', $data, $custom)) {
             return $this->failValidationErrors($errs);
         }
+        $rules = $this->leadPhoneRules();
+        if ($perr = $this->phoneRuleErrors(LeadModel::class, $cid, (string) $data['phone'], $data['alt_phone'] ?? null, null, $rules['unique_phone'], $rules['unique_alt'], 'lead')) {
+            return $this->failValidationErrors($perr);
+        }
         $data['custom_fields'] = json_encode($custom);
         // Stamp who captured the lead (used by the team-member leads view).
         $data['created_by'] = $this->actorId() ?: null;
@@ -2695,6 +2699,14 @@ class ClientController extends ApiController
         $custom = $this->formCustomValues('lead', (array) $this->input());
         if ($errs = $this->formFieldErrors('lead', $data, $custom)) {
             return $this->failValidationErrors($errs);
+        }
+        // Only re-check uniqueness for a phone the user actually changed, so
+        // editing a lead that predates the rule (legacy duplicate) isn't blocked.
+        $rules      = $this->leadPhoneRules();
+        $checkPhone = $rules['unique_phone'] && (string) ($data['phone'] ?? '') !== (string) ($old['phone'] ?? '');
+        $checkAlt   = $rules['unique_alt'] && (string) ($data['alt_phone'] ?? '') !== (string) ($old['alt_phone'] ?? '');
+        if ($perr = $this->phoneRuleErrors(LeadModel::class, $cid, (string) $data['phone'], $data['alt_phone'] ?? null, $id, $checkPhone, $checkAlt, 'lead')) {
+            return $this->failValidationErrors($perr);
         }
         $data['custom_fields'] = json_encode($custom);
 
@@ -3130,6 +3142,57 @@ class ClientController extends ApiController
     }
 
     /** Build a lead row from the request body, sanitising phones and dates. */
+    /** Admin-configured lead phone rules (client setting; both default off). */
+    private function leadPhoneRules(): array
+    {
+        $map = $this->settingsMap();
+
+        return [
+            'unique_phone' => ($map['lead_phone_unique'] ?? '0') === '1',
+            'unique_alt'   => ($map['lead_alt_phone_unique'] ?? '0') === '1',
+        ];
+    }
+
+    /**
+     * Phone-rule validation shared by leads and staff → field => message.
+     * A value is a duplicate when it already appears as another row's phone OR
+     * alt_phone (same client, excluding $ignoreId, soft-deleted rows skipped by
+     * the model). $checkPhone/$checkAlt gate the primary/alternative uniqueness
+     * checks; primary-vs-alternative sameness is always rejected.
+     */
+    private function phoneRuleErrors(string $modelClass, int $cid, string $phone, ?string $alt, ?int $ignoreId, bool $checkPhone, bool $checkAlt, string $noun): array
+    {
+        $phone  = trim($phone);
+        $alt    = trim((string) $alt);
+        $errors = [];
+
+        if ($phone !== '' && $alt !== '' && $phone === $alt) {
+            $errors['alt_phone'] = 'Alternative phone must be different from the primary phone.';
+        }
+
+        $dup = function (string $value) use ($modelClass, $cid, $ignoreId): bool {
+            if ($value === '') {
+                return false;
+            }
+            $q = (new $modelClass())->where('client_id', $cid)
+                ->groupStart()->where('phone', $value)->orWhere('alt_phone', $value)->groupEnd();
+            if ($ignoreId) {
+                $q->where('id !=', $ignoreId);
+            }
+
+            return $q->countAllResults() > 0;
+        };
+
+        if ($checkPhone && $phone !== '' && $dup($phone)) {
+            $errors['phone'] = "This phone number is already used by another {$noun}.";
+        }
+        if ($checkAlt && $alt !== '' && ! isset($errors['alt_phone']) && $dup($alt)) {
+            $errors['alt_phone'] = "This alternative phone is already used by another {$noun}.";
+        }
+
+        return $errors;
+    }
+
     private function leadData(int $cid): array
     {
         $phone    = preg_replace('/\D/', '', (string) $this->input('phone'));
@@ -4317,7 +4380,21 @@ class ClientController extends ApiController
             'cities'           => $this->decorateCities($cid),
             'required_fields'  => $this->requiredLeadFields(),
             'sub_status_rules' => $this->subStatusRules(),
+            'phone_rules'      => $this->leadPhoneRules(),
         ]);
+    }
+
+    /** POST /client/lead-phone-rules — set whether lead phone / alt phone must be unique. */
+    public function saveLeadPhoneRules()
+    {
+        if ($resp = $this->denyUnlessPerm('leads_setup', 'update')) {
+            return $resp;
+        }
+        $this->setSetting('lead_phone_unique', $this->input('unique_phone') ? '1' : '0');
+        $this->setSetting('lead_alt_phone_unique', $this->input('unique_alt') ? '1' : '0');
+        $this->logActivity('updated', 'settings', null, 'Updated lead phone rules', $this->clientId());
+
+        return $this->respond(['message' => 'Saved', 'phone_rules' => $this->leadPhoneRules()]);
     }
 
     /**
@@ -5587,6 +5664,11 @@ class ClientController extends ApiController
         if ($errs = $this->formFieldErrors('staff', $data, $custom)) {
             return $this->failValidationErrors($errs);
         }
+        // Team phone rules are always enforced (unique primary + alternative,
+        // primary != alternative) — internal users, so duplicates are errors.
+        if ($perr = $this->phoneRuleErrors(ClientStaffModel::class, $cid, (string) ($data['phone'] ?? ''), $data['alt_phone'] ?? null, null, true, true, 'team member')) {
+            return $this->failValidationErrors($perr);
+        }
         $data['emp_code']      = $this->nextEmpCode($cid); // auto-generated, not editable
         $data['custom_fields'] = json_encode($custom);
         $model                 = new ClientStaffModel();
@@ -5629,13 +5711,21 @@ class ClientController extends ApiController
         }
         $cid   = $this->clientId();
         $model = new ClientStaffModel();
-        if (! $model->where('client_id', $cid)->find($id)) {
+        $old   = $model->where('client_id', $cid)->find($id);
+        if (! $old) {
             return $this->failNotFound('Staff not found');
         }
         $data   = $this->staffData($cid, true);
         $custom = $this->formCustomValues('staff', (array) $this->input());
         if ($errs = $this->formFieldErrors('staff', $data, $custom)) {
             return $this->failValidationErrors($errs);
+        }
+        // Team phone rules (always on) — only re-check a phone that changed so an
+        // existing member with a legacy duplicate can still be edited.
+        $checkPhone = (string) ($data['phone'] ?? '') !== (string) ($old['phone'] ?? '');
+        $checkAlt   = (string) ($data['alt_phone'] ?? '') !== (string) ($old['alt_phone'] ?? '');
+        if ($perr = $this->phoneRuleErrors(ClientStaffModel::class, $cid, (string) ($data['phone'] ?? ''), $data['alt_phone'] ?? null, $id, $checkPhone, $checkAlt, 'team member')) {
+            return $this->failValidationErrors($perr);
         }
         $data['custom_fields'] = json_encode($custom);
         $model->skipValidation(true)->update($id, $data);

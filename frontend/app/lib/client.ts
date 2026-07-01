@@ -1010,6 +1010,7 @@ export const getLeadsSetup = () =>
     cities: City[];
     required_fields: string[];
     sub_status_rules: SubStatusRules;
+    phone_rules: LeadPhoneRules;
   }>("/leads-setup");
 
 // Which lead-form fields are mandatory (admin-configured). Returns the cleaned list.
@@ -1020,6 +1021,11 @@ export const saveLeadRequiredFields = (fields: string[]) =>
 export interface SubStatusRules { require_parent: boolean; require_type: boolean; }
 export const saveSubStatusRules = (rules: SubStatusRules) =>
   clientPost<{ message: string; sub_status_rules: SubStatusRules }>("/sub-status-rules", rules as unknown as Record<string, unknown>);
+
+// Admin lead phone-uniqueness rules (Team phone rules are always enforced).
+export interface LeadPhoneRules { unique_phone: boolean; unique_alt: boolean; }
+export const saveLeadPhoneRules = (rules: LeadPhoneRules) =>
+  clientPost<{ message: string; phone_rules: LeadPhoneRules }>("/lead-phone-rules", rules as unknown as Record<string, unknown>);
 
 // Lead-form fields an admin can mark mandatory. `phone` and `status` are always
 // required and so are not listed here. Keep keys in sync with the backend's

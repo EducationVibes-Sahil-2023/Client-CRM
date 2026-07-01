@@ -292,6 +292,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->get('leads-setup', 'ClientController::leadsSetup');
         $routes->post('lead-field-settings', 'ClientController::saveLeadRequiredFields');
         $routes->post('sub-status-rules', 'ClientController::saveSubStatusRules');
+        $routes->post('lead-phone-rules', 'ClientController::saveLeadPhoneRules');
         $routes->get('marketing-types', 'ClientController::marketingTypes');
         $routes->post('marketing-types', 'ClientController::createMarketingType');
         $routes->post('marketing-types/reorder', 'ClientController::reorderMarketingTypes');
