@@ -330,11 +330,19 @@ export default function TeamPage() {
   ];
 
   const columns: Column<Staff>[] = [
-    { key: "name", header: "Name", render: (s) => <AvatarCell name={s.name} image={avatarUrl(s)} subtitle={s.emp_code ? `${s.emp_code} · ${s.email ?? ""}` : s.email ?? "—"} color="from-emerald-500 to-teal-600" /> },
+    { key: "name", header: "Name", lockVisible: true, render: (s) => <AvatarCell name={s.name} image={avatarUrl(s)} subtitle={s.emp_code ? `${s.emp_code} · ${s.email ?? ""}` : s.email ?? "—"} color="from-emerald-500 to-teal-600" /> },
     { key: "designation", header: "Designation", render: (s) => <span className="text-slate-600">{s.designation || "—"}</span> },
     { key: "role", header: "Role", render: (s) => s.role_name ? <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">{s.role_name}</span> : <span className="text-slate-400">—</span> },
+    { key: "phone", header: "Phone", render: (s) => <span className="text-slate-600">{s.phone || "—"}</span> },
     { key: "department", header: "Department", render: (s) => <span className="text-slate-600">{s.department || "—"}</span> },
-    { key: "office", header: "Office", render: (s) => <span className="text-slate-600">{s.office_name || "—"}</span> },
+    { key: "office", header: "Office location", render: (s) => <span className="text-slate-600">{s.office_name || "—"}</span> },
+    { key: "reference", header: "Reference", render: (s) => <span className="text-slate-600">{s.reference_name || "—"}</span> },
+    { key: "user_type", header: "User type", render: (s) => (
+      s.reference_id
+        ? <span className="rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-medium text-violet-700">Agent</span>
+        : <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">Staff</span>
+    ) },
+    { key: "lead_type", header: "Lead type", render: (s) => <span className="text-slate-600">{s.lead_type || "—"}</span> },
     { key: "manager", header: "Reports to", render: (s) => <span className="text-slate-600">{s.manager_name || "—"}</span> },
     { key: "status", header: "Status", render: (s) => <Badge value={s.status} /> },
   ];
@@ -837,8 +845,10 @@ export default function TeamPage() {
       {/* Reassign-before-delete: transfer the member's leads first, then delete. */}
       <Modal open={!!delTarget} onClose={() => !(processing || deleting) && setDelTarget(null)} title={xferred ? "Delete team member" : "Transfer leads, then delete"}>
         {delTarget && (() => {
+          // Agents (reference-scoped) are never lead assignees, so they can't
+          // receive a departing member's leads.
           const targetOpts: SelectOption[] = (staff ?? [])
-            .filter((m) => m.id !== delTarget.staff.id && (m.status ?? "active") === "active")
+            .filter((m) => m.id !== delTarget.staff.id && (m.status ?? "active") === "active" && !m.reference_id)
             .map((m) => ({ value: String(m.id), label: m.name }));
           const statusOpts: SelectOption[] = [{ value: "", label: "— Don't change —" }, ...leadStatuses.map((s) => ({ value: String(s.id), label: s.name }))];
           const typeOpts: SelectOption[] = [{ value: "", label: "— Don't change —" }, ...leadTypes.map((t) => ({ value: String(t.id), label: t.name }))];

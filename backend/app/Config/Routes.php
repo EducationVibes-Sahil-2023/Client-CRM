@@ -276,7 +276,9 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->get('leads/(:num)/detail', 'ClientController::leadDetail/$1');
         $routes->post('leads/(:num)/reminders', 'ClientController::createReminder/$1');
         $routes->post('leads/(:num)/notes', 'ClientController::createNote/$1');
+        $routes->post('lead-reminders/(:num)', 'ClientController::updateReminder/$1');
         $routes->post('lead-reminders/(:num)/delete', 'ClientController::deleteReminder/$1');
+        $routes->post('lead-notes/(:num)', 'ClientController::updateNote/$1');
         $routes->post('lead-notes/(:num)/delete', 'ClientController::deleteNote/$1');
         $routes->post('leads/(:num)', 'ClientController::updateLead/$1');
         $routes->post('leads/(:num)/delete', 'ClientController::deleteLead/$1');

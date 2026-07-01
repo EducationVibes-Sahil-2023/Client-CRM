@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getLeads, createLead, updateLead, deleteLead, importLeads, bulkUpdateLeads, getLeadImportSetup,
   getLeadsSetup, getStaff, getMe, getLeadAnalytics,
-  getLeadDetail, createLeadReminder, deleteLeadReminder, createLeadNote, deleteLeadNote,
+  getLeadDetail, createLeadReminder, updateLeadReminder, deleteLeadReminder, createLeadNote, updateLeadNote, deleteLeadNote,
   getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS,
   type Lead, type LeadStatus, type LeadSource, type LeadType, type LeadReference, type Staff, type LeadImportResult, type LeadDetail,
   type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
@@ -106,12 +106,14 @@ interface Draft {
   reference_name: string; email: string;
   assigned_to: string; assigned_date: string;
   city: string; state: string; follow_date: string; created_date: string;
+  // Latest reminder datetime (max remind_at) — the follow-up date shown read-only.
+  last_reminder_at: string;
   custom: Record<string, string>;
 }
 const blank: Draft = {
   name: "", phone: "", alt_phone: "", status_id: "", sub_status_id: "", source_id: "", lead_type_id: "",
   reference_name: "", email: "", assigned_to: "", assigned_date: "",
-  city: "", state: "", follow_date: "", created_date: "", custom: {},
+  city: "", state: "", follow_date: "", created_date: "", last_reminder_at: "", custom: {},
 };
 
 const DOT: Record<string, string> = {
@@ -150,6 +152,7 @@ function toDraft(l: Lead): Draft {
     state: l.state ?? "",
     follow_date: l.follow_date ? l.follow_date.slice(0, 10) : "",
     created_date: l.created_date ? l.created_date.slice(0, 10) : "",
+    last_reminder_at: l.last_reminder_at ?? "",
     custom: { ...(l.custom_fields ?? {}) },
   };
 }
@@ -261,14 +264,20 @@ function followFlagBadge(flag: Lead["follow_flag"]): React.ReactNode {
 }
 
 /** Icon + colour for an activity-timeline node, keyed by its action verb. */
-function activityStyle(action: string): { ring: string; dot: string; icon: string } {
-  const a = action.toLowerCase();
-  if (a.includes("creat")) return { ring: "border-emerald-200 bg-emerald-50", dot: "text-emerald-600", icon: "M12 5v14M5 12h14" };
-  if (a.includes("assign")) return { ring: "border-teal-200 bg-teal-50", dot: "text-teal-600", icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2" };
-  if (a.includes("status") || a.includes("moved") || a.includes("stage")) return { ring: "border-amber-200 bg-amber-50", dot: "text-amber-600", icon: "M4 7h16M4 12h10M4 17h7M17 14l3 3-3 3" };
-  if (a.includes("note")) return { ring: "border-violet-200 bg-violet-50", dot: "text-violet-600", icon: "M4 5h16v10l-4 4H4zM16 19v-4h4" };
+// Pick a type-specific icon for a lead activity. The coarse `action` is mostly
+// "updated", so we read the human `description` too ("Set a reminder",
+// "Reassigned: …", "Source changed: …", etc.) to show the right icon. Order
+// matters — more specific keywords are checked before the generic create/delete.
+function activityStyle(action: string, description?: string | null): { ring: string; dot: string; icon: string } {
+  const a = `${action} ${description ?? ""}`.toLowerCase();
+  if (a.includes("transfer")) return { ring: "border-blue-200 bg-blue-50", dot: "text-blue-600", icon: "M7 16l-4-4 4-4M3 12h13M17 8l4 4-4 4M21 12H8" };
   if (a.includes("remind")) return { ring: "border-sky-200 bg-sky-50", dot: "text-sky-600", icon: "M12 8v4l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z" };
+  if (a.includes("note")) return { ring: "border-violet-200 bg-violet-50", dot: "text-violet-600", icon: "M4 5h16v10l-4 4H4zM16 19v-4h4" };
+  if (a.includes("source")) return { ring: "border-cyan-200 bg-cyan-50", dot: "text-cyan-600", icon: "M20.6 13.4l-7.2 7.2a2 2 0 01-2.8 0l-7.2-7.2a2 2 0 01-.6-1.4V5a2 2 0 012-2h7a2 2 0 011.4.6l7.2 7.2a2 2 0 010 2.6zM7.5 7.5h.01" };
+  if (a.includes("status") || a.includes("moved") || a.includes("stage")) return { ring: "border-amber-200 bg-amber-50", dot: "text-amber-600", icon: "M4 7h16M4 12h10M4 17h7M17 14l3 3-3 3" };
+  if (a.includes("assign")) return { ring: "border-teal-200 bg-teal-50", dot: "text-teal-600", icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2" };
   if (a.includes("delet") || a.includes("remov")) return { ring: "border-rose-200 bg-rose-50", dot: "text-rose-600", icon: "M6 7h12M9 7V5h6v2M10 11v6M14 11v6M5 7l1 13h12l1-13" };
+  if (a.includes("creat") || a.includes("add") || a.includes("set")) return { ring: "border-emerald-200 bg-emerald-50", dot: "text-emerald-600", icon: "M12 5v14M5 12h14" };
   return { ring: "border-indigo-200 bg-indigo-50", dot: "text-indigo-600", icon: "M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" };
 }
 
@@ -321,8 +330,16 @@ export default function ClientLeads() {
   const [reminderNote, setReminderNote] = useState("");
   const [reminderErr, setReminderErr] = useState("");
   const [savingReminder, setSavingReminder] = useState(false);
+  // Inline reminder editing: the reminder id being edited + its working values.
+  const [editingReminder, setEditingReminder] = useState<number | null>(null);
+  const [editRemindAt, setEditRemindAt] = useState("");
+  const [editReminderNote, setEditReminderNote] = useState("");
+  const [editReminderErr, setEditReminderErr] = useState("");
   const [noteBody, setNoteBody] = useState("");
   const [savingNote, setSavingNote] = useState(false);
+  // Inline note editing: the note id being edited + its working text.
+  const [editingNote, setEditingNote] = useState<number | null>(null);
+  const [editNoteBody, setEditNoteBody] = useState("");
   // Bumped after adding a note/reminder to remount (and clear) the rich editors.
   const [composerKey, setComposerKey] = useState(0);
 
@@ -470,41 +487,15 @@ export default function ClientLeads() {
   // colour dot so they read the same as the table chips.
   const statusDot = (color?: string) => <span className={`h-2 w-2 rounded-full ${dotClass(color ?? "slate")}`} style={dotStyle(color ?? "slate")} />;
 
-  // Reference-aware assignee options. A staff "agent" tied to a reference only
-  // ever sees that reference's leads (their scope ignores assignment), so when
-  // assigning a lead with a reference we float the agent(s) who handle it to the
-  // top with a ★, and every reference-agent shows the reference they own so an
-  // admin can pick the right owner instead of a flat, ambiguous name list.
-  const buildAssignees = useCallback((matchRef: string, withBlank: boolean): SelectOption[] => {
-    const want = (matchRef ?? "").trim().toLowerCase();
-    const refOf = (s: Staff) => (s.reference_name ?? "").trim();
-    const isMatch = (s: Staff) => want !== "" && refOf(s).toLowerCase() === want;
-    const decorate = (s: Staff): SelectOption => {
-      const ref = refOf(s);
-      return {
-        value: String(s.id),
-        label: ref ? `${s.name} · ${ref}` : s.name,
-        prefix: isMatch(s)
-          ? <span title={`Handles "${ref}"`} className="text-sm leading-none text-amber-500">★</span>
-          : ref
-            ? <span title={`Reference agent · ${ref}`} className="h-2 w-2 rounded-full bg-emerald-400" />
-            : undefined,
-      };
-    };
-    const opts = [...staff]
-      .sort((a, b) => Number(isMatch(b)) - Number(isMatch(a)))
-      .map(decorate);
+  // Assignee options list only real "staff" — reference-scoped agents are never
+  // assignees (they see leads by reference, not assignment), so they're excluded
+  // from every assign picker (create/edit, bulk, import, transfer).
+  const buildAssignees = useCallback((withBlank: boolean): SelectOption[] => {
+    const opts = staff
+      .filter((s) => !s.reference_id)
+      .map((s) => ({ value: String(s.id), label: s.name }));
     return withBlank ? [{ value: "", label: "— Unassigned —" }, ...opts] : opts;
   }, [staff]);
-
-  // The single reference shared by every selected lead (blank when they differ
-  // or none have one) — drives the bulk modal's reference-aware assignee lists.
-  const bulkLeadRef = useMemo(() => {
-    const refs = new Set(
-      leads.filter((l) => selectedIds.has(l.id)).map((l) => (l.reference_name ?? "").trim()).filter(Boolean),
-    );
-    return refs.size === 1 ? [...refs][0] : "";
-  }, [leads, selectedIds]);
   const statusFilterOptions = useMemo<SelectOption[]>(
     () => topStatuses.map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) })),
     [topStatuses],
@@ -532,7 +523,7 @@ export default function ClientLeads() {
     return opts;
   }, [references, leads]);
   const assignedFilterOptions = useMemo<SelectOption[]>(
-    () => [{ value: "unassigned", label: "Unassigned" }, ...staff.map((s) => ({ value: String(s.id), label: s.name }))],
+    () => [{ value: "unassigned", label: "Unassigned" }, ...staff.filter((s) => !s.reference_id).map((s) => ({ value: String(s.id), label: s.name }))],
     [staff],
   );
 
@@ -548,8 +539,8 @@ export default function ClientLeads() {
     [sources],
   );
   const formAssignedOptions = useMemo<SelectOption[]>(
-    () => buildAssignees(draft?.reference_name ?? "", true),
-    [buildAssignees, draft?.reference_name],
+    () => buildAssignees(true),
+    [buildAssignees],
   );
   const formLeadTypeOptions = useMemo<SelectOption[]>(
     () => [{ value: "", label: "— None —" }, ...leadTypes.map((t) => ({ value: String(t.id), label: t.name, prefix: statusDot(t.color) }))],
@@ -572,8 +563,8 @@ export default function ClientLeads() {
     [allSubStatuses, bStatus],
   );
   // Bulk modal assignee lists, reference-aware to the selected leads' reference.
-  const bulkAssignOptions = useMemo<SelectOption[]>(() => buildAssignees(bulkLeadRef, true), [buildAssignees, bulkLeadRef]);
-  const robinOptions = useMemo<SelectOption[]>(() => buildAssignees(bulkLeadRef, false), [buildAssignees, bulkLeadRef]);
+  const bulkAssignOptions = useMemo<SelectOption[]>(() => buildAssignees(true), [buildAssignees]);
+  const robinOptions = useMemo<SelectOption[]>(() => buildAssignees(false), [buildAssignees]);
   // Lead options for the per-lead "Log visitor" modal's optional lead link.
   const leadVisitorOpts = useMemo<SelectOption[]>(
     () => [{ value: "", label: "— Not linked —" }, ...leads.map((l) => ({ value: String(l.id), label: l.name?.trim() || l.phone }))],
@@ -739,6 +730,7 @@ export default function ClientLeads() {
       setRemindAt(followReminderDefault(viewing)); setReminderNote(""); setComposerKey((k) => k + 1);
       toast.success("Reminder set.");
       await loadDetail(viewing.id);
+      await load(); // follow-up date is reminder-driven — refresh the table too
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not set reminder.");
     } finally {
@@ -756,9 +748,39 @@ export default function ClientLeads() {
     try {
       await deleteLeadReminder(rid);
       if (viewing) await loadDetail(viewing.id);
+      await load(); // keep the reminder-driven follow-up date in sync in the table
       toast.success("Reminder removed.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not remove reminder.");
+    }
+  }
+
+  function startEditReminder(r: { id: number; remind_at: string; note: string | null }) {
+    setEditingReminder(r.id);
+    setEditRemindAt(toLocalInput(new Date(r.remind_at.replace(" ", "T"))));
+    setEditReminderNote(r.note ?? "");
+    setEditReminderErr("");
+  }
+  function cancelEditReminder() {
+    setEditingReminder(null);
+    setEditRemindAt("");
+    setEditReminderNote("");
+    setEditReminderErr("");
+  }
+  async function saveEditReminder(rid: number) {
+    setEditReminderErr("");
+    if (!editRemindAt) { setEditReminderErr("Pick a date and time."); return; }
+    setSavingReminder(true);
+    try {
+      await updateLeadReminder(rid, { remind_at: editRemindAt, note: stripHtml(editReminderNote) ? editReminderNote : undefined });
+      cancelEditReminder();
+      if (viewing) await loadDetail(viewing.id);
+      await load();
+      toast.success("Reminder updated.");
+    } catch (e) {
+      setEditReminderErr(e instanceof Error ? e.message : "Could not update reminder.");
+    } finally {
+      setSavingReminder(false);
     }
   }
 
@@ -790,6 +812,29 @@ export default function ClientLeads() {
       toast.success("Note removed.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not remove note.");
+    }
+  }
+
+  function startEditNote(n: { id: number; body: string }) {
+    setEditingNote(n.id);
+    setEditNoteBody(n.body);
+  }
+  function cancelEditNote() {
+    setEditingNote(null);
+    setEditNoteBody("");
+  }
+  async function saveEditNote(nid: number) {
+    if (!stripHtml(editNoteBody)) return;
+    setSavingNote(true);
+    try {
+      await updateLeadNote(nid, editNoteBody);
+      cancelEditNote();
+      if (viewing) await loadDetail(viewing.id);
+      toast.success("Note updated.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not update note.");
+    } finally {
+      setSavingNote(false);
     }
   }
 
@@ -1005,7 +1050,7 @@ export default function ClientLeads() {
     const sid = Number(iStatus);
     return statuses.filter((s) => (s.parent_ids ?? []).includes(sid)).map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }));
   }, [statuses, iStatus]);
-  const staffOptions = useMemo<SelectOption[]>(() => buildAssignees("", false), [buildAssignees]);
+  const staffOptions = useMemo<SelectOption[]>(() => buildAssignees(false), [buildAssignees]);
 
   async function runImport() {
     if (!importRows.length) return;
@@ -1495,7 +1540,7 @@ export default function ClientLeads() {
             )}
 
             {!isAgent && <FieldRow label="Assigned date" hint="Set automatically when the lead is assigned"><div className={readonlyCls}>{draft.assigned_date ? fmtDateTime(draft.assigned_date) : "—"}</div></FieldRow>}
-            <FieldRow label="Follow-up date" hint="Set from the lead's reminders"><div className={readonlyCls}>{draft.follow_date ? fmtDate(draft.follow_date) : "—"}</div></FieldRow>
+            <FieldRow label="Follow-up date" hint="The lead's latest reminder date & time"><div className={readonlyCls}>{draft.last_reminder_at ? fmtDateTime(draft.last_reminder_at) : "—"}</div></FieldRow>
 
             <FieldRow label="State" required={requiredFields.has("state")} error={errors.state} hint="Pick from the list or type a new one.">
               <input
@@ -1587,7 +1632,7 @@ export default function ClientLeads() {
                     ["Assigned date", lead.assigned_date ? fmtDateTime(lead.assigned_date) : "—"],
                     ["City", lead.city || "—"],
                     ["State", lead.state || "—"],
-                    ["Follow-up date", lead.follow_date ? fmtDate(lead.follow_date) : "—"],
+                    ["Follow-up date", lead.last_reminder_at ? fmtDateTime(lead.last_reminder_at) : "—"],
                     ["Created date", fmtDateTime(lead.created_at ?? lead.created_date)],
                   ] as [string, React.ReactNode][])
                     // Agents don't deal with assignment — drop those rows for them.
@@ -1627,14 +1672,33 @@ export default function ClientLeads() {
                       <span className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full ${r.notified_at ? "bg-slate-100 text-slate-400" : r.due ? "bg-amber-100 text-amber-600" : "bg-indigo-100 text-indigo-600"}`}>
                         <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" strokeLinecap="round" strokeLinejoin="round" /></svg>
                       </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-slate-800">{fmtDateTime(r.remind_at)}</div>
-                        {stripHtml(r.note ?? "") && <div className="rte-content text-xs text-slate-500" dangerouslySetInnerHTML={{ __html: r.note ?? "" }} />}
-                        <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">{r.notified_at ? "Notified" : r.due ? "Due" : "Upcoming"}</div>
-                      </div>
-                      <button onClick={() => removeReminder(r.id)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-500" aria-label="Delete reminder">
-                        <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                      </button>
+                      {editingReminder === r.id ? (
+                        <div className="min-w-0 flex-1">
+                          <input type="datetime-local" value={editRemindAt} onChange={(e) => setEditRemindAt(e.target.value)} className={inputCls(editReminderErr)} />
+                          <div className="mt-2"><RichTextEditor key={`rem-edit-${r.id}`} initialHTML={r.note ?? ""} onChange={setEditReminderNote} placeholder="Optional note" minHeight={70} /></div>
+                          {editReminderErr && <p className="mt-1 text-xs text-rose-600">{editReminderErr}</p>}
+                          <div className="mt-2 flex justify-end gap-2">
+                            <button onClick={cancelEditReminder} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+                            <button onClick={() => saveEditReminder(r.id)} disabled={savingReminder} className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingReminder ? "Saving…" : "Save"}</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-slate-800">{fmtDateTime(r.remind_at)}</div>
+                          {stripHtml(r.note ?? "") && <div className="rte-content text-xs text-slate-500" dangerouslySetInnerHTML={{ __html: r.note ?? "" }} />}
+                          <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">{r.notified_at ? "Notified" : r.due ? "Due" : "Upcoming"}</div>
+                        </div>
+                      )}
+                      {r.can_edit && editingReminder !== r.id && (
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => startEditReminder(r)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-emerald-50 hover:text-emerald-600" aria-label="Edit reminder">
+                            <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                          </button>
+                          <button onClick={() => removeReminder(r.id)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-500" aria-label="Delete reminder">
+                            <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                          </button>
+                        </div>
+                      )}
                     </li>
                   ))}
                   {detail && detail.reminders.length === 0 && <li className="text-sm text-slate-400">No reminders yet.</li>}
@@ -1656,12 +1720,30 @@ export default function ClientLeads() {
                         <span className="text-xs font-medium text-slate-600">{n.author_name || "Someone"}</span>
                         <div className="flex items-center gap-2">
                           <span className="text-[11px] text-slate-400">{fmtDateTime(n.created_at)}</span>
-                          <button onClick={() => removeNote(n.id)} className="text-slate-400 hover:text-rose-500" aria-label="Delete note">
-                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                          </button>
+                          {/* Edit/delete only for the author, a team leader or an admin. */}
+                          {n.can_edit && editingNote !== n.id && (
+                            <button onClick={() => startEditNote(n)} className="text-slate-400 hover:text-emerald-600" aria-label="Edit note">
+                              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                            </button>
+                          )}
+                          {n.can_edit && (
+                            <button onClick={() => removeNote(n.id)} className="text-slate-400 hover:text-rose-500" aria-label="Delete note">
+                              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                            </button>
+                          )}
                         </div>
                       </div>
-                      <div className="rte-content mt-1 text-sm text-slate-700" dangerouslySetInnerHTML={{ __html: n.body }} />
+                      {editingNote === n.id ? (
+                        <div className="mt-2">
+                          <RichTextEditor key={`note-edit-${n.id}`} initialHTML={n.body} onChange={setEditNoteBody} placeholder="Edit note…" minHeight={90} />
+                          <div className="mt-2 flex justify-end gap-2">
+                            <button onClick={cancelEditNote} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+                            <button onClick={() => saveEditNote(n.id)} disabled={savingNote || !stripHtml(editNoteBody)} className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingNote ? "Saving…" : "Save"}</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rte-content mt-1 text-sm text-slate-700" dangerouslySetInnerHTML={{ __html: n.body }} />
+                      )}
                     </li>
                   ))}
                   {detail && detail.notes.length === 0 && <li className="text-sm text-slate-400">No notes yet.</li>}
@@ -1696,7 +1778,7 @@ export default function ClientLeads() {
                 ) : (
                   <ol className="relative ml-3 space-y-4 border-l-2 border-slate-100 pl-6">
                     {(detail?.activity ?? []).map((a) => {
-                      const s = activityStyle(a.action);
+                      const s = activityStyle(a.action, a.description);
                       return (
                         <li key={a.id} className="relative">
                           <span className={`absolute -left-[2.18rem] top-0.5 flex h-7 w-7 items-center justify-center rounded-full border ${s.ring}`}>
@@ -1752,9 +1834,6 @@ export default function ClientLeads() {
           {/* Assignment */}
           <BulkField checked={bChg.assign} onToggle={() => toggleChg("assign")} label="Assignment">
             <div className="space-y-2">
-              {bulkLeadRef && (
-                <p className="text-xs text-amber-600">★ marks the agent who handles the <strong>{bulkLeadRef}</strong> reference these leads belong to.</p>
-              )}
               <div className="flex gap-2">
                 {([["single", "Single user"], ["robin", "Round-robin"]] as const).map(([m, lbl]) => (
                   <button key={m} type="button" onClick={() => setBMode(m)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${bMode === m ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}>{lbl}</button>

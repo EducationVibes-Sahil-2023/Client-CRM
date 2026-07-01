@@ -533,6 +533,8 @@ export interface LeadReminder {
   done: number | boolean;
   due: boolean;
   created_at: string;
+  /** True when the current user may edit/delete this reminder (creator, team leader or admin). */
+  can_edit?: boolean;
 }
 
 export interface LeadNote {
@@ -542,6 +544,8 @@ export interface LeadNote {
   author_name: string | null;
   body: string;
   created_at: string;
+  /** True when the current user may edit/delete this note (author, team leader or admin). */
+  can_edit?: boolean;
 }
 
 export interface LeadActivity {
@@ -563,8 +567,11 @@ export interface LeadDetail {
 export const getLeadDetail = (id: number) => clientGet<LeadDetail>(`/leads/${id}/detail`);
 export const createLeadReminder = (id: number, body: { remind_at: string; note?: string }) =>
   clientPost(`/leads/${id}/reminders`, body);
+export const updateLeadReminder = (rid: number, body: { remind_at: string; note?: string }) =>
+  clientPost(`/lead-reminders/${rid}`, body);
 export const deleteLeadReminder = (rid: number) => clientPost(`/lead-reminders/${rid}/delete`);
 export const createLeadNote = (id: number, body: string) => clientPost(`/leads/${id}/notes`, { body });
+export const updateLeadNote = (nid: number, body: string) => clientPost(`/lead-notes/${nid}`, { body });
 export const deleteLeadNote = (nid: number) => clientPost(`/lead-notes/${nid}/delete`);
 export const pollReminders = () => clientGet<{ due: number }>("/reminders/poll");
 

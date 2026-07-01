@@ -11,7 +11,7 @@ class LeadReminderModel extends TenantModel
 {
     protected $table         = 'lead_reminders';
     protected $primaryKey    = 'id';
-    protected $allowedFields = ['client_id', 'lead_id', 'user_id', 'remind_at', 'note', 'notified_at', 'done'];
+    protected $allowedFields = ['client_id', 'lead_id', 'user_id', 'author_staff_id', 'remind_at', 'note', 'notified_at', 'done'];
 
     protected $useSoftDeletes = true;
     protected $deletedField   = 'deleted_at';

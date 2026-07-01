@@ -25,7 +25,9 @@ export default function TransferModal({
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const opts: SelectOption[] = staff.map((s) => ({ value: String(s.id), label: s.name }));
+  // Reference-scoped agents are never assignees (they see leads by reference),
+  // so they can't be transfer targets either.
+  const opts: SelectOption[] = staff.filter((s) => !s.reference_id).map((s) => ({ value: String(s.id), label: s.name }));
 
   async function submit() {
     if (!lead) return;

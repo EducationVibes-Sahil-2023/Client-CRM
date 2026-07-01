@@ -3226,12 +3226,18 @@ class ClientController extends ApiController
         $reminders = (new LeadReminderModel())->where('client_id', $cid)->where('lead_id', $id)
             ->orderBy('remind_at', 'ASC')->findAll();
         foreach ($reminders as &$r) {
-            $r['due'] = $r['remind_at'] <= $now;
+            $r['due']      = $r['remind_at'] <= $now;
+            $r['can_edit'] = $this->canManageReminder($r);
         }
         unset($r);
 
         $notes = (new LeadNoteModel())->where('client_id', $cid)->where('lead_id', $id)
             ->orderBy('id', 'DESC')->findAll();
+        // Flag which notes this user may edit/delete (author, team leader or admin).
+        foreach ($notes as &$n) {
+            $n['can_edit'] = $this->canManageNote($n);
+        }
+        unset($n);
 
         $activity = $this->activityLogModel('client_admin', $cid)
             ->where('client_id', $cid)->where('entity_type', 'lead')->where('entity_id', $id)
@@ -3984,6 +3990,26 @@ class ClientController extends ApiController
         ]);
     }
 
+    /**
+     * Mirror a lead's follow_date onto its latest reminder date (max remind_at),
+     * or null when it has no reminders left. The follow-up date is therefore
+     * always driven by reminders — shown across the lead table, form and the
+     * Follow Up Tracker. (Stored as DATE; the full date+time lives in the
+     * reminder / last_reminder_at.)
+     */
+    private function syncFollowDate(int $cid, int $leadId): void
+    {
+        $row   = (new LeadReminderModel())
+            ->selectMax('remind_at', 'max_at')
+            ->where('client_id', $cid)
+            ->where('lead_id', $leadId)
+            ->first();
+        $maxAt = $row['max_at'] ?? null;
+        (new LeadModel())->update($leadId, [
+            'follow_date' => $maxAt ? date('Y-m-d', strtotime((string) $maxAt)) : null,
+        ]);
+    }
+
     /** POST /client/leads/{id}/reminders — schedule a future reminder. */
     public function createReminder(int $id)
     {
@@ -4006,21 +4032,65 @@ class ClientController extends ApiController
 
         $model = new LeadReminderModel();
         $rid   = $model->insert([
-            'client_id' => $cid,
-            'lead_id'   => $id,
-            'user_id'   => (int) ($this->currentUser()['id'] ?? 0),
-            'remind_at' => date('Y-m-d H:i:s', $remindAt),
-            'note'      => trim((string) $this->input('note')) ?: null,
+            'client_id'       => $cid,
+            'lead_id'         => $id,
+            'user_id'         => (int) ($this->currentUser()['id'] ?? 0),
+            'author_staff_id' => $this->staffId() ?: null,
+            'remind_at'       => date('Y-m-d H:i:s', $remindAt),
+            'note'            => trim((string) $this->input('note')) ?: null,
         ]);
         if ($rid === false) {
             return $this->failValidationErrors($model->errors());
         }
+        $this->syncFollowDate($cid, $id);
         $this->logActivity('created', 'lead', $id, 'Set a reminder for ' . date('d M Y, g:i A', $remindAt));
 
         return $this->respondCreated(['message' => 'Reminder set', 'id' => $rid]);
     }
 
-    /** POST /client/lead-reminders/{id}/delete — soft-delete a reminder. */
+    /** POST /client/lead-reminders/{id} — edit a reminder (creator, team leader or admin). */
+    public function updateReminder(int $rid)
+    {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new LeadReminderModel();
+        $row   = $model->where('client_id', $cid)->find($rid);
+        if (! $row) {
+            return $this->failNotFound('Reminder not found');
+        }
+        if (! $this->canManageReminder($row)) {
+            return $this->failForbidden('You can only edit your own reminders (or your team\'s).');
+        }
+
+        $remindAt = strtotime((string) $this->input('remind_at'));
+        if (! $remindAt) {
+            return $this->failValidationErrors(['remind_at' => 'Pick a valid date and time.']);
+        }
+        $newAt = date('Y-m-d H:i:s', $remindAt);
+        // Only enforce "must be in the future" when the time actually changes, so a
+        // note-only edit on an already-passed reminder still saves.
+        if ($newAt !== (string) $row['remind_at'] && $remindAt <= time()) {
+            return $this->failValidationErrors(['remind_at' => 'The reminder time must be in the future.']);
+        }
+
+        $data = ['remind_at' => $newAt, 'note' => trim((string) $this->input('note')) ?: null];
+        // Re-arm a rescheduled reminder so it fires again at the new time.
+        if ($newAt !== (string) $row['remind_at']) {
+            $data['notified_at'] = null;
+            $data['done']        = 0;
+        }
+        if ($model->update($rid, $data) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->syncFollowDate($cid, (int) $row['lead_id']);
+        $this->logActivity('updated', 'lead', (int) $row['lead_id'], 'Edited a reminder');
+
+        return $this->respond(['message' => 'Reminder updated']);
+    }
+
+    /** POST /client/lead-reminders/{id}/delete — soft-delete a reminder (creator, team leader or admin). */
     public function deleteReminder(int $rid)
     {
         if ($resp = $this->requirePermission('leads', 'update')) {
@@ -4032,7 +4102,11 @@ class ClientController extends ApiController
         if (! $row) {
             return $this->failNotFound('Reminder not found');
         }
+        if (! $this->canManageReminder($row)) {
+            return $this->failForbidden('You can only delete your own reminders (or your team\'s).');
+        }
         $model->delete($rid);
+        $this->syncFollowDate($cid, (int) $row['lead_id']);
         $this->logActivity('deleted', 'lead', (int) $row['lead_id'], 'Removed a reminder');
 
         return $this->respond(['message' => 'Deleted']);
@@ -4058,11 +4132,12 @@ class ClientController extends ApiController
         $user  = $this->currentUser();
         $model = new LeadNoteModel();
         $nid   = $model->insert([
-            'client_id'   => $cid,
-            'lead_id'     => $id,
-            'author_id'   => (int) ($user['id'] ?? 0),
-            'author_name' => $user['name'] ?? ($user['email'] ?? 'You'),
-            'body'        => $body,
+            'client_id'       => $cid,
+            'lead_id'         => $id,
+            'author_id'       => (int) ($user['id'] ?? 0),
+            'author_staff_id' => $this->staffId() ?: null,
+            'author_name'     => $user['name'] ?? ($user['email'] ?? 'You'),
+            'body'            => $body,
         ]);
         if ($nid === false) {
             return $this->failValidationErrors($model->errors());
@@ -4072,7 +4147,70 @@ class ClientController extends ApiController
         return $this->respondCreated(['message' => 'Note added', 'id' => $nid]);
     }
 
-    /** POST /client/lead-notes/{id}/delete — soft-delete a note. */
+    /**
+     * Whether the current user may edit/delete an authored row (note/reminder):
+     * its author, a team leader above the author in the reporting tree, or an
+     * admin. `$authorUserId` is the users-table id; `$authorStaffId` the staff id.
+     */
+    private function canManageAuthored(int $authorUserId, int $authorStaffId): bool
+    {
+        if ($this->isAdmin()) {
+            return true;
+        }
+        $uid = (int) ($this->currentUser()['id'] ?? 0);
+        if ($uid && $authorUserId === $uid) {
+            return true; // the author
+        }
+        $mySid = $this->staffId();
+        if ($mySid && $authorStaffId) {
+            // subordinateIds($me) = me + everyone below me, so an author who reports
+            // up to me (at any depth) is covered — i.e. I'm their team leader.
+            return in_array($authorStaffId, (new ClientStaffModel())->subordinateIds($this->clientId(), $mySid), true);
+        }
+
+        return false;
+    }
+
+    /** Note edit/delete gate: author, team leader or admin. */
+    private function canManageNote(array $note): bool
+    {
+        return $this->canManageAuthored((int) ($note['author_id'] ?? 0), (int) ($note['author_staff_id'] ?? 0));
+    }
+
+    /** Reminder edit/delete gate: creator, team leader or admin. */
+    private function canManageReminder(array $reminder): bool
+    {
+        return $this->canManageAuthored((int) ($reminder['user_id'] ?? 0), (int) ($reminder['author_staff_id'] ?? 0));
+    }
+
+    /** POST /client/lead-notes/{id} — edit a note (author, team leader or admin). */
+    public function updateNote(int $nid)
+    {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new LeadNoteModel();
+        $row   = $model->where('client_id', $cid)->find($nid);
+        if (! $row) {
+            return $this->failNotFound('Note not found');
+        }
+        if (! $this->canManageNote($row)) {
+            return $this->failForbidden('You can only edit your own notes (or your team\'s).');
+        }
+        $body = trim((string) $this->input('body'));
+        if ($body === '') {
+            return $this->failValidationErrors(['body' => 'Write something first.']);
+        }
+        if ($model->update($nid, ['body' => $body]) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('updated', 'lead', (int) $row['lead_id'], 'Edited a note');
+
+        return $this->respond(['message' => 'Note updated']);
+    }
+
+    /** POST /client/lead-notes/{id}/delete — soft-delete a note (author, team leader or admin). */
     public function deleteNote(int $nid)
     {
         if ($resp = $this->requirePermission('leads', 'update')) {
@@ -4083,6 +4221,9 @@ class ClientController extends ApiController
         $row   = $model->where('client_id', $cid)->find($nid);
         if (! $row) {
             return $this->failNotFound('Note not found');
+        }
+        if (! $this->canManageNote($row)) {
+            return $this->failForbidden('You can only delete your own notes (or your team\'s).');
         }
         $model->delete($nid);
         $this->logActivity('deleted', 'lead', (int) $row['lead_id'], 'Removed a note');
