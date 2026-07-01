@@ -5163,6 +5163,79 @@ class ClientController extends ApiController
      * Create (when $id is null) or update a lookup row. $extra returns any
      * columns beyond the shared name/color, read from the request body.
      */
+    /**
+     * Whether saving this lookup row would duplicate an existing name for the
+     * client. Names compare case-insensitively (soft-deleted rows excluded). Two
+     * lookups use scoped rather than global uniqueness:
+     *   - cities are unique per state (the same city name may exist elsewhere);
+     *   - lead statuses share a table with sub-statuses — a top status is unique
+     *     among top statuses, a sub-status is unique within a shared parent
+     *     status (and, when the "require type" rule is on, a shared lead type).
+     */
+    private function lookupNameTaken(string $modelClass, int $cid, array $data, ?int $excludeId): bool
+    {
+        $name = mb_strtolower(trim((string) ($data['name'] ?? '')));
+        if ($name === '') {
+            return false;
+        }
+
+        $rows = array_filter(
+            (new $modelClass())->where('client_id', $cid)->findAll(),
+            static fn ($r) => (int) $r['id'] !== (int) ($excludeId ?? 0)
+                && mb_strtolower(trim((string) ($r['name'] ?? ''))) === $name,
+        );
+        if (! $rows) {
+            return false;
+        }
+
+        if ($modelClass === CityModel::class) {
+            $state = (int) ($data['state_id'] ?? 0);
+            foreach ($rows as $r) {
+                if ((int) ($r['state_id'] ?? 0) === $state) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        if ($modelClass !== LeadStatusModel::class) {
+            return true; // simple lookup: any same-name row for this client clashes
+        }
+
+        $decodeIds = static fn ($v) => array_map('intval', is_array($d = json_decode((string) $v, true)) ? $d : []);
+        $parentIds = $decodeIds($data['parent_ids'] ?? '[]');
+        $isSub     = ! empty($parentIds);
+        $reqType   = ! empty($this->subStatusRules()['require_type']);
+
+        foreach ($rows as $r) {
+            $rp = $decodeIds($r['parent_ids'] ?? '[]');
+            if (! $rp && ! empty($r['parent_id'])) {
+                $rp = [(int) $r['parent_id']];
+            }
+            $rIsSub = ! empty($rp);
+
+            if (! $isSub) {
+                if (! $rIsSub) {
+                    return true; // top-vs-top name clash
+                }
+                continue;
+            }
+            // Sub-status: clashes only with a sub-status sharing a parent status
+            // (and a lead type too when types are mandatory).
+            if (! $rIsSub || ! array_intersect($parentIds, $rp)) {
+                continue;
+            }
+            if ($reqType && ! array_intersect($decodeIds($data['type_ids'] ?? '[]'), $decodeIds($r['type_ids'] ?? '[]'))) {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private function saveLookup(string $modelClass, string $entity, callable $extra, ?int $id = null)
     {
         if ($resp = $this->requirePermission('leads_setup', $id === null ? 'create' : 'update')) {
@@ -5180,6 +5253,10 @@ class ClientController extends ApiController
             'name'      => trim((string) $this->input('name')),
             'color'     => trim((string) ($this->input('color') ?? 'indigo')) ?: 'indigo',
         ], $extra());
+
+        if ($this->lookupNameTaken($modelClass, $cid, $data, $id)) {
+            return $this->failValidationErrors(['name' => 'A ' . $entity . ' with this name already exists.']);
+        }
 
         if ($id === null) {
             $newId = $model->insert($data);
