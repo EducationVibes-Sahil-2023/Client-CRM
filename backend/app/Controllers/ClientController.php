@@ -3714,7 +3714,9 @@ class ClientController extends ApiController
         }
 
         // Leads with a follow-up date, scoped to who the user can see.
-        $q = (new LeadModel())->where('client_id', $cid)->where('follow_date IS NOT NULL')->where('follow_date !=', '');
+        // NOTE: `follow_date` is a DATE column — never compare it to '' (MySQL in
+        // strict mode rejects "Incorrect DATE value: ''"). IS NOT NULL is enough.
+        $q = (new LeadModel())->where('client_id', $cid)->where('follow_date IS NOT NULL');
         $this->applyLeadScope($q);
         $leads = $q->findAll();
 
