@@ -255,6 +255,7 @@ const FOLLOW_FLAG: Record<NonNullable<Lead["follow_flag"]>, { label: string; dot
 function followFlagBadge(flag: Lead["follow_flag"]): React.ReactNode {
   if (!flag) return null;
   const s = FOLLOW_FLAG[flag];
+  if (!s) return null; // guard against an unexpected flag value from the API
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${s.pill}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
@@ -1047,8 +1048,12 @@ export default function ClientLeads() {
   const readyCount = importRows.length - importIssues.length;
 
   const importSubOptions = useMemo<SelectOption[]>(() => {
-    const sid = Number(iStatus);
-    return statuses.filter((s) => (s.parent_ids ?? []).includes(sid)).map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }));
+    if (!iStatus) return [];
+    // parent_ids come back as ints but iStatus is a string — compare as strings
+    // (and keep the legacy single parent_id fallback), matching the other pickers.
+    return statuses
+      .filter((s) => (s.parent_ids ?? []).map(String).includes(iStatus) || String(s.parent_id ?? "") === iStatus)
+      .map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }));
   }, [statuses, iStatus]);
   const staffOptions = useMemo<SelectOption[]>(() => buildAssignees(false), [buildAssignees]);
 
@@ -1594,7 +1599,10 @@ export default function ClientLeads() {
         }
       >
         {viewing && (() => {
-          const lead = detail?.lead ?? viewing;
+          // Merge so the detail response's resolved fields win, but any field it
+          // omits falls back to the list row (avoids blank "—" while detail loads
+          // or if the endpoint doesn't resolve a field).
+          const lead = detail?.lead ? { ...viewing, ...detail.lead } : viewing;
           return (
             <div className="space-y-5">
               {/* Tab bar */}

@@ -47,7 +47,10 @@ export function DonutSelect({
   const [hoverId, setHoverId] = useState<number | null>(null);
   const sum = total ?? data.reduce((a, b) => a + b.value, 0);
   const focusId = hoverId ?? activeId;
-  const focus = focusId != null ? data.find((d) => d.id === focusId) ?? null : null;
+  // ids may arrive from the API as strings while activeId is numeric — compare
+  // both as numbers so highlight / center-label track the active slice.
+  const nid = (v: number | string | null | undefined) => (v == null ? -1 : Number(v));
+  const focus = focusId != null ? data.find((d) => nid(d.id) === focusId) ?? null : null;
 
   // Cumulative slice angles (plain loop — no reassignment inside render closures).
   const cx = 100, cy = 100, rOuter = 84, rInner = 56;
@@ -68,7 +71,7 @@ export function DonutSelect({
             <circle cx={cx} cy={cy} r={(rOuter + rInner) / 2} fill="none" stroke={data[0].color} strokeWidth={rOuter - rInner} />
           ) : (
             slices.map((s) => {
-              const id = s.d.id ?? -1;
+              const id = nid(s.d.id);
               const isFocus = focusId === id;
               const dimmed = focusId != null && !isFocus;
               return (
@@ -94,7 +97,7 @@ export function DonutSelect({
 
       <ul className="grid max-h-[210px] w-full grid-cols-1 gap-0.5 overflow-y-auto pr-1">
         {data.map((d) => {
-          const id = d.id ?? -1;
+          const id = nid(d.id);
           const active = activeId === id;
           const pct = sum > 0 ? Math.round((d.value / sum) * 100) : 0;
           return (

@@ -151,6 +151,7 @@ function AttemptsConnects({ reps }: { reps: { name: string; attempts: number; co
 
 /** 7-day trend: call-count bars + avg-duration line (dual scale). */
 function TrendChart({ trend }: { trend: { date: string; calls: number; avg_sec: number }[] }) {
+  if (!trend.length) return <p className="py-10 text-center text-sm text-slate-400">No calls in this range</p>;
   const W = 640, H = 210, pad = { l: 30, r: 30, t: 18, b: 26 };
   const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
   const maxCalls = Math.max(1, ...trend.map((t) => t.calls));
@@ -395,7 +396,10 @@ export default function ClientCalls() {
   // ---- dashboard state ----
   const [dash, setDash] = useState<CallDashboard | null>(null);
   const [dashLoading, setDashLoading] = useState(true);
-  const [date, setDate] = useState(""); // "" → server's today
+  // Local "today" so the date picker is populated on first render; this also
+  // avoids a duplicate dashboard fetch (previously date started "" and was set
+  // from the first response, changing loadDash's identity → a second request).
+  const [date, setDate] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; });
   const [fStatus, setFStatus] = useState<string[]>([]);
   const [fSource, setFSource] = useState<string[]>([]);
   const [fDept, setFDept] = useState<string[]>([]);

@@ -116,7 +116,7 @@ export function SearchSelect({
               const isSel = o.value === value;
               const isActive = i === active;
               return (
-                <li key={o.value || "__all__"}>
+                <li key={o.value || `__opt_${i}`}>
                   <button
                     type="button"
                     onMouseEnter={() => setActive(i)}

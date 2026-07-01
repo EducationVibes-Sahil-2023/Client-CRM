@@ -149,27 +149,41 @@ export default function NotificationsView({ area }: { area: ChatArea }) {
     return () => window.clearInterval(id);
   }, [area, filter]);
 
+  // Re-pull the first page from the server — used to undo an optimistic read
+  // update when the mark-read request fails (otherwise the badge desyncs: the
+  // row looks read but the 15s poll re-bumps the unread count).
+  const resync = useCallback(async () => {
+    try {
+      const d = await getNotifications(area, { filter, limit: PAGE });
+      setItems(d.notifications);
+      setUnread(d.unread);
+      setHasMore(d.has_more);
+      hasMoreRef.current = d.has_more;
+      maxIdRef.current = d.notifications.length ? d.notifications[0].id : 0;
+    } catch { /* leave current state */ }
+  }, [area, filter]);
+
   async function open(n: AppNotification) {
     if (!n.read_at) {
-      readNotification(area, n.id).catch(() => {});
       setUnread((u) => Math.max(0, u - 1));
       setItems((list) =>
         filter === "unread"
           ? list.filter((x) => x.id !== n.id)
           : list.map((x) => (x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x)),
       );
+      readNotification(area, n.id).catch(() => resync());
     }
     if (n.link) router.push(n.link);
   }
 
   async function markAll() {
-    readAllNotifications(area).catch(() => {});
     setUnread(0);
     if (filter === "unread") {
       setItems([]);
     } else {
       setItems((list) => list.map((x) => ({ ...x, read_at: x.read_at ?? new Date().toISOString() })));
     }
+    readAllNotifications(area).catch(() => resync());
   }
 
   return (

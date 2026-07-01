@@ -57,11 +57,20 @@ export default function AppearancePage() {
   );
 
   function moveMenu(index: number, dir: -1 | 1) {
-    const next = [...orderedMenu];
     const j = index + dir;
-    if (j < 0 || j >= next.length) return;
-    [next[index], next[j]] = [next[j], next[index]];
-    set("menu_order", next.map((i) => i.key));
+    if (j < 0 || j >= orderedMenu.length) return;
+    const visible = [...orderedMenu];
+    [visible[index], visible[j]] = [visible[j], visible[index]];
+    const visibleKeys = visible.map((i) => i.key);
+
+    // Rebuild the FULL order so plan-hidden items keep their saved slot instead
+    // of being dropped: walk every nav item, filling visible slots from the
+    // reordered visible sequence and leaving hidden items in place.
+    let vi = 0;
+    const merged = orderNav(MAIN_NAV, draft.menu_order).map((i) =>
+      (!i.feature || hasFeature(i.feature)) ? visibleKeys[vi++] : i.key,
+    );
+    set("menu_order", merged);
   }
 
   // Rename a nav item (blank = revert to its default label).

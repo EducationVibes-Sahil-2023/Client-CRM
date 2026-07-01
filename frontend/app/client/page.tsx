@@ -91,7 +91,9 @@ const planBadge: Record<string, string> = {
 function subscriptionPct(planStart: string, planEnd: string) {
   const start = new Date(`${planStart.slice(0, 10)}T00:00:00`).getTime();
   const end = new Date(`${planEnd.slice(0, 10)}T23:59:59`).getTime();
-  return Math.max(0, Math.min(100, ((Date.now() - start) / (end - start)) * 100));
+  const span = end - start;
+  if (!Number.isFinite(span) || span <= 0) return 0; // equal/unparseable dates → avoid NaN width
+  return Math.max(0, Math.min(100, ((Date.now() - start) / span) * 100));
 }
 
 const statCards = (s: Record<string, number>) => [

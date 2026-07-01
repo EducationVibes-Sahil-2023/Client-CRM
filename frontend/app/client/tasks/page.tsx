@@ -223,7 +223,7 @@ export default function TasksPage() {
 
   function load() {
     getTasks().then((d) => { setTasks(d.tasks); if (d.stages) setStages(d.stages); }).catch(() => setTasks([]));
-    getStaff().then((d) => setStaff(d.staff)).catch(() => {});
+    getStaff().then((d) => setStaff(d.staff ?? [])).catch(() => {});
   }
   function loadSetup() {
     getTaskSetup().then((d) => { setRequiredFields(new Set(d.required_fields ?? [])); setCustomFields(d.custom_fields ?? []); }).catch(() => {});

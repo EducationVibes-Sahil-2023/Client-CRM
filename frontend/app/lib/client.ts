@@ -802,9 +802,11 @@ export interface ClientActivity {
   created_at: string;
 }
 
+// Keep in lockstep with backend ClientController::MODULES so the roles editor
+// and per-staff permission editor offer exactly the modules the backend enforces.
 export const MODULES = [
-  "dashboard", "leads", "leads_setup", "followups", "team", "roles", "tasks", "assets",
-  "calls", "reports", "announcements", "chat", "notifications", "email_config", "settings",
+  "dashboard", "leads", "leads_setup", "followups", "lead_transfer", "visitors", "team", "roles", "tasks", "assets",
+  "calls", "reports", "chat", "notifications", "announcements", "email_config", "settings",
 ] as const;
 
 // ---- endpoints ----

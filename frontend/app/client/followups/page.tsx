@@ -292,6 +292,9 @@ function repHealth(pct: number) {
   if (pct >= 40) return { key: "risk" as const, label: "At risk", chip: "bg-amber-50 text-amber-700" };
   return { key: "crit" as const, label: "Critical", chip: "bg-rose-50 text-rose-600" };
 }
+// A rep whose follow-ups are all still upcoming has nothing due yet — don't
+// score them (avoids a misleading 0% "Critical").
+const repHealthNone = () => ({ key: "na" as const, label: "No dues yet", chip: "bg-slate-100 text-slate-400" });
 
 /** Counsellor follow-up workload & accountability — per-rep, with pending split
  *  by top-level status and an On track / At risk / Critical classification. */
@@ -306,10 +309,16 @@ function AccountabilityTable({ reps, topStatuses }: { reps: FollowupRep[]; topSt
   const rows = useMemo(() => reps
     .filter((r) => r.total > 0)
     .map((r) => {
-      const pct = r.total ? Math.round((r.done / r.total) * 100) : 0;
-      return { ...r, pending: r.total - r.done, pct, health: repHealth(pct) };
+      // On-time completion = done / (done + overdue) — the follow-ups that have
+      // actually come due. Upcoming (future) ones are excluded so a rep isn't
+      // marked down for work that isn't due yet (matches the KPI card).
+      const settled = r.done + r.overdue;
+      const hasDue = settled > 0;
+      const pct = hasDue ? Math.round((r.done / settled) * 100) : 0;
+      return { ...r, pending: r.total - r.done, hasDue, pct, health: hasDue ? repHealth(pct) : repHealthNone() };
     })
-    .sort((a, b) => a.pct - b.pct || b.total - a.total), [reps]);
+    // Reps with due follow-ups first (worst completion first); "no dues yet" last.
+    .sort((a, b) => (a.hasDue === b.hasDue ? (a.pct - b.pct || b.total - a.total) : a.hasDue ? -1 : 1)), [reps]);
 
   const counts = useMemo(() => ({
     all: rows.length,
@@ -327,7 +336,7 @@ function AccountabilityTable({ reps, topStatuses }: { reps: FollowupRep[]; topSt
     { key: "pending", header: "Pending", align: "right", width: 100, render: (x) => <span className={`tabular-nums ${x.pending > 0 ? "text-rose-500" : "text-slate-300"}`}>{nf(x.pending)}</span> },
     { key: "overdue", header: "Overdue", align: "center", width: 100, render: (x) => <span className={`inline-flex min-w-7 justify-center rounded-md px-2 py-0.5 text-xs font-semibold ${x.overdue > 0 ? "bg-amber-100 text-amber-700" : "bg-emerald-50 text-emerald-600"}`}>{x.overdue}</span> },
     ...topStatuses.map((t) => ({ key: `st_${t.id}`, header: t.name, align: "center" as const, width: 110, render: (x: Row) => numPill(x.buckets?.[String(t.id)] ?? 0) })),
-    { key: "pct", header: "Completed %", align: "center", width: 120, render: (x) => <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${pctChip(x.pct)}`}>{x.pct}%</span> },
+    { key: "pct", header: "Completed %", align: "center", width: 120, render: (x) => x.hasDue ? <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${pctChip(x.pct)}`}>{x.pct}%</span> : <span className="text-slate-300">—</span> },
     { key: "health", header: "Status", width: 110, render: (x) => <span className={`inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold ${x.health.chip}`}>{x.health.label}</span> },
   ], [topStatuses]);
 
@@ -535,7 +544,7 @@ export default function ClientFollowups() {
               <Kpi label="Due today" value={nf(k.due_today)} tone="from-sky-500 to-blue-600" />
               <Kpi label="Overdue" value={nf(k.overdue)} tone="from-rose-500 to-red-600" />
               <Kpi label="Done" value={nf(k.done)} tone="from-emerald-500 to-teal-600" />
-              <Kpi label="Completion" value={`${k.completion}%`} sub="done / actioned" tone="from-violet-500 to-purple-600" />
+              <Kpi label="Completion" value={k.done + k.overdue > 0 ? `${k.completion}%` : "—"} sub="done / actioned" tone="from-violet-500 to-purple-600" />
             </div>
 
             {/* Action centre — overdue banner + per-group pending cards */}

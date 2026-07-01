@@ -145,6 +145,10 @@ export default function ChatView({
   const hasMoreRef = useRef(false);
   const loadingOlderRef = useRef(false);
   const unreadMapRef = useRef<Map<number, number>>(new Map());
+  // Mirror of the current conversation ids, read by the poll loop so the 2s
+  // interval doesn't have to depend on `conversations` (which it mutates each
+  // tick — that would tear down and recreate the interval constantly).
+  const convIdsRef = useRef<Set<number>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -267,6 +271,9 @@ export default function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep the id mirror current for the poll loop (see convIdsRef).
+  useEffect(() => { convIdsRef.current = new Set(conversations.map((c) => c.id)); }, [conversations]);
+
   // 2s poll: refresh unread badges + append new messages to the open thread.
   useEffect(() => {
     const tick = async () => {
@@ -274,7 +281,7 @@ export default function ChatView({
         const poll = await chatPoll(area);
 
         let sawNew = false;
-        const known = new Set(conversations.map((c) => c.id));
+        const known = convIdsRef.current;
         for (const p of poll.conversations) {
           const prev = unreadMapRef.current.get(p.id) ?? 0;
           if (p.id !== activeIdRef.current && p.unread > prev) sawNew = true;
@@ -320,7 +327,7 @@ export default function ChatView({
     const t = window.setInterval(tick, 2000);
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [area, conversations]);
+  }, [area]);
 
   function addEmoji(e: string) {
     setDraft((d) => d + e);

@@ -61,7 +61,7 @@ class ClientController extends ApiController
     /** Modules that roles can be granted CRUD permissions on. */
     public const MODULES = [
         'dashboard', 'leads', 'leads_setup', 'followups', 'lead_transfer', 'visitors', 'team', 'roles', 'tasks', 'assets',
-        'calls', 'reports', 'chat', 'notifications', 'email_config', 'settings',
+        'calls', 'reports', 'chat', 'notifications', 'announcements', 'email_config', 'settings',
     ];
 
     /**
@@ -936,18 +936,22 @@ class ClientController extends ApiController
             return true; // account owner has full rights
         }
 
+        // Per-staff extra grants, when present, REPLACE the role entirely — the
+        // same precedence effectivePermissions()/can() (and the UI) use. This
+        // keeps write-guards (denyUnlessPerm) consistent with what the UI shows,
+        // so an action revoked via extra_permissions is actually blocked.
+        if (! empty($user['staff_id'])) {
+            $staff = (new ClientStaffModel())->find((int) $user['staff_id']);
+            $extra = json_decode((string) ($staff['extra_permissions'] ?? ''), true);
+            if (is_array($extra) && $extra) {
+                return ! empty($extra[$module][$action]);
+            }
+        }
+
         if (! empty($user['role_id'])) {
             $p = (new ClientRolePermissionModel())
                 ->where(['role_id' => $user['role_id'], 'module' => $module])->first();
             if ($p && ! empty($p['can_' . $action])) {
-                return true;
-            }
-        }
-
-        if (! empty($user['staff_id'])) {
-            $staff = (new ClientStaffModel())->find((int) $user['staff_id']);
-            $extra = json_decode((string) ($staff['extra_permissions'] ?? ''), true);
-            if (is_array($extra) && ! empty($extra[$module][$action])) {
                 return true;
             }
         }
@@ -2443,7 +2447,7 @@ class ClientController extends ApiController
         return $this->respond([
             'types'      => $this->lookupRows(VisitorTypeModel::class, $cid),
             'statuses'   => $this->lookupRows(VisitorStatusModel::class, $cid),
-            'can_manage' => $this->isAdmin(),
+            'can_manage' => $this->isAdmin() || $this->can('visitors', 'create'),
         ]);
     }
 
@@ -2511,7 +2515,7 @@ class ClientController extends ApiController
         }
         unset($r);
 
-        return $this->respond(['visitors' => $rows, 'can_manage' => $this->isAdmin()]);
+        return $this->respond(['visitors' => $rows, 'can_manage' => $this->isAdmin() || $this->can('visitors', 'create')]);
     }
 
     /** POST /client/visitors — log a visitor. */
@@ -2683,7 +2687,7 @@ class ClientController extends ApiController
         $cid   = $this->clientId();
         $model = new LeadModel();
         $old   = $model->where('client_id', $cid)->find($id);
-        if (! $old) {
+        if (! $old || ! $this->canSeeLead($old)) {
             return $this->failNotFound('Lead not found');
         }
 
@@ -2788,7 +2792,7 @@ class ClientController extends ApiController
         $cid   = $this->clientId();
         $model = new LeadModel();
         $row   = $model->where('client_id', $cid)->find($id);
-        if (! $row) {
+        if (! $row || ! $this->canSeeLead($row)) {
             return $this->failNotFound('Lead not found');
         }
         $model->delete($id);
@@ -3198,6 +3202,9 @@ class ClientController extends ApiController
      */
     public function leadDetail(int $id)
     {
+        if ($resp = $this->requirePermission('leads')) {
+            return $resp;
+        }
         $cid  = $this->clientId();
         $lead = (new LeadModel())->where('client_id', $cid)->find($id);
         if (! $lead) {
@@ -3212,8 +3219,12 @@ class ClientController extends ApiController
 
         $statusNames = $this->idNameMap($this->lookupRows(LeadStatusModel::class, $cid));
         $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        $sourceNames = $this->idNameMap($this->lookupRows(LeadSourceModel::class, $cid));
+        $typeNames   = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
         $lead['status']           = $lead['status_id'] ? ($statusNames[(int) $lead['status_id']] ?? null) : null;
         $lead['sub_status']       = $lead['sub_status_id'] ? ($statusNames[(int) $lead['sub_status_id']] ?? null) : null;
+        $lead['source']           = $lead['source_id'] ? ($sourceNames[(int) $lead['source_id']] ?? null) : null;
+        $lead['lead_type']        = $lead['lead_type_id'] ? ($typeNames[(int) $lead['lead_type_id']] ?? null) : null;
         $lead['assigned_to_name'] = $lead['assigned_to'] ? ($staffNames[(int) $lead['assigned_to']] ?? null) : null;
         // Reference name resolved live from the stable id (renames reflect at read).
         $lead['reference_id']     = $lead['reference_id'] !== null ? (int) $lead['reference_id'] : null;
@@ -4018,7 +4029,7 @@ class ClientController extends ApiController
         }
         $cid  = $this->clientId();
         $lead = (new LeadModel())->where('client_id', $cid)->find($id);
-        if (! $lead) {
+        if (! $lead || ! $this->canSeeLead($lead)) {
             return $this->failNotFound('Lead not found');
         }
 
@@ -4120,7 +4131,7 @@ class ClientController extends ApiController
         }
         $cid  = $this->clientId();
         $lead = (new LeadModel())->where('client_id', $cid)->find($id);
-        if (! $lead) {
+        if (! $lead || ! $this->canSeeLead($lead)) {
             return $this->failNotFound('Lead not found');
         }
 
@@ -4797,6 +4808,7 @@ class ClientController extends ApiController
             if ($newName !== '' && $newName !== $oldName) {
                 (new LeadModel())->builder()
                     ->where('client_id', $cid)
+                    ->where('deleted_at', null) // don't rewrite archived leads (raw builder skips the model's soft-delete scope)
                     ->where('reference_name', $oldName)
                     ->groupStart()->where('reference_id', null)->orWhere('reference_id', $id)->groupEnd()
                     ->update(['reference_id' => $id, 'reference_name' => $newName]);
@@ -6403,6 +6415,9 @@ class ClientController extends ApiController
     /** GET /client/tasks/{id} — a single task with its assignee resolved. */
     public function task(int $id)
     {
+        if ($resp = $this->requirePermission('tasks')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         $t   = (new ClientTaskModel())->where('client_id', $cid)->find($id);
         if (! $t) {
@@ -6418,6 +6433,9 @@ class ClientController extends ApiController
     /** GET /client/tasks/{id}/comments — the discussion thread, oldest first. */
     public function taskComments(int $id)
     {
+        if ($resp = $this->requirePermission('tasks')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         if (! (new ClientTaskModel())->where('client_id', $cid)->find($id)) {
             return $this->failNotFound('Task not found');
@@ -6484,6 +6502,9 @@ class ClientController extends ApiController
     /** GET /client/tasks/{id}/activity — this task's audit timeline, newest first. */
     public function taskActivity(int $id)
     {
+        if ($resp = $this->requirePermission('tasks')) {
+            return $resp;
+        }
         $cid = $this->clientId();
         if (! (new ClientTaskModel())->where('client_id', $cid)->find($id)) {
             return $this->failNotFound('Task not found');

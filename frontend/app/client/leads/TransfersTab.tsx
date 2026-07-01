@@ -170,7 +170,7 @@ export default function TransfersTab() {
                     </IconButton>
                   </>
                 )}
-                {(canDecide || t.requested_by === myStaffId) && (
+                {(canDecide || Number(t.requested_by) === myStaffId) && (
                   <IconButton title="Cancel request" onClick={() => busy === null && onCancel(t)}>
                     <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1018 0 9 9 0 00-18 0zM9 9l6 6M15 9l-6 6" strokeLinecap="round" strokeLinejoin="round" /></svg>
                   </IconButton>
