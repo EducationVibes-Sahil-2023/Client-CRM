@@ -69,6 +69,14 @@ class CallIngestService
         }
     }
 
+    /** Normalise a value into an IST 'Y-m-d' date, or null if unparseable/blank. */
+    private static function toDate($v): ?string
+    {
+        $dt = self::toDateTime($v);
+
+        return $dt !== null ? substr($dt, 0, 10) : null;
+    }
+
     /**
      * Normalise either payload shape into a flat list of call rows with keys:
      * contact, staff_contact, status, source, type, duration, call_start,
@@ -95,6 +103,11 @@ class CallIngestService
                     'duration'      => $c['duration'] ?? 0,
                     'call_start'    => self::toDateTime($c['call_start'] ?? ''),
                     'call_end'      => self::toDateTime($c['call_end'] ?? ''),
+                    'sim1'          => $c['sim1'] ?? '',
+                    'sim2'          => $c['sim2'] ?? '',
+                    'calling_sim'   => $c['calling_sim'] ?? ($c['callingsim'] ?? ''),
+                    'sim_status'    => $c['sim_status'] ?? ($c['simstatus'] ?? ''),
+                    'calling_date'  => self::toDate($c['calling_date'] ?? ($c['call_start'] ?? '')),
                 ];
             }
 
@@ -134,6 +147,11 @@ class CallIngestService
                 'duration'      => $f['call_duration'] ?? 0,
                 'call_start'    => self::toDateTime($f['startdate_time'] ?? ''),
                 'call_end'      => self::toDateTime($f['enddate_time'] ?? ''),
+                'sim1'          => $f['sim1'] ?? '',
+                'sim2'          => $f['sim2'] ?? '',
+                'calling_sim'   => $f['calling_sim'] ?? ($f['callingsim'] ?? ''),
+                'sim_status'    => $f['sim_status'] ?? ($f['simstatus'] ?? ''),
+                'calling_date'  => self::toDate($f['calling_date'] ?? ($f['startdate_time'] ?? '')),
             ];
         }
 
@@ -185,18 +203,29 @@ class CallIngestService
         return null;
     }
 
+    /** Stable identity of a call for duplicate detection. */
+    private static function dupKey(?string $contact, ?string $staffContact, ?string $start, ?string $sim): string
+    {
+        return self::normalizePhone($contact) . '|' . self::normalizePhone($staffContact)
+            . '|' . trim((string) $start) . '|' . mb_strtolower(trim((string) $sim));
+    }
+
     /**
      * Insert parsed call rows into a client's `calls` table, matching each call to
      * a lead (by contact number) and a staff member (by staff_contact number).
      * Unmatched staff fall back to $defaultStaffId (the posting staff, or null on
-     * the keyed endpoint). Returns the number of rows inserted.
+     * the keyed endpoint).
+     *
+     * Duplicates are rejected: a call whose (contact, staff_contact, call_start,
+     * calling_sim) already exists for this client — or repeats within the same
+     * batch — is skipped. Returns ['inserted' => int, 'skipped' => int].
      *
      * @param array $rows output of {@see self::parse()}
      */
-    public static function ingest(int $clientId, ConnectionInterface $db, array $rows, ?int $defaultStaffId = null): int
+    public static function ingest(int $clientId, ConnectionInterface $db, array $rows, ?int $defaultStaffId = null): array
     {
         if (! $rows) {
-            return 0;
+            return ['inserted' => 0, 'skipped' => 0];
         }
 
         // Phone → id maps for matching leads and staff within this client.
@@ -219,15 +248,45 @@ class CallIngestService
             }
         }
 
-        $model    = new CallLogModel($db);
-        $inserted = 0;
+        $model = new CallLogModel($db);
+
+        // Pre-load existing dup keys for the call_starts in this batch so we don't
+        // re-insert a call already stored on an earlier post. Chunk the IN(...)
+        // lookup so a 1000+-call batch doesn't build one giant query.
+        $starts = array_values(array_unique(array_filter(array_map(static fn ($r) => $r['call_start'] ?? null, $rows))));
+        $seen   = [];
+        foreach (array_chunk($starts, 500) as $chunk) {
+            foreach ((new CallLogModel($db))->select('contact, staff_contact, call_start, calling_sim')
+                ->where('client_id', $clientId)->whereIn('call_start', $chunk)->findAll() as $e) {
+                $seen[self::dupKey($e['contact'] ?? '', $e['staff_contact'] ?? '', $e['call_start'] ?? '', $e['calling_sim'] ?? '')] = true;
+            }
+        }
+
+        // Build the rows to insert (skipping duplicates), then write them in one
+        // batched, chunked INSERT — so 1000+ calls cost a few queries, not 1000.
+        $toInsert = [];
+        $skipped  = 0;
         foreach ($rows as $row) {
             $contact      = self::normalizePhone($row['contact'] ?? '');
             $staffContact = self::normalizePhone($row['staff_contact'] ?? '');
             $rowStaffId   = ($staffContact !== '' && isset($staffByPhone[$staffContact])) ? $staffByPhone[$staffContact] : $defaultStaffId;
             $duration     = (int) ($row['duration'] ?? 0);
+            $callStart    = $row['call_start'] ?? null;
+            $callingSim   = mb_substr(trim((string) ($row['calling_sim'] ?? '')), 0, 30);
 
-            $model->insert([
+            // Reject duplicates — but only when we have a call_start (the stable
+            // timestamp that makes a call identifiable); undated rows always insert.
+            // The in-memory $seen set also dedupes repeats within this same batch.
+            if ($callStart) {
+                $key = self::dupKey($contact, $staffContact, $callStart, $callingSim);
+                if (isset($seen[$key])) {
+                    $skipped++;
+                    continue;
+                }
+                $seen[$key] = true;
+            }
+
+            $toInsert[] = [
                 'client_id'     => $clientId,
                 'lead_id'       => $contact !== '' ? ($leadByPhone[$contact] ?? null) : null,
                 'staff_id'      => $rowStaffId ?: null,
@@ -238,12 +297,20 @@ class CallIngestService
                 'type'          => in_array($row['type'] ?? '', ['incoming', 'outgoing', 'missed'], true) ? $row['type'] : null,
                 'duration'      => $duration,
                 'connected'     => $duration > 0 ? 1 : 0,
-                'call_start'    => $row['call_start'] ?? null,
+                'call_start'    => $callStart,
                 'call_end'      => $row['call_end'] ?? null,
-            ]);
-            $inserted++;
+                'sim1'          => mb_substr(trim((string) ($row['sim1'] ?? '')), 0, 30) ?: null,
+                'sim2'          => mb_substr(trim((string) ($row['sim2'] ?? '')), 0, 30) ?: null,
+                'calling_sim'   => $callingSim ?: null,
+                'sim_status'    => mb_substr(trim((string) ($row['sim_status'] ?? '')), 0, 60) ?: null,
+                'calling_date'  => $row['calling_date'] ?? ($callStart ? substr($callStart, 0, 10) : null),
+            ];
         }
 
-        return $inserted;
+        if ($toInsert) {
+            $model->insertBatch($toInsert, null, 500); // CI4 chunks internally
+        }
+
+        return ['inserted' => count($toInsert), 'skipped' => $skipped];
     }
 }

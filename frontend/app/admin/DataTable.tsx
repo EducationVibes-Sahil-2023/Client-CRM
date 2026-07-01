@@ -7,6 +7,32 @@ import { PAGE_SIZE_OPTIONS } from "../lib/theme";
 
 export type DataView = "list" | "grid";
 
+/** Compare two cell values for sorting. Blanks/nulls sort last; numbers
+ *  numerically; strings with numeric-awareness ("10" after "9"). */
+function cmpVals(a: unknown, b: unknown): number {
+  const aBlank = a === null || a === undefined || a === "";
+  const bBlank = b === null || b === undefined || b === "";
+  if (aBlank && bBlank) return 0;
+  if (aBlank) return 1;
+  if (bBlank) return -1;
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+}
+
+export type SortState = { key: string; dir: "asc" | "desc" } | null;
+
+/** Stable client-side sort of rows by a column's `sortAccessor` (or the row's
+ *  field matching the column key). Exported so pages that own pagination can
+ *  sort the whole dataset before slicing, matching the table's header sort. */
+export function sortRows<T>(rows: T[], columns: Column<T>[], sort: SortState): T[] {
+  if (!sort) return rows;
+  const col = columns.find((c) => c.key === sort.key);
+  if (!col) return rows;
+  const acc = col.sortAccessor ?? ((row: T) => (row as Record<string, unknown>)[col.key] as string | number | null | undefined);
+  const dir = sort.dir === "desc" ? -1 : 1;
+  return [...rows].sort((a, b) => cmpVals(acc(a), acc(b)) * dir);
+}
+
 export interface Column<T> {
   key: string;
   header: string;
@@ -23,6 +49,12 @@ export interface Column<T> {
   lockVisible?: boolean;
   /** Start hidden until the user opts to show it (no saved layout yet). */
   defaultHidden?: boolean;
+  /**
+   * Comparable value for client-side sorting of this column. Defaults to the
+   * row's field matching `key`. Provide this when the column renders derived
+   * data (e.g. a joined name or a different field than its key).
+   */
+  sortAccessor?: (row: T) => string | number | boolean | null | undefined;
 }
 
 export interface RowAction<T> {
@@ -41,6 +73,9 @@ interface DataTableProps<T> {
   emptyHint?: string;
   sort?: { key: string; dir: "asc" | "desc" };
   onSort?: (key: string) => void;
+  /** Fired with the active client-side sort (self-contained mode) so a page
+   *  that slices rows itself can sort the full dataset the same way. */
+  onSortChange?: (sort: SortState) => void;
   rowActions?: (row: T) => RowAction<T>[];
   quickActions?: (row: T) => React.ReactNode;
   onRowClick?: (row: T) => void;
@@ -112,6 +147,7 @@ export function DataTable<T>({
   emptyHint,
   sort,
   onSort,
+  onSortChange,
   rowActions,
   quickActions,
   onRowClick,
@@ -150,6 +186,30 @@ export function DataTable<T>({
   const customize = !!tableKey;
   const cols = tc.columns;
 
+  // Sorting. Controlled when the page supplies onSort (e.g. super-admin tables
+  // that sort server-side); otherwise the table sorts itself client-side,
+  // seeded from the client-wide admin config (tc.sort) with an ephemeral
+  // per-view override when the user clicks a header.
+  const controlledSort = !!onSort;
+  const [internalSort, setInternalSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
+  const userTouchedSort = useRef(false);
+  useEffect(() => {
+    if (controlledSort || userTouchedSort.current) return;
+    setInternalSort(tc.sort.key ? { key: tc.sort.key, dir: tc.sort.dir } : null);
+  }, [controlledSort, tc.sort.key, tc.sort.dir]);
+  const effectiveSort: SortState = (controlledSort ? sort : internalSort) ?? null;
+  // A column is sortable per the admin config; when the admin hasn't configured
+  // any, fall back to the columns' own `sortable` flags so nothing regresses.
+  const isColSortable = (key: string) => {
+    if (controlledSort) return !!cols.find((c) => c.key === key)?.sortable;
+    return tc.sort.sortable.length ? tc.sort.sortable.includes(key) : !!cols.find((c) => c.key === key)?.sortable;
+  };
+  const handleSort = (key: string) => {
+    if (controlledSort) { onSort?.(key); return; }
+    userTouchedSort.current = true;
+    setInternalSort((s) => (s && s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  };
+
   // Column drag-to-reorder + drag-to-resize, both on the header row.
   const [dragCol, setDragCol] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<string | null>(null);
@@ -177,12 +237,27 @@ export function DataTable<T>({
 
   // Client-side search, only when searchKeys is supplied. Server-paginated
   // tables keep their own search and simply omit it.
-  const visible = useMemo(() => {
+  const searched = useMemo(() => {
     if (!searchKeys) return rows;
     const q = query.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((r) => searchKeys(r).some((v) => (v ?? "").toLowerCase().includes(q)));
   }, [rows, searchKeys, query]);
+
+  // Client-side sort (self-contained mode only — controlled tables arrive
+  // already ordered from the page). Sorts the whole filtered set before paging.
+  const visible = useMemo(
+    () => (controlledSort ? searched : sortRows(searched, cols, effectiveSort)),
+    [searched, controlledSort, effectiveSort, cols],
+  );
+
+  // Report the active sort so pages that own their pagination (slice rows before
+  // passing them in) can sort the full dataset with the same order.
+  useEffect(() => {
+    if (controlledSort) return;
+    onSortChange?.(effectiveSort);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlledSort, effectiveSort]);
 
   // Self-contained client-side pagination. Active only when `paginate` is set
   // and the page hasn't taken over pagination via its own `onPage`. The chosen
@@ -372,7 +447,8 @@ export function DataTable<T>({
                   </th>
                 )}
                 {cols.map((c) => {
-                  const isSorted = sort?.key === c.key;
+                  const isSorted = effectiveSort?.key === c.key;
+                  const sortableHere = isColSortable(c.key);
                   const isOver = customize && overCol === c.key && dragCol !== c.key;
                   return (
                     <th
@@ -386,12 +462,17 @@ export function DataTable<T>({
                       onDragEnd={customize ? () => { setDragCol(null); setOverCol(null); } : undefined}
                       className={`relative select-none px-4 py-2.5 ${cellNowrap} ${c.className ?? ""} ${customize ? "cursor-grab active:cursor-grabbing" : ""} ${dragCol === c.key ? "opacity-40" : ""} ${isOver ? "bg-indigo-50" : ""}`}
                     >
-                      {c.sortable && onSort ? (
-                        <button onClick={() => onSort(c.key)} className="inline-flex items-center gap-1 transition hover:text-slate-600">
+                      {sortableHere ? (
+                        <button
+                          onClick={() => handleSort(c.key)}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          draggable={false}
+                          className="inline-flex items-center gap-1 transition hover:text-slate-600"
+                        >
                           {c.header}
                           <span className="flex flex-col -space-y-1">
-                            <svg className={`h-2 w-2 ${isSorted && sort?.dir === "asc" ? "text-indigo-600" : "text-slate-300"}`} fill="currentColor" viewBox="0 0 20 20"><path d="M10 4l5 6H5z" /></svg>
-                            <svg className={`h-2 w-2 ${isSorted && sort?.dir === "desc" ? "text-indigo-600" : "text-slate-300"}`} fill="currentColor" viewBox="0 0 20 20"><path d="M10 16l-5-6h10z" /></svg>
+                            <svg className={`h-2 w-2 ${isSorted && effectiveSort?.dir === "asc" ? "text-indigo-600" : "text-slate-300"}`} fill="currentColor" viewBox="0 0 20 20"><path d="M10 4l5 6H5z" /></svg>
+                            <svg className={`h-2 w-2 ${isSorted && effectiveSort?.dir === "desc" ? "text-indigo-600" : "text-slate-300"}`} fill="currentColor" viewBox="0 0 20 20"><path d="M10 16l-5-6h10z" /></svg>
                           </span>
                         </button>
                       ) : (

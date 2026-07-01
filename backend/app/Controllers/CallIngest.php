@@ -53,17 +53,22 @@ class CallIngest extends ApiController
         }
 
         try {
-            $db       = (new TenantManager())->forClient($cid);
-            $inserted = CallIngestService::ingest($cid, $db, $rows, null);
+            $db     = (new TenantManager())->forClient($cid);
+            $result = CallIngestService::ingest($cid, $db, $rows, null);
         } catch (\Throwable $e) {
             log_message('error', 'Call ingest failed for client ' . $cid . ': ' . $e->getMessage());
 
             return $this->fail('Could not store calls.', 500);
         }
 
-        $this->logActivity('created', 'calls', null, "Ingested {$inserted} call log(s) via API", $cid);
+        $this->logActivity('created', 'calls', null, "Ingested {$result['inserted']} call log(s) via API", $cid);
 
-        return $this->respond(['status' => 1, 'message' => 'Call data saved.', 'inserted' => $inserted]);
+        return $this->respond([
+            'status'   => 1,
+            'message'  => 'Call data saved.',
+            'inserted' => $result['inserted'],
+            'skipped'  => $result['skipped'], // duplicates rejected
+        ]);
     }
 
     /** Pull the API key from the X-API-Key header, a Bearer token, then the body/query. */

@@ -332,18 +332,18 @@ export default function TeamPage() {
   const columns: Column<Staff>[] = [
     { key: "name", header: "Name", lockVisible: true, render: (s) => <AvatarCell name={s.name} image={avatarUrl(s)} subtitle={s.emp_code ? `${s.emp_code} · ${s.email ?? ""}` : s.email ?? "—"} color="from-emerald-500 to-teal-600" /> },
     { key: "designation", header: "Designation", render: (s) => <span className="text-slate-600">{s.designation || "—"}</span> },
-    { key: "role", header: "Role", render: (s) => s.role_name ? <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">{s.role_name}</span> : <span className="text-slate-400">—</span> },
+    { key: "role", header: "Role", sortAccessor: (s) => s.role_name, render: (s) => s.role_name ? <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">{s.role_name}</span> : <span className="text-slate-400">—</span> },
     { key: "phone", header: "Phone", render: (s) => <span className="text-slate-600">{s.phone || "—"}</span> },
     { key: "department", header: "Department", render: (s) => <span className="text-slate-600">{s.department || "—"}</span> },
-    { key: "office", header: "Office location", render: (s) => <span className="text-slate-600">{s.office_name || "—"}</span> },
-    { key: "reference", header: "Reference", render: (s) => <span className="text-slate-600">{s.reference_name || "—"}</span> },
-    { key: "user_type", header: "User type", render: (s) => (
+    { key: "office", header: "Office location", sortAccessor: (s) => s.office_name, render: (s) => <span className="text-slate-600">{s.office_name || "—"}</span> },
+    { key: "reference", header: "Reference", sortAccessor: (s) => s.reference_name, render: (s) => <span className="text-slate-600">{s.reference_name || "—"}</span> },
+    { key: "user_type", header: "User type", sortAccessor: (s) => (s.reference_id ? "Agent" : "Staff"), render: (s) => (
       s.reference_id
         ? <span className="rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-medium text-violet-700">Agent</span>
         : <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">Staff</span>
     ) },
     { key: "lead_type", header: "Lead type", render: (s) => <span className="text-slate-600">{s.lead_type || "—"}</span> },
-    { key: "manager", header: "Reports to", render: (s) => <span className="text-slate-600">{s.manager_name || "—"}</span> },
+    { key: "manager", header: "Reports to", sortAccessor: (s) => s.manager_name, render: (s) => <span className="text-slate-600">{s.manager_name || "—"}</span> },
     { key: "status", header: "Status", render: (s) => <Badge value={s.status} /> },
   ];
 

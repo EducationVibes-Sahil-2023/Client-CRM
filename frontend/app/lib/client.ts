@@ -253,6 +253,15 @@ export interface CallLog {
   connected: boolean;
   call_start: string | null;
   call_end: string | null;
+  /** Device SIM numbers/identifiers. */
+  sim1?: string | null;
+  sim2?: string | null;
+  /** Which SIM placed the call (e.g. "sim1"/"sim2" or the number). */
+  calling_sim?: string | null;
+  /** SIM/network status reported by the dialer. */
+  sim_status?: string | null;
+  /** The call's date (DATE); defaults to call_start's date. */
+  calling_date?: string | null;
   created_at: string;
 }
 
@@ -894,6 +903,20 @@ export const getTableLabels = (tableKey: string) =>
   clientGet<{ labels: Record<string, string> }>(`/table-labels/${tableKey}`);
 export const saveTableLabels = (tableKey: string, labels: Record<string, string>) =>
   clientPost<{ message: string; labels: Record<string, string> }>(`/table-labels/${tableKey}`, { labels } as Record<string, unknown>);
+
+// ---- client-wide column sorting config (read by all; written by client admin) ----
+export interface TableSort {
+  /** Column keys the admin has made sortable. */
+  sortable: string[];
+  /** The default sort column key ("" = none). */
+  key: string;
+  /** The default sort direction. */
+  dir: "asc" | "desc";
+}
+export const getTableSort = (tableKey: string) =>
+  clientGet<{ sort: TableSort }>(`/table-sort/${tableKey}`);
+export const saveTableSort = (tableKey: string, sort: TableSort) =>
+  clientPost<{ message: string; sort: TableSort }>(`/table-sort/${tableKey}`, sort as unknown as Record<string, unknown>);
 
 // ---- branding / appearance ----
 import type { Branding } from "./theme";

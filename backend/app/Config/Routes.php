@@ -162,6 +162,9 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     // Client-wide custom column names (read by all; write by client admin only).
     $routes->get('table-labels/(:segment)', 'ClientController::tableLabels/$1');
     $routes->post('table-labels/(:segment)', 'ClientController::saveTableLabels/$1');
+    // Client-wide column sorting config (read by all; write by client admin only).
+    $routes->get('table-sort/(:segment)', 'ClientController::tableSort/$1');
+    $routes->post('table-sort/(:segment)', 'ClientController::saveTableSort/$1');
     // Web push (browser notifications) — gated per client by the 'web_push' feature.
     $routes->get('push/public-key', 'ClientController::pushPublicKey');
     $routes->post('push/subscribe', 'ClientController::pushSubscribe');

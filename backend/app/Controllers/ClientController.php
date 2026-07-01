@@ -923,6 +923,63 @@ class ClientController extends ApiController
         return is_array($val) ? $val : [];
     }
 
+    /** GET /client/table-sort/(:segment) — client-wide admin sort config for a table. */
+    public function tableSort(string $key)
+    {
+        if (! in_array($key, self::TABLE_PREF_KEYS, true)) {
+            return $this->failNotFound('Unknown table.');
+        }
+
+        return $this->respond(['sort' => $this->tableSortFor($this->clientId(), $key)]);
+    }
+
+    /**
+     * POST /client/table-sort/(:segment) — the client admin sets which columns
+     * are sortable and the default sort for a table (applies to everyone; staff
+     * see it read-only but can still re-sort their own view).
+     * Body: { sortable: string[], key: string|null, dir: 'asc'|'desc' }.
+     */
+    public function saveTableSort(string $key)
+    {
+        if (! in_array($key, self::TABLE_PREF_KEYS, true)) {
+            return $this->failNotFound('Unknown table.');
+        }
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only the client admin can configure sorting.');
+        }
+
+        $sortable = $this->input('sortable');
+        $sortable = is_array($sortable)
+            ? array_values(array_unique(array_filter(array_map(static fn ($c) => is_string($c) ? $c : '', $sortable))))
+            : [];
+        $sortKey = (string) ($this->input('key') ?? '');
+        $sortKey = ($sortKey !== '' && in_array($sortKey, $sortable, true)) ? $sortKey : '';
+        $dir     = strtolower((string) ($this->input('dir') ?? 'asc')) === 'desc' ? 'desc' : 'asc';
+
+        $clean = ['sortable' => $sortable, 'key' => $sortKey, 'dir' => $dir];
+        $cid   = $this->clientId();
+        $this->upsertSetting(new SettingsModel(), $cid, 'table_sort.' . $key, (string) json_encode($clean));
+        $this->logActivity('updated', 'settings', null, 'Updated column sorting on the ' . $key . ' table', $cid);
+
+        return $this->respond(['message' => 'Sorting saved', 'sort' => $clean]);
+    }
+
+    /** Client-wide sort config for a table: { sortable[], key, dir }. */
+    private function tableSortFor(int $cid, string $key): array
+    {
+        $row = (new SettingsModel())->where(['client_id' => $cid, 'setting_key' => 'table_sort.' . $key])->first();
+        $val = $row ? json_decode((string) $row['setting_value'], true) : null;
+        if (! is_array($val)) {
+            return ['sortable' => [], 'key' => '', 'dir' => 'asc'];
+        }
+
+        return [
+            'sortable' => is_array($val['sortable'] ?? null) ? array_values(array_filter($val['sortable'], 'is_string')) : [],
+            'key'      => (string) ($val['key'] ?? ''),
+            'dir'      => ($val['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc',
+        ];
+    }
+
     /**
      * Whether the signed-in user may perform $action ('view'|'create'|'update'|
      * 'delete') on $module. The client-admin (account owner) implicitly holds
@@ -3364,12 +3421,17 @@ class ClientController extends ApiController
             return $this->respond(['status' => 1, 'message' => 'No calls to import.', 'inserted' => 0]);
         }
 
-        $db       = (new TenantManager())->forClient($cid);
-        $inserted = CallIngestService::ingest($cid, $db, $rows, $staffId ?: null);
+        $db     = (new TenantManager())->forClient($cid);
+        $result = CallIngestService::ingest($cid, $db, $rows, $staffId ?: null);
 
-        $this->logActivity('created', 'calls', null, "Synced {$inserted} call log(s)", $cid);
+        $this->logActivity('created', 'calls', null, "Synced {$result['inserted']} call log(s)", $cid);
 
-        return $this->respond(['status' => 1, 'message' => 'Call data saved.', 'inserted' => $inserted]);
+        return $this->respond([
+            'status'   => 1,
+            'message'  => 'Call data saved.',
+            'inserted' => $result['inserted'],
+            'skipped'  => $result['skipped'], // duplicates rejected
+        ]);
     }
 
     /**
@@ -4106,6 +4168,12 @@ class ClientController extends ApiController
             return $this->failValidationErrors(['remind_at' => 'The reminder time must be in the future.']);
         }
 
+        // A note is required for every reminder (strip tags to reject empty rich text).
+        $note = trim((string) $this->input('note'));
+        if (trim(strip_tags($note)) === '') {
+            return $this->failValidationErrors(['note' => 'Add a note for this reminder.']);
+        }
+
         $model = new LeadReminderModel();
         $rid   = $model->insert([
             'client_id'       => $cid,
@@ -4113,7 +4181,7 @@ class ClientController extends ApiController
             'user_id'         => (int) ($this->currentUser()['id'] ?? 0),
             'author_staff_id' => $this->staffId() ?: null,
             'remind_at'       => date('Y-m-d H:i:s', $remindAt),
-            'note'            => trim((string) $this->input('note')) ?: null,
+            'note'            => $note,
         ]);
         if ($rid === false) {
             return $this->failValidationErrors($model->errors());

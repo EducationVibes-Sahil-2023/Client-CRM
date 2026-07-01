@@ -25,7 +25,7 @@ import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterR
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../../admin/ui";
-import { DataTable, IconButton, type Column } from "../../admin/DataTable";
+import { DataTable, IconButton, sortRows, type Column, type SortState } from "../../admin/DataTable";
 import { DonutSelect } from "../../admin/Charts";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
@@ -353,6 +353,9 @@ export default function ClientLeads() {
   const [applying, setApplying] = useState(false);
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [page, setPage] = useState(1);
+  // Active column sort (admin default + user header clicks), reported by the
+  // DataTable so we can sort the whole filtered set before paginating.
+  const [tableSort, setTableSort] = useState<SortState>(null);
   const [perPage, setPerPage] = useState(defaultPageSize);
   const filterPrefs = useHiddenPrefs("leads_filters");
   // One updater for any single filter field.
@@ -637,11 +640,8 @@ export default function ClientLeads() {
     });
   }, [leads, search, appliedFilters]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
-  // Clamp the page in render (no effect needed) so a shrinking result set never
-  // strands the user on an empty page.
-  const safePage = Math.min(page, totalPages);
-  const pageRows = useMemo(() => filtered.slice((safePage - 1) * perPage, safePage * perPage), [filtered, safePage, perPage]);
+  // Pagination is computed after the column list (see below) so the whole
+  // filtered set can be sorted by the active column before it's sliced.
 
   // Keep the selection in step with the data — drop ids that no longer exist.
   const selectedLeads = useMemo(() => leads.filter((l) => selectedIds.has(l.id)), [leads, selectedIds]);
@@ -724,9 +724,10 @@ export default function ClientLeads() {
     setReminderErr("");
     if (!remindAt) { setReminderErr("Pick a date and time."); return; }
     if (new Date(remindAt).getTime() <= Date.now()) { setReminderErr("Choose a future date and time."); return; }
+    if (!stripHtml(reminderNote).trim()) { setReminderErr("Add a note for this reminder."); return; }
     setSavingReminder(true);
     try {
-      await createLeadReminder(viewing.id, { remind_at: remindAt, note: stripHtml(reminderNote) ? reminderNote : undefined });
+      await createLeadReminder(viewing.id, { remind_at: remindAt, note: reminderNote });
       requestNotifyPermission(); // so the alert can fire when it's due
       setRemindAt(followReminderDefault(viewing)); setReminderNote(""); setComposerKey((k) => k + 1);
       toast.success("Reminder set.");
@@ -1160,16 +1161,16 @@ export default function ClientLeads() {
     { key: "status", header: "Status", width: 210, render: statusChip },
     { key: "lead_type", header: "Type", width: 140, render: typeChip },
     { key: "source", header: "Source", width: 140, render: sourceChip },
-    { key: "assigned", header: "Assigned", width: 150, render: (l) => l.assigned_to_name ?? dash },
+    { key: "assigned", header: "Assigned", width: 150, sortAccessor: (l) => l.assigned_to_name, render: (l) => l.assigned_to_name ?? dash },
     { key: "city", header: "City", width: 120, render: (l) => l.city ?? dash },
     // Follow-up shows the lead's latest reminder (date over time); blank if none.
-    { key: "follow_date", header: "Follow-up", width: 140, render: (l) => stackedDateTime(l.last_reminder_at) },
+    { key: "follow_date", header: "Follow-up", width: 140, sortAccessor: (l) => l.last_reminder_at, render: (l) => stackedDateTime(l.last_reminder_at) },
     // Latest connected (answered) call to this lead's phone.
-    { key: "last_call", header: "Last call", width: 150, render: (l) => stackedDateTime(l.last_call_at) ?? dash },
+    { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) ?? dash },
     // Follow-up status flag (orange upcoming / red overdue / green done), server-computed.
     { key: "follow_flag", header: "Follow-up status", width: 150, render: (l) => followFlagBadge(l.follow_flag) ?? dash },
     { key: "assigned_date", header: "Assigned date", width: 140, render: (l) => stackedDateTime(l.assigned_date) ?? dash },
-    { key: "created_date", header: "Created", width: 150, render: (l) => stackedDateTime(l.created_at) ?? dash },
+    { key: "created_date", header: "Created", width: 150, sortAccessor: (l) => l.created_at, render: (l) => stackedDateTime(l.created_at) ?? dash },
     { key: "updated_at", header: "Last updated", width: 150, render: (l) => stackedDateTime(l.updated_at) ?? dash },
     // Available via the Columns menu, hidden until the user opts in.
     { key: "email", header: "Email", width: 210, defaultHidden: true, render: (l) => (l.email ? <span className="text-slate-600">{l.email}</span> : dash) },
@@ -1186,6 +1187,14 @@ export default function ClientLeads() {
     ...(isAgent ? ["assigned", "assigned_date"] : []),
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
+
+  // Sort the whole filtered set by the active column, then paginate. Using
+  // allColumns (not just the visible ones) so a sort key stays valid even if
+  // its column is hidden. Clamp the page so a shrinking set never strands it.
+  const sortedFiltered = useMemo(() => sortRows(filtered, allColumns, tableSort), [filtered, allColumns, tableSort]);
+  const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / perPage));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = useMemo(() => sortedFiltered.slice((safePage - 1) * perPage, safePage * perPage), [sortedFiltered, safePage, perPage]);
 
   const selCls = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
 
@@ -1444,6 +1453,7 @@ export default function ClientLeads() {
         emptyTitle={activeFilters ? "No matching leads" : "No leads yet"}
         emptyHint={activeFilters ? "Try clearing or widening your filters." : "Add your first lead or import a CSV file."}
         onRowClick={(l) => openView(l)}
+        onSortChange={(s) => { setTableSort(s); setPage(1); }}
         page={safePage}
         totalPages={totalPages}
         onPage={setPage}
@@ -1666,7 +1676,7 @@ export default function ClientLeads() {
                     </label>
                     <button onClick={addReminder} disabled={savingReminder} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingReminder ? "Setting…" : "Set reminder"}</button>
                   </div>
-                  <div className="mt-2"><RichTextEditor key={`rem-${viewing?.id ?? "x"}-${composerKey}`} initialHTML={reminderNote} onChange={setReminderNote} placeholder="Optional note (e.g. Call back about pricing)" minHeight={80} /></div>
+                  <div className="mt-2"><RichTextEditor key={`rem-${viewing?.id ?? "x"}-${composerKey}`} initialHTML={reminderNote} onChange={setReminderNote} placeholder="Note (required) — e.g. Call back about pricing" minHeight={80} /></div>
                   {reminderErr && <p className="mt-1 text-xs text-rose-600">{reminderErr}</p>}
                   <p className="mt-1 text-xs text-slate-400">
                     {lead.follow_date ? <>Pre-filled from this lead&apos;s follow-up date ({fmtDate(lead.follow_date)}) — adjust if needed. </> : null}

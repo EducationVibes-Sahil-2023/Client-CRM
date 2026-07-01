@@ -15,6 +15,8 @@ class CallLogModel extends TenantModel
         'client_id', 'lead_id', 'staff_id', 'staff_contact', 'contact',
         'call_status', 'source', 'type', 'duration', 'connected',
         'call_start', 'call_end',
+        // SIM tracking: the device's SIMs, which SIM called, its status, the date.
+        'sim1', 'sim2', 'calling_sim', 'sim_status', 'calling_date',
     ];
 
     protected $useSoftDeletes = true;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getTableConfig, saveTableConfig, getTableLabels, saveTableLabels, type TableConfig } from "../lib/client";
+import { getTableConfig, saveTableConfig, getTableLabels, saveTableLabels, getTableSort, saveTableSort, type TableConfig, type TableSort } from "../lib/client";
 import type { Column } from "./DataTable";
 
 export type Align = "left" | "center" | "right";
@@ -40,7 +40,17 @@ export interface TableConfigApi<T> {
   pageSize?: number;
   /** Persist a rows-per-page choice for this table (per user). */
   setPageSize: (n: number) => void;
+  /** Client-wide admin sort config: which columns are sortable + the default sort. */
+  sort: TableSort;
+  /** Fast lookup of whether a column key is admin-enabled for sorting. */
+  isSortable: (key: string) => boolean;
+  /** Admin: toggle whether a column can be sorted (client-wide). */
+  setColumnSortable: (key: string, on: boolean) => void;
+  /** Admin: set the default sort column + direction (client-wide). */
+  setDefaultSort: (key: string, dir: "asc" | "desc") => void;
 }
+
+const emptySort: TableSort = { sortable: [], key: "", dir: "asc" };
 
 const emptyConfig: TableConfig = {};
 
@@ -60,6 +70,11 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
   const [labels, setLabels] = useState<Record<string, string>>({});
   const labelsDirty = useRef(false);
   const labelSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Client-wide sort config (shared; admin-editable): sortable columns + default.
+  const [sort, setSort] = useState<TableSort>(emptySort);
+  const sortDirty = useRef(false);
+  const sortSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load the saved layout once per table key. `ready` starts false whenever
   // there's a key to load (set in useState init), and flips true after the
@@ -104,6 +119,26 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
     return () => { if (labelSaveTimer.current) clearTimeout(labelSaveTimer.current); };
   }, [labels, tableKey]);
 
+  // Load the client-wide sort config once per table key (everyone reads it).
+  useEffect(() => {
+    if (!tableKey) return;
+    let alive = true;
+    getTableSort(tableKey)
+      .then((r) => { if (alive && r.sort) setSort({ sortable: r.sort.sortable ?? [], key: r.sort.key ?? "", dir: r.sort.dir === "desc" ? "desc" : "asc" }); })
+      .catch(() => { /* fall back to no sorting */ });
+    return () => { alive = false; };
+  }, [tableKey]);
+
+  // Debounced persistence of sort-config changes — admin only, after an edit.
+  useEffect(() => {
+    if (!tableKey || !sortDirty.current) return;
+    if (sortSaveTimer.current) clearTimeout(sortSaveTimer.current);
+    sortSaveTimer.current = setTimeout(() => {
+      saveTableSort(tableKey, sort).catch(() => { /* keep local regardless */ });
+    }, 600);
+    return () => { if (sortSaveTimer.current) clearTimeout(sortSaveTimer.current); };
+  }, [sort, tableKey]);
+
   const update = useCallback((fn: (c: TableConfig) => TableConfig) => {
     dirty.current = true;
     setConfig((c) => fn(c));
@@ -120,6 +155,31 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
       if (trimmed === "") delete next[key];
       else next[key] = trimmed;
       return next;
+    });
+  }, [canRename]);
+
+  const isSortable = useCallback((key: string) => sort.sortable.includes(key), [sort.sortable]);
+
+  const setColumnSortable = useCallback((key: string, on: boolean) => {
+    if (!canRename) return; // admin-only, same gate as renames
+    sortDirty.current = true;
+    setSort((s) => {
+      const set = new Set(s.sortable);
+      if (on) set.add(key); else set.delete(key);
+      const sortable = [...set];
+      // If the default column is no longer sortable, clear the default.
+      const key2 = on || s.key !== key ? s.key : "";
+      return { ...s, sortable, key: sortable.includes(key2) ? key2 : "" };
+    });
+  }, [canRename]);
+
+  const setDefaultSort = useCallback((key: string, dir: "asc" | "desc") => {
+    if (!canRename) return;
+    sortDirty.current = true;
+    setSort((s) => {
+      // Choosing a default implies that column is sortable.
+      const sortable = key && !s.sortable.includes(key) ? [...s.sortable, key] : s.sortable;
+      return { ...s, sortable, key, dir };
     });
   }, [canRename]);
 
@@ -225,10 +285,11 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
       customized: false,
       canRename: false, setLabel: () => {}, labelOf: () => "",
       pageSize: undefined, setPageSize: () => {},
+      sort: emptySort, isSortable: () => false, setColumnSortable: () => {}, setDefaultSort: () => {},
     };
   }
 
-  return { ready, columns: visibleColumns, allColumns, toggleHidden, setAlign, setWidth, moveBefore, reset, customized, canRename, setLabel, labelOf, pageSize: config.pageSize, setPageSize };
+  return { ready, columns: visibleColumns, allColumns, toggleHidden, setAlign, setWidth, moveBefore, reset, customized, canRename, setLabel, labelOf, pageSize: config.pageSize, setPageSize, sort, isSortable, setColumnSortable, setDefaultSort };
 }
 
 // ---------------------------------------------------------------- settings UI
@@ -293,6 +354,37 @@ export function ColumnSettings<T>({ api }: { api: TableConfigApi<T> }) {
             </div>
           </div>
 
+          {api.canRename && (
+            <div className="border-b border-slate-100 p-2">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Default sort (whole team)</div>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={api.sort.key}
+                  onChange={(e) => api.setDefaultSort(e.target.value, api.sort.dir)}
+                  className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                >
+                  <option value="">None</option>
+                  {api.allColumns.filter((c) => api.isSortable(c.key)).map((c) => (
+                    <option key={c.key} value={c.key}>{c.header}</option>
+                  ))}
+                </select>
+                <div className="flex items-center rounded-md border border-slate-200 p-0.5">
+                  {(["asc", "desc"] as const).map((d) => (
+                    <button
+                      key={d}
+                      disabled={!api.sort.key}
+                      onClick={() => api.sort.key && api.setDefaultSort(api.sort.key, d)}
+                      className={`rounded px-1.5 py-0.5 text-[11px] font-semibold transition ${api.sort.dir === d ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-100"} disabled:opacity-40`}
+                    >
+                      {d === "asc" ? "A→Z" : "Z→A"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">Tick the ⇅ on a column below to let everyone sort by it.</p>
+            </div>
+          )}
+
           <ul className="max-h-72 overflow-y-auto py-1">
             {rows.length === 0 && <li className="px-3 py-2 text-sm text-slate-400">No matching columns</li>}
             {rows.map((c) => (
@@ -330,6 +422,15 @@ export function ColumnSettings<T>({ api }: { api: TableConfigApi<T> }) {
                   )}
                   {c.lockVisible && <span className="ml-1 text-[10px] font-medium uppercase text-slate-300">fixed</span>}
                 </div>
+                {api.canRename && (
+                  <button
+                    title={api.isSortable(c.key) ? "Sortable for everyone — click to disable" : "Enable sorting for everyone"}
+                    onClick={() => api.setColumnSortable(c.key, !api.isSortable(c.key))}
+                    className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded transition ${api.isSortable(c.key) ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-100"}`}
+                  >
+                    <svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M8 9l4-4 4 4M8 15l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
                 <div className="flex items-center rounded-md border border-slate-200 p-0.5">
                   {(["left", "center", "right"] as Align[]).map((a) => (
                     <button

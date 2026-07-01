@@ -517,6 +517,12 @@ export default function ClientCalls() {
     { key: "duration", header: "Duration", width: 100, render: (c) => <span className="tabular-nums text-slate-600">{formatDuration(c.duration)}</span> },
     { key: "staff", header: "Staff", width: 150, render: (c) => c.staff_name ?? dash2 },
     { key: "call_start", header: "When", width: 170, render: (c) => <span className="text-slate-600">{fmtDateTime(c.call_start)}</span> },
+    // SIM tracking (hidden by default — show via the Columns menu).
+    { key: "calling_sim", header: "Calling SIM", width: 120, defaultHidden: true, render: (c) => <span className="text-slate-600">{c.calling_sim || "—"}</span> },
+    { key: "sim_status", header: "SIM status", width: 120, defaultHidden: true, render: (c) => <span className="text-slate-600">{c.sim_status || "—"}</span> },
+    { key: "calling_date", header: "Calling date", width: 130, defaultHidden: true, sortAccessor: (c) => c.calling_date ?? null, render: (c) => <span className="text-slate-600">{c.calling_date || "—"}</span> },
+    { key: "sim1", header: "SIM 1", width: 130, defaultHidden: true, render: (c) => <span className="tabular-nums text-slate-600">{c.sim1 || "—"}</span> },
+    { key: "sim2", header: "SIM 2", width: 130, defaultHidden: true, render: (c) => <span className="tabular-nums text-slate-600">{c.sim2 || "—"}</span> },
   ];
   const TYPE_OPTS: SelectOption[] = [{ value: "incoming", label: "Incoming" }, { value: "outgoing", label: "Outgoing" }, { value: "missed", label: "Missed" }];
   const SRC_OPTS: SelectOption[] = [{ value: "ivr", label: "IVR" }, { value: "phone", label: "Phone" }];
