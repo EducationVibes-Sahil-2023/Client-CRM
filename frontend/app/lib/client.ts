@@ -84,6 +84,7 @@ export interface Staff {
   role_id: number | null;
   reports_to: number | null;
   lead_type_id: number | null;
+  reference_id: number | null;
   office_location_id: number | null;
   department_id: number | null;
   facebook: string | null;
@@ -94,6 +95,7 @@ export interface Staff {
   role_name: string | null;
   manager_name: string | null;
   lead_type: string | null;
+  reference_name: string | null;
   office_name: string | null;
   department: string | null;
   has_password: boolean;
@@ -184,6 +186,8 @@ export interface LeadStatus {
   parent_id: number | null;
   parent_ids: number[];
   parent_names?: string[];
+  type_ids?: number[];
+  type_names?: string[];
   color: string;
   conversion_type: string;
   sequence: number;
@@ -252,6 +256,15 @@ export interface CallLog {
 }
 
 export const getCalls = () => clientGet<{ calls: CallLog[] }>("/calls");
+
+// ---- call-ingest API key (for the external dialer/IVR app; admin only) ----
+export interface CallApiKeyInfo {
+  api_key: string;
+  /** Public endpoint path the calling app posts to (e.g. "/calls/ingest"). */
+  endpoint: string;
+}
+export const getCallApiKey = () => clientGet<CallApiKeyInfo>("/call-api-key");
+export const rotateCallApiKey = () => clientPost<CallApiKeyInfo>("/call-api-key/rotate");
 
 // ---- call-tracking dashboard (aggregated analytics) ----
 export interface CallKpi {
@@ -582,6 +595,16 @@ export interface LeadType {
   enabled: number | boolean;
 }
 
+// Admin-managed reference names. A staff member tied to one reference sees only
+// leads whose reference_name matches it.
+export interface LeadReference {
+  id: number;
+  name: string;
+  color: string;
+  sequence: number;
+  enabled: number | boolean;
+}
+
 export interface ConversionType {
   id: number;
   name: string;
@@ -699,6 +722,26 @@ export const TASK_REQUIRABLE_FIELDS: { key: string; label: string }[] = [
   { key: "priority", label: "Priority" },
   { key: "type", label: "Type" },
 ];
+
+/** A column of the Task Management kanban board (admin-managed, data-driven). */
+export interface TaskStage {
+  id: number;
+  name: string;
+  key: string;
+  color: string;
+  is_done: boolean;
+  /** System stages (entry/terminal) can't be deleted and keep fixed done semantics. */
+  is_system: boolean;
+  sequence: number;
+}
+
+export const getTaskStages = () => clientGet<{ stages: TaskStage[] }>("/task-stages");
+export const createTaskStage = (b: { name: string; color: string; is_done: boolean }) =>
+  clientPost<{ message: string; id: number }>("/task-stages", b as unknown as Record<string, unknown>);
+export const updateTaskStage = (id: number, b: { name: string; color: string; is_done: boolean }) =>
+  clientPost(`/task-stages/${id}`, b as unknown as Record<string, unknown>);
+export const deleteTaskStage = (id: number) => clientPost(`/task-stages/${id}/delete`);
+export const reorderTaskStages = (order: number[]) => clientPost("/task-stages/reorder", { order });
 
 export const getTaskSetup = () =>
   clientGet<{ required_fields: string[]; custom_fields: TaskCustomField[] }>("/task-setup");
@@ -948,16 +991,23 @@ export const getLeadsSetup = () =>
     lead_sources: LeadSource[];
     marketing_types: MarketingType[];
     lead_types: LeadType[];
+    references: LeadReference[];
     conversion_types: ConversionType[];
     followup_groups: FollowupGroup[];
     states: State[];
     cities: City[];
     required_fields: string[];
+    sub_status_rules: SubStatusRules;
   }>("/leads-setup");
 
 // Which lead-form fields are mandatory (admin-configured). Returns the cleaned list.
 export const saveLeadRequiredFields = (fields: string[]) =>
   clientPost<{ message: string; required_fields: string[] }>("/lead-field-settings", { fields });
+
+// Admin rules for the "add sub-status" form in Leads Setup.
+export interface SubStatusRules { require_parent: boolean; require_type: boolean; }
+export const saveSubStatusRules = (rules: SubStatusRules) =>
+  clientPost<{ message: string; sub_status_rules: SubStatusRules }>("/sub-status-rules", rules as unknown as Record<string, unknown>);
 
 // Lead-form fields an admin can mark mandatory. `phone` and `status` are always
 // required and so are not listed here. Keep keys in sync with the backend's
@@ -980,6 +1030,12 @@ export const createLeadType = (b: Record<string, unknown>) => clientPost("/lead-
 export const updateLeadType = (id: number, b: Record<string, unknown>) => clientPost(`/lead-types/${id}`, b);
 export const deleteLeadType = (id: number) => clientPost(`/lead-types/${id}/delete`);
 export const reorderLeadTypes = (order: number[]) => clientPost("/lead-types/reorder", { order });
+
+export const getReferences = () => clientGet<{ references: LeadReference[] }>("/references");
+export const createReference = (b: Record<string, unknown>) => clientPost("/references", b);
+export const updateReference = (id: number, b: Record<string, unknown>) => clientPost(`/references/${id}`, b);
+export const deleteReference = (id: number) => clientPost(`/references/${id}/delete`);
+export const reorderReferences = (order: number[]) => clientPost("/references/reorder", { order });
 
 export const getConversionTypes = () => clientGet<{ conversion_types: ConversionType[] }>("/conversion-types");
 export const createConversionType = (b: Record<string, unknown>) => clientPost("/conversion-types", b);
@@ -1065,7 +1121,7 @@ export const uploadFile = (file: File) => {
   ) as Promise<{ url: string }>;
 };
 
-export const getTasks = () => clientGet<{ tasks: Task[] }>("/tasks");
+export const getTasks = () => clientGet<{ tasks: Task[]; stages: TaskStage[] }>("/tasks");
 export const getTask = (id: number) => clientGet<{ task: Task }>(`/tasks/${id}`);
 export const createTask = (b: Record<string, unknown>) => clientPost("/tasks", b);
 export const updateTask = (id: number, b: Record<string, unknown>) => clientPost(`/tasks/${id}`, b);

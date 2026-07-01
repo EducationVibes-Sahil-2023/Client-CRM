@@ -10,6 +10,8 @@ export type Density = "comfortable" | "compact";
 export type SidebarStyle = "subtle" | "solid";
 export type FontFamily = "inter" | "poppins" | "slab" | "mono" | "system";
 export type FontSize = "sm" | "base" | "lg";
+/** The loading-animation style shown across the dashboard. */
+export type LoaderStyle = "spinner" | "ring" | "dots" | "bars" | "pulse" | "grid";
 
 export interface Branding {
   brand_color: string;
@@ -35,6 +37,23 @@ export interface Branding {
   font_family: FontFamily;
   /** Base text size for the whole client dashboard. */
   font_size: FontSize;
+  /** Loading-animation style shown across the dashboard. */
+  loader_style: LoaderStyle;
+}
+
+/** Selectable loader styles, with a label for the picker. */
+export const LOADER_STYLE_OPTIONS: { value: LoaderStyle; label: string }[] = [
+  { value: "spinner", label: "Spinner" },
+  { value: "ring", label: "Ring" },
+  { value: "dots", label: "Dots" },
+  { value: "bars", label: "Bars" },
+  { value: "pulse", label: "Pulse" },
+  { value: "grid", label: "Grid" },
+];
+
+/** Coerce any stored value into a valid loader style (falls back to spinner). */
+export function resolveLoaderStyle(value: string | null | undefined): LoaderStyle {
+  return LOADER_STYLE_OPTIONS.some((o) => o.value === value) ? (value as LoaderStyle) : "spinner";
 }
 
 /** Selectable typefaces. `stack` references the next/font CSS vars set on <html>. */
@@ -102,6 +121,7 @@ export const DEFAULT_BRANDING: Branding = {
   default_page_size: "15",
   font_family: "inter",
   font_size: "base",
+  loader_style: "spinner",
 };
 
 // The Tailwind shade stops we generate. The picked colour anchors 600 (the

@@ -19,14 +19,17 @@ import {
   PAGE_SIZE_OPTIONS,
   FONT_FAMILY_OPTIONS,
   FONT_SIZE_OPTIONS,
+  LOADER_STYLE_OPTIONS,
   type Branding,
   type Density,
   type SidebarStyle,
   type ThemeMode,
   type FontFamily,
   type FontSize,
+  type LoaderStyle,
 } from "../../lib/theme";
 import { MAIN_NAV, orderNav, icons } from "../ClientSidebar";
+import Loader from "../../components/Loader";
 
 const SCALE_STOPS = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
 
@@ -257,6 +260,30 @@ export default function AppearancePage() {
                 <div className="font-semibold text-slate-900">The quick brown fox jumps over the lazy dog</div>
                 <div className="mt-1 text-slate-500">1234567890 — Leads, tasks, follow-ups &amp; reports at a glance.</div>
               </div>
+            </div>
+          </Card>
+
+          {/* Loading animation */}
+          <Card>
+            <h3 className="font-semibold text-slate-900">Loading animation</h3>
+            <p className="mt-0.5 text-sm text-slate-500">The spinner shown while pages and the dashboard load. Uses your brand colour.</p>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {LOADER_STYLE_OPTIONS.map((o) => {
+                const active = (draft.loader_style ?? "spinner") === o.value;
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    onClick={() => set("loader_style", o.value as LoaderStyle)}
+                    className={`flex flex-col items-center justify-center gap-3 rounded-xl border p-4 transition ${active ? "border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20" : "border-slate-200 hover:border-emerald-300 hover:bg-slate-50"}`}
+                  >
+                    <span className="flex h-10 items-center justify-center text-emerald-600">
+                      <Loader variant={o.value} size={28} />
+                    </span>
+                    <span className={`text-xs font-semibold ${active ? "text-emerald-700" : "text-slate-600"}`}>{o.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </Card>
 

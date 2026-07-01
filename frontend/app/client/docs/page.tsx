@@ -25,7 +25,7 @@ type Section = {
 };
 
 // Last reviewed — bump when the manual is refreshed.
-const DOC_VERSION = "Reviewed June 2026";
+const DOC_VERSION = "Reviewed June 2026 · v2";
 
 // Optional overview walkthrough video. Set to an embed URL
 // (e.g. "https://www.youtube.com/embed/VIDEO_ID") or a self-hosted file placed
@@ -297,6 +297,15 @@ const DOCS: Section[] = [
           "Switch between a compact table and an activity feed.",
         ],
       },
+      {
+        heading: "Connect app (admins)",
+        items: [
+          "Open the 'Connect app' tab to get this workspace's call-ingest API key and endpoint.",
+          "Point your IVR or device dialer at the endpoint and send the key as the X-API-Key header — no staff login needed.",
+          "Calls are auto-matched to leads and staff by phone number as they arrive.",
+          "Reveal, copy or rotate the key from here; rotating disables the old key immediately.",
+        ],
+      },
     ],
   },
   {
@@ -555,6 +564,7 @@ const DOCS: Section[] = [
           "Set your Workspace name and Tagline (both may be left blank).",
           "Upload a Logo (sidebar) and a separate Favicon (browser tab icon).",
           "Choose your brand colour, light/dark/system theme, density and fonts.",
+          "Pick a Loading animation (spinner, ring, dots, bars, pulse or grid) — it shows in your brand colour while pages load.",
           "Reorder the sidebar menu and set the default rows-per-page for tables.",
         ],
       },

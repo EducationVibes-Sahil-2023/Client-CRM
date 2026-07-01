@@ -6,7 +6,8 @@ REST-style JSON API for the multi-tenant CRM platform, built on **CodeIgniter 4.
 - **Content type:** all request bodies and responses are `application/json`
 - **Auth:** session-cookie based (see [Authentication](#authentication))
 - **Call Tracking ingest API:** see [call-tracking.md](call-tracking.md)
-  (`POST /client/call-logs`, `GET /client/calls`).
+  (`POST /calls/ingest` — public, API-key auth, for external dialer/IVR apps;
+  `POST /client/call-logs` — staff session; `GET /client/calls`).
 
 ---
 
@@ -222,6 +223,44 @@ Submit a "Request a demo" form.
   "message": "Your demo request is in! A specialist will reach out within one business day.",
   "id": 1
 }
+```
+
+---
+
+#### `POST /calls/ingest`
+
+Ingest phone-call logs from an external dialer / IVR app. **Authenticated by a
+per-client API key** (not a session), which also selects the client. Full guide,
+field reference and examples: [call-tracking.md → Quick start](call-tracking.md#quick-start--how-to-call-the-api).
+
+**Auth** — send the client's key as any one of: `X-API-Key: <key>` header,
+`Authorization: Bearer <key>` header, or an `api_key` body field. Admins find/rotate
+the key in the CRM under **Call Tracker → Connect app**.
+
+**Request body** — a `calls` array. **All fields are mandatory** per call; times are
+stored in IST (UTC+5:30):
+
+```json
+{ "calls": [ {
+  "contact": "9876543210", "staff_contact": "9000000000",
+  "type": "outgoing", "source": "phone", "status": "ANSWERED",
+  "duration": 87, "call_start": "2026-06-30 10:15:00", "call_end": "2026-06-30 10:16:27"
+} ] }
+```
+
+**`200 OK`**
+
+```json
+{ "status": 1, "message": "Call data saved.", "inserted": 1 }
+```
+
+`401` invalid/missing key · `403` workspace inactive · `422` missing/invalid field.
+
+```bash
+curl -X POST http://localhost:8080/calls/ingest \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"calls":[{"contact":"9876543210","staff_contact":"9000000000","type":"outgoing","source":"phone","status":"ANSWERED","duration":87,"call_start":"2026-06-30 10:15:00","call_end":"2026-06-30 10:16:27"}]}'
 ```
 
 ---

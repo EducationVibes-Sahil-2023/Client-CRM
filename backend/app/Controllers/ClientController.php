@@ -2,12 +2,14 @@
 
 namespace App\Controllers;
 
+use App\Libraries\CallIngestService;
 use App\Libraries\GmailService;
 use App\Libraries\GoogleCalendarService;
 use App\Libraries\HtmlSanitizer;
 use App\Libraries\MailerService;
 use App\Libraries\PasswordPolicy;
 use App\Libraries\PushService;
+use App\Libraries\TenantManager;
 use App\Models\ActivityLogModel;
 use App\Models\AnnouncementModel;
 use App\Models\AnnouncementReadModel;
@@ -29,6 +31,7 @@ use App\Models\FollowupGroupModel;
 use App\Models\DepartmentModel;
 use App\Models\LeadModel;
 use App\Models\LeadNoteModel;
+use App\Models\LeadReferenceModel;
 use App\Models\LeadReminderModel;
 use App\Models\LeadSourceModel;
 use App\Models\LeadStatusModel;
@@ -41,6 +44,7 @@ use App\Models\SettingsModel;
 use App\Models\StaffAccountModel;
 use App\Models\StateModel;
 use App\Models\TaskCommentModel;
+use App\Models\TaskStageModel;
 use App\Models\UserModel;
 use App\Models\UserTablePrefModel;
 use App\Models\VisitorModel;
@@ -82,7 +86,11 @@ class ClientController extends ApiController
         'default_page_size' => '15',       // default rows-per-page for every table
         'font_family'   => 'inter',        // inter | poppins | slab | mono | system
         'font_size'     => 'base',         // sm | base | lg
+        'loader_style'  => 'spinner',      // loading animation: see LOADER_STYLES
     ];
+
+    /** Allowed loading-animation styles for the loader_style setting. */
+    public const LOADER_STYLES = ['spinner', 'ring', 'dots', 'bars', 'pulse', 'grid'];
 
     /**
      * Branding keys that may be saved blank on purpose. For these, an empty saved
@@ -209,6 +217,81 @@ class ClientController extends ApiController
         }
 
         return (new ClientStaffModel())->subordinateIds($this->clientId(), $sid);
+    }
+
+    /** Memoised per-request reference scope (false = not resolved yet). */
+    private string|false|null $refScope = false;
+
+    /**
+     * The reference NAME the current user's lead view is locked to, or null when
+     * reference-scoping doesn't apply (admins, and staff without a reference).
+     * A staff member with `reference_id` set is an "agent": they see only leads
+     * whose `reference_name` matches their reference. If their reference was
+     * deleted we return a sentinel that matches no lead (fail closed).
+     */
+    private function currentReferenceName(): ?string
+    {
+        if ($this->refScope !== false) {
+            return $this->refScope; // memoised (null or a name)
+        }
+        $this->refScope = null;
+
+        if ($this->isAdmin()) {
+            return null;
+        }
+        $sid = $this->staffId();
+        if (! $sid) {
+            return null;
+        }
+        $staff = (new ClientStaffModel())->where('client_id', $this->clientId())->find($sid);
+        $refId = $staff['reference_id'] ?? null;
+        if (! $refId) {
+            return null;
+        }
+        $ref            = (new LeadReferenceModel())->where('client_id', $this->clientId())->find((int) $refId);
+        $this->refScope = $ref['name'] ?? "\x00__deleted_reference__";
+
+        return $this->refScope;
+    }
+
+    /**
+     * Apply the current user's lead-visibility scope to a leads query/builder:
+     *   - admin            → no restriction
+     *   - reference "agent" → only leads with the matching reference_name
+     *   - everyone else     → only leads assigned to them or their reports
+     *
+     * @param object $q a LeadModel query or its builder (supports where/whereIn)
+     */
+    private function applyLeadScope($q): void
+    {
+        if ($this->isAdmin()) {
+            return;
+        }
+        $refName = $this->currentReferenceName();
+        if ($refName !== null) {
+            $q->where('reference_name', $refName);
+
+            return;
+        }
+        $sid   = $this->staffId();
+        $scope = $sid ? (new ClientStaffModel())->subordinateIds($this->clientId(), $sid) : [0];
+        $q->whereIn('assigned_to', $scope ?: [0]);
+    }
+
+    /** Whether the current user is allowed to see one specific lead row. */
+    private function canSeeLead(array $lead): bool
+    {
+        if ($this->isAdmin()) {
+            return true;
+        }
+        $refName = $this->currentReferenceName();
+        if ($refName !== null) {
+            return trim((string) ($lead['reference_name'] ?? '')) === $refName;
+        }
+        $sid   = $this->staffId();
+        $scope = $sid ? (new ClientStaffModel())->subordinateIds($this->clientId(), $sid) : [0];
+
+        return in_array((int) ($lead['assigned_to'] ?? 0), $scope, true);
     }
 
     /** GET /client/me — current user, whether they're an admin, and their permissions. */
@@ -883,7 +966,8 @@ class ClientController extends ApiController
         $taskSummary = $this->taskSummary($allTasks);
 
         // Upcoming: not-done tasks with a due date, soonest first (overdue included).
-        $upcoming = array_values(array_filter($allTasks, static fn ($t) => $t['status'] !== 'done' && ! empty($t['due_date'])));
+        $doneKeys = $this->doneTaskStageKeys($cid);
+        $upcoming = array_values(array_filter($allTasks, static fn ($t) => ! in_array($t['status'], $doneKeys, true) && ! empty($t['due_date'])));
         usort($upcoming, static fn ($a, $b) => strcmp((string) $a['due_date'], (string) $b['due_date']));
         $upcoming = array_slice($upcoming, 0, 6);
 
@@ -965,6 +1049,8 @@ class ClientController extends ApiController
             } elseif ($key === 'default_page_size') {
                 $n     = (int) $value;
                 $value = (string) (in_array($n, self::PAGE_SIZE_OPTIONS, true) ? $n : self::BRANDING_DEFAULTS['default_page_size']);
+            } elseif ($key === 'loader_style') {
+                $value = in_array($value, self::LOADER_STYLES, true) ? (string) $value : self::BRANDING_DEFAULTS['loader_style'];
             } else {
                 $value = mb_substr(trim((string) $value), 0, 255);
             }
@@ -1589,11 +1675,9 @@ class ClientController extends ApiController
         // Hide leads that are mid-transfer awaiting admin approval (from everyone).
         $q->where('(pending_transfer IS NULL OR pending_transfer = 0)');
 
-        // Staff see only leads assigned to themselves (or anyone reporting to them).
-        $scope = $this->visibleStaffIds();
-        if ($scope !== null) {
-            $q->whereIn('assigned_to', $scope ?: [0]);
-        }
+        // Staff see only the leads in their visibility scope — reference "agents"
+        // see only their reference's leads; everyone else, their assigned leads.
+        $this->applyLeadScope($q);
         $rows = $q->orderBy('id', 'DESC')->findAll();
 
         $statusNames = $this->idNameMap($this->lookupRows(LeadStatusModel::class, $cid));
@@ -1710,19 +1794,16 @@ class ClientController extends ApiController
             $sourceToMarketing[(int) $src['id']] = $src['marketing_type_id'] !== null ? (int) $src['marketing_type_id'] : 0;
         }
 
-        // Staff see only their own + their reports' leads; admins see everything.
-        // Counts are scoped to match, so the figures line up with the leads table.
-        $scope = $this->visibleStaffIds();
-
+        // Counts are scoped to match the leads the user can actually see, so the
+        // figures line up with the leads table (reference agents → their
+        // reference's leads; others → their assigned leads; admins → everything).
         // One grouped query per dimension.
-        $statusCounts = $this->leadCountsBy($model, $cid, 'status_id', $scope);
-        $subCounts    = $this->leadCountsBy($model, $cid, 'sub_status_id', $scope);
-        $typeCounts   = $this->leadCountsBy($model, $cid, 'lead_type_id', $scope);
-        $srcCounts    = $this->leadCountsBy($model, $cid, 'source_id', $scope);
+        $statusCounts = $this->leadCountsBy($model, $cid, 'status_id');
+        $subCounts    = $this->leadCountsBy($model, $cid, 'sub_status_id');
+        $typeCounts   = $this->leadCountsBy($model, $cid, 'lead_type_id');
+        $srcCounts    = $this->leadCountsBy($model, $cid, 'source_id');
         $totalQ       = (new LeadModel())->where('client_id', $cid);
-        if ($scope !== null) {
-            $totalQ->whereIn('assigned_to', $scope ?: [0]);
-        }
+        $this->applyLeadScope($totalQ);
         $total = $totalQ->countAllResults();
 
         // Parent statuses (no parent_id) vs sub-statuses (have a parent_id).
@@ -1795,14 +1876,12 @@ class ClientController extends ApiController
     }
 
     /**
-     * Lead counts grouped by a column (ignoring null/zero keys). When $scope is
-     * a list of staff ids the counts are limited to leads assigned to them
-     * (so a staff member's view matches the leads they can actually see).
+     * Lead counts grouped by a column (ignoring null/zero keys), limited to the
+     * leads the current user can see (so the figures match the leads table).
      *
-     * @param int[]|null $scope
      * @return array<int,int> column value => lead count
      */
-    private function leadCountsBy(LeadModel $model, int $cid, string $column, ?array $scope = null): array
+    private function leadCountsBy(LeadModel $model, int $cid, string $column): array
     {
         $b = $model->builder()
             ->select("{$column} AS k, COUNT(*) AS c")
@@ -1810,9 +1889,7 @@ class ClientController extends ApiController
             ->where("{$column} IS NOT NULL")
             ->where("{$column} >", 0)
             ->where('deleted_at', null);
-        if ($scope !== null) {
-            $b->whereIn('assigned_to', $scope ?: [0]);
-        }
+        $this->applyLeadScope($b);
         $rows = $b->groupBy($column)->get()->getResultArray();
 
         $out = [];
@@ -1840,10 +1917,7 @@ class ClientController extends ApiController
             ->where('client_id', $cid)
             ->where('deleted_at', null);
 
-        $scope = $this->visibleStaffIds();
-        if ($scope !== null) {
-            $b->whereIn('assigned_to', $scope ?: [0]);
-        }
+        $this->applyLeadScope($b);
 
         $from = trim((string) $this->request->getGet('from'));
         $to   = trim((string) $this->request->getGet('to'));
@@ -2026,8 +2100,11 @@ class ClientController extends ApiController
             }
         }
 
-        $scope     = $this->visibleStaffIds();
-        $staffQ    = (new ClientStaffModel())->where('client_id', $cid);
+        // Reference "agents" see the per-rep breakdown of their reference's leads
+        // (counts already scoped via reportLeadQuery), so show the full staff list
+        // for them; other staff are limited to themselves + their reports.
+        $scope  = $this->currentReferenceName() !== null ? null : $this->visibleStaffIds();
+        $staffQ = (new ClientStaffModel())->where('client_id', $cid);
         if ($scope !== null) {
             $staffQ->whereIn('id', $scope ?: [0]);
         }
@@ -2150,8 +2227,7 @@ class ClientController extends ApiController
         if (! $lead) {
             return $this->failNotFound('Lead not found');
         }
-        $scope = $this->visibleStaffIds();
-        if ($scope !== null && ! in_array((int) $lead['assigned_to'], $scope ?: [0], true)) {
+        if (! $this->canSeeLead($lead)) {
             return $this->failForbidden('You can only transfer your own leads.');
         }
         if ($toId <= 0) {
@@ -2699,10 +2775,7 @@ class ClientController extends ApiController
         $model = new LeadModel();
         $q     = $model->where('client_id', $cid)->whereIn('id', $ids);
         // Staff can only bulk-edit leads they can see.
-        $scope = $this->visibleStaffIds();
-        if ($scope !== null) {
-            $q->whereIn('assigned_to', $scope ?: [0]);
-        }
+        $this->applyLeadScope($q);
         $leads = $q->orderBy('id', 'ASC')->findAll();
         if (! $leads) {
             return $this->fail('No matching leads.', 404);
@@ -3074,9 +3147,9 @@ class ClientController extends ApiController
             return $this->failNotFound('Lead not found');
         }
 
-        // Staff may only open leads assigned to themselves (or their reports).
-        $scope = $this->visibleStaffIds();
-        if ($scope !== null && ! in_array((int) ($lead['assigned_to'] ?? 0), $scope, true)) {
+        // Staff may only open leads inside their visibility scope (assigned, or —
+        // for reference "agents" — matching their reference).
+        if (! $this->canSeeLead($lead)) {
             return $this->failNotFound('Lead not found');
         }
 
@@ -3124,107 +3197,10 @@ class ClientController extends ApiController
     }
 
     // ------------------------------------------------------------ CALL TRACKING
-
-    /** Normalise a phone to its last 10 digits (drops +91 / formatting). */
-    private function normalizePhone(?string $raw): string
-    {
-        $digits = preg_replace('/\D+/', '', (string) $raw);
-
-        return $digits !== '' ? substr($digits, -10) : '';
-    }
-
-    /** Android CallLog numeric type → our direction label. */
-    private function callDirection($t): string
-    {
-        switch ((int) $t) {
-            case 1: return 'incoming';
-            case 2: return 'outgoing';
-            case 3:
-            case 5: return 'missed';   // missed / rejected
-            default: return 'outgoing';
-        }
-    }
-
-    /** Parse a date string or UNIX timestamp into 'Y-m-d H:i:s', or null. */
-    private function toDateTime($v): ?string
-    {
-        if ($v === '' || $v === null) {
-            return null;
-        }
-        $ts = is_numeric($v) ? (int) $v : strtotime((string) $v);
-
-        return $ts ? date('Y-m-d H:i:s', $ts) : null;
-    }
-
-    /**
-     * Normalise either ingest payload into a flat list of call rows with keys:
-     * contact, staff_contact, status, source, type, duration, call_start,
-     * call_end. Returns null when nothing usable was sent.
-     */
-    private function parseCallPayload(): ?array
-    {
-        $body = (array) $this->input();
-
-        // Clean JSON: { calls: [ ... ] }
-        if (! empty($body['calls']) && is_array($body['calls'])) {
-            $out = [];
-            foreach ($body['calls'] as $c) {
-                if (! is_array($c)) {
-                    continue;
-                }
-                $out[] = [
-                    'contact'       => $c['contact'] ?? ($c['phonenumber'] ?? ''),
-                    'staff_contact' => $c['staff_contact'] ?? ($c['callassignee'] ?? ''),
-                    'status'        => $c['status'] ?? ($c['call_status'] ?? ''),
-                    'source'        => $c['source'] ?? '',
-                    'type'          => $c['type'] ?? '',
-                    'duration'      => $c['duration'] ?? 0,
-                    'call_start'    => $this->toDateTime($c['call_start'] ?? ''),
-                    'call_end'      => $this->toDateTime($c['call_end'] ?? ''),
-                ];
-            }
-
-            return $out;
-        }
-
-        // Legacy: POST field call_data = JSON { type, formData }
-        $raw = $this->request->getPost('call_data') ?? ($body['call_data'] ?? null);
-        if ($raw === null) {
-            return null;
-        }
-        $data = json_decode((string) $raw, true);
-        if (! is_array($data)) {
-            return null;
-        }
-
-        $sourceType = (int) ($data['type'] ?? 1);   // legacy: 1 = IVR, 2 = phone (device)
-        $source     = $sourceType === 2 ? 'phone' : 'ivr';
-
-        $items = [];
-        if (! empty($data['formData']) && is_array($data['formData'])) {
-            // Bulk payloads are a list; a single payload is an associative object.
-            $items = isset($data['formData'][0]) ? $data['formData'] : [$data['formData']];
-        }
-
-        $out = [];
-        foreach ($items as $f) {
-            if (! is_array($f)) {
-                continue;
-            }
-            $out[] = [
-                'contact'       => $f['phonenumber'] ?? '',
-                'staff_contact' => $f['callassignee'] ?? '',
-                'status'        => $f['form-cf-13'] ?? 'Not Found',
-                'source'        => $source,
-                'type'          => $this->callDirection($f['calls_type'] ?? 2),
-                'duration'      => $f['call_duration'] ?? 0,
-                'call_start'    => $this->toDateTime($f['startdate_time'] ?? ''),
-                'call_end'      => $this->toDateTime($f['enddate_time'] ?? ''),
-            ];
-        }
-
-        return $out;
-    }
+    //
+    // Parsing + lead/staff matching + insert live in App\Libraries\CallIngestService
+    // so the session endpoint here and the public API-key endpoint
+    // (App\Controllers\CallIngest) store calls identically.
 
     /**
      * POST /client/call-logs — ingest call records from a client's external
@@ -3237,7 +3213,7 @@ class ClientController extends ApiController
         $cid     = $this->clientId();
         $staffId = $this->staffId();
 
-        $rows = $this->parseCallPayload();
+        $rows = CallIngestService::parse((array) $this->input(), $this->request->getPost('call_data'));
         if ($rows === null) {
             return $this->failValidationErrors('No call data provided.');
         }
@@ -3245,54 +3221,51 @@ class ClientController extends ApiController
             return $this->respond(['status' => 1, 'message' => 'No calls to import.', 'inserted' => 0]);
         }
 
-        // Phone → id maps for matching leads and staff within this client.
-        $leadByPhone = [];
-        foreach ((new LeadModel())->select('id, phone, alt_phone')->where('client_id', $cid)->findAll() as $l) {
-            foreach ([$l['phone'] ?? '', $l['alt_phone'] ?? ''] as $p) {
-                $k = $this->normalizePhone($p);
-                if ($k !== '') {
-                    $leadByPhone[$k] = (int) $l['id'];
-                }
-            }
-        }
-        $staffByPhone = [];
-        foreach ((new ClientStaffModel())->select('id, phone, alt_phone')->where('client_id', $cid)->findAll() as $s) {
-            foreach ([$s['phone'] ?? '', $s['alt_phone'] ?? ''] as $p) {
-                $k = $this->normalizePhone($p);
-                if ($k !== '') {
-                    $staffByPhone[$k] = (int) $s['id'];
-                }
-            }
-        }
-
-        $model    = new CallLogModel();
-        $inserted = 0;
-        foreach ($rows as $row) {
-            $contact      = $this->normalizePhone($row['contact'] ?? '');
-            $staffContact = $this->normalizePhone($row['staff_contact'] ?? '');
-            $rowStaffId   = ($staffContact !== '' && isset($staffByPhone[$staffContact])) ? $staffByPhone[$staffContact] : $staffId;
-            $duration     = (int) ($row['duration'] ?? 0);
-
-            $model->insert([
-                'client_id'     => $cid,
-                'lead_id'       => $contact !== '' ? ($leadByPhone[$contact] ?? null) : null,
-                'staff_id'      => $rowStaffId ?: null,
-                'staff_contact' => $staffContact ?: null,
-                'contact'       => $contact ?: null,
-                'call_status'   => mb_substr((string) ($row['status'] ?? ''), 0, 60) ?: null,
-                'source'        => in_array($row['source'] ?? '', ['ivr', 'phone'], true) ? $row['source'] : null,
-                'type'          => in_array($row['type'] ?? '', ['incoming', 'outgoing', 'missed'], true) ? $row['type'] : null,
-                'duration'      => $duration,
-                'connected'     => $duration > 0 ? 1 : 0,
-                'call_start'    => $row['call_start'] ?? null,
-                'call_end'      => $row['call_end'] ?? null,
-            ]);
-            $inserted++;
-        }
+        $db       = (new TenantManager())->forClient($cid);
+        $inserted = CallIngestService::ingest($cid, $db, $rows, $staffId ?: null);
 
         $this->logActivity('created', 'calls', null, "Synced {$inserted} call log(s)", $cid);
 
         return $this->respond(['status' => 1, 'message' => 'Call data saved.', 'inserted' => $inserted]);
+    }
+
+    /**
+     * GET /client/call-api-key — the API key the external calling app uses to post
+     * to /calls/ingest (admin only; it's a workspace-wide credential). Generated
+     * lazily if somehow missing. Returns the key + the public endpoint path.
+     */
+    public function callApiKey()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only admins can view the call API key.');
+        }
+        $cid    = $this->clientId();
+        $model  = new ClientModel();
+        $client = $model->find($cid);
+        $key    = $client['call_api_key'] ?? null;
+        if (! $key) {
+            $key = bin2hex(random_bytes(24));
+            $model->skipValidation(true)->update($cid, ['call_api_key' => $key]);
+        }
+
+        return $this->respond(['api_key' => $key, 'endpoint' => '/calls/ingest']);
+    }
+
+    /**
+     * POST /client/call-api-key/rotate — issue a new key and invalidate the old
+     * one (admin only). The calling app must be updated with the new key.
+     */
+    public function rotateCallApiKey()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only admins can rotate the call API key.');
+        }
+        $cid = $this->clientId();
+        $key = bin2hex(random_bytes(24));
+        (new ClientModel())->skipValidation(true)->update($cid, ['call_api_key' => $key]);
+        $this->logActivity('updated', 'calls', null, 'Rotated the call-ingest API key', $cid);
+
+        return $this->respond(['api_key' => $key, 'endpoint' => '/calls/ingest']);
     }
 
     /**
@@ -3661,11 +3634,8 @@ class ClientController extends ApiController
         }
 
         // Leads with a follow-up date, scoped to who the user can see.
-        $scope = $this->visibleStaffIds();
-        $q     = (new LeadModel())->where('client_id', $cid)->where('follow_date IS NOT NULL')->where('follow_date !=', '');
-        if ($scope !== null) {
-            $q->whereIn('assigned_to', $scope ?: [0]);
-        }
+        $q = (new LeadModel())->where('client_id', $cid)->where('follow_date IS NOT NULL')->where('follow_date !=', '');
+        $this->applyLeadScope($q);
         $leads = $q->findAll();
 
         // Reminders + notes per lead → used to decide if a follow-up was actioned.
@@ -4123,12 +4093,42 @@ class ClientController extends ApiController
             'lead_sources'     => $this->decorateSources($cid),
             'marketing_types'  => $this->lookupRows(MarketingTypeModel::class, $cid),
             'lead_types'       => $this->lookupRows(LeadTypeModel::class, $cid),
+            'references'       => $this->lookupRows(LeadReferenceModel::class, $cid),
             'conversion_types' => $this->decorateConversions($cid),
             'followup_groups'  => $this->decorateFollowupGroups($cid),
             'states'           => $this->lookupRows(StateModel::class, $cid),
             'cities'           => $this->decorateCities($cid),
             'required_fields'  => $this->requiredLeadFields(),
+            'sub_status_rules' => $this->subStatusRules(),
         ]);
+    }
+
+    /**
+     * Admin-set rules for the "add sub-status" form: whether a parent status
+     * and/or a lead type must be chosen. Parent defaults required (legacy
+     * behaviour), type defaults optional.
+     */
+    private function subStatusRules(): array
+    {
+        $map = $this->settingsMap();
+
+        return [
+            'require_parent' => ($map['sub_status_require_parent'] ?? '1') === '1',
+            'require_type'   => ($map['sub_status_require_type'] ?? '0') === '1',
+        ];
+    }
+
+    /** POST /client/sub-status-rules — set whether parent status / lead type are required for new sub-statuses. */
+    public function saveSubStatusRules()
+    {
+        if ($resp = $this->denyUnlessPerm('leads_setup', 'update')) {
+            return $resp;
+        }
+        $this->setSetting('sub_status_require_parent', $this->input('require_parent') ? '1' : '0');
+        $this->setSetting('sub_status_require_type', $this->input('require_type') ? '1' : '0');
+        $this->logActivity('updated', 'settings', null, 'Updated sub-status required fields', $this->clientId());
+
+        return $this->respond(['message' => 'Saved', 'sub_status_rules' => $this->subStatusRules()]);
     }
 
     // --- Mandatory lead-form fields -------------------------------------
@@ -4213,7 +4213,7 @@ class ClientController extends ApiController
         'task'    => ['description', 'assigned_to', 'due_date', 'start_date', 'priority', 'type'],
         'asset'   => ['series_model', 'asset_group', 'managed_by', 'asset_location', 'purchase_date', 'warranty_months', 'unit_price', 'supplier_name'],
         'visitor' => ['phone', 'email', 'type_id', 'status_id', 'assigned_to', 'purpose', 'visit_date'],
-        'staff'   => ['phone', 'alt_phone', 'emp_code', 'designation', 'role_id', 'reports_to', 'department_id', 'office_location_id'],
+        'staff'   => ['phone', 'alt_phone', 'designation', 'role_id', 'reports_to', 'department_id', 'office_location_id'],
     ];
 
     /** Human labels for each form's requirable fields. */
@@ -4222,7 +4222,7 @@ class ClientController extends ApiController
         'task'    => ['description' => 'Description', 'assigned_to' => 'Assignee', 'due_date' => 'Due date', 'start_date' => 'Start date', 'priority' => 'Priority', 'type' => 'Type'],
         'asset'   => ['series_model' => 'Series / model', 'asset_group' => 'Asset group', 'managed_by' => 'Managed by', 'asset_location' => 'Location', 'purchase_date' => 'Purchase date', 'warranty_months' => 'Warranty (months)', 'unit_price' => 'Unit price', 'supplier_name' => 'Supplier name'],
         'visitor' => ['phone' => 'Phone', 'email' => 'Email', 'type_id' => 'Type', 'status_id' => 'Status', 'assigned_to' => 'Assigned to', 'purpose' => 'Purpose', 'visit_date' => 'Visit date'],
-        'staff'   => ['phone' => 'Phone', 'alt_phone' => 'Alternative phone', 'emp_code' => 'Employee code', 'designation' => 'Designation', 'role_id' => 'Role', 'reports_to' => 'Reports to', 'department_id' => 'Department', 'office_location_id' => 'Office'],
+        'staff'   => ['phone' => 'Phone', 'alt_phone' => 'Alternative phone', 'designation' => 'Designation', 'role_id' => 'Role', 'reports_to' => 'Reports to', 'department_id' => 'Department', 'office_location_id' => 'Office'],
     ];
 
     /** Built-in fields the client has marked mandatory on $form. */
@@ -4428,14 +4428,22 @@ class ClientController extends ApiController
             $ids = [(int) $this->input('parent_id')];
         }
 
+        // A (top) status can belong to one or more lead types; empty = "global"
+        // (shows under any type). Sub-statuses simply don't send type_ids.
+        $typeIds = array_values(array_unique(array_filter(
+            array_map('intval', (array) ($this->input('type_ids') ?? [])),
+            static fn ($v) => $v > 0,
+        )));
+
         return [
             'conversion_type' => trim((string) ($this->input('conversion_type') ?? 'open')) ?: 'open',
             'parent_ids'      => json_encode($ids),
             'parent_id'       => $ids ? (int) reset($ids) : null,
+            'type_ids'        => json_encode($typeIds),
         ];
     }
 
-    /** Lead statuses with parent_ids decoded to int[] + resolved parent names. */
+    /** Lead statuses with parent_ids + type_ids decoded to int[] and names resolved. */
     private function decorateStatuses(int $cid): array
     {
         $rows  = $this->lookupRows(LeadStatusModel::class, $cid);
@@ -4443,6 +4451,7 @@ class ClientController extends ApiController
         foreach ($rows as $s) {
             $names[(int) $s['id']] = $s['name'];
         }
+        $typeNames = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
         foreach ($rows as &$r) {
             $ids = json_decode((string) ($r['parent_ids'] ?? ''), true);
             $ids = is_array($ids) ? array_values(array_filter(array_map('intval', $ids))) : [];
@@ -4451,6 +4460,11 @@ class ClientController extends ApiController
             }
             $r['parent_ids']   = $ids;
             $r['parent_names'] = array_values(array_filter(array_map(static fn ($i) => $names[$i] ?? null, $ids)));
+
+            $tids            = json_decode((string) ($r['type_ids'] ?? ''), true);
+            $tids            = is_array($tids) ? array_values(array_filter(array_map('intval', $tids))) : [];
+            $r['type_ids']   = $tids;
+            $r['type_names'] = array_values(array_filter(array_map(static fn ($i) => $typeNames[$i] ?? null, $tids)));
         }
         unset($r);
 
@@ -4543,6 +4557,68 @@ class ClientController extends ApiController
     public function reorderLeadTypes()
     {
         return $this->reorderLookup(LeadTypeModel::class);
+    }
+
+    // --- References ------------------------------------------------------
+    //
+    // Admin-managed reference names. A staff member can be tied to one
+    // reference; they then see ONLY leads whose `reference_name` matches it
+    // (see applyLeadScope). Leads store the reference's *name* (free text), so
+    // matching is by name and existing values keep working.
+
+    public function references()
+    {
+        return $this->respond(['references' => $this->lookupRows(LeadReferenceModel::class, $this->clientId())]);
+    }
+
+    public function createReference()
+    {
+        return $this->saveLookup(LeadReferenceModel::class, 'reference', fn () => []);
+    }
+
+    public function updateReference(int $id)
+    {
+        $cid = $this->clientId();
+        $old = (new LeadReferenceModel())->where('client_id', $cid)->find($id);
+
+        $resp = $this->saveLookup(LeadReferenceModel::class, 'reference', fn () => [], $id);
+
+        // If the name changed, keep every lead tagged with the old name in sync so
+        // reference-scoped agents don't lose visibility of their leads.
+        if ($old && $resp->getStatusCode() === 200) {
+            $newName = trim((string) $this->input('name'));
+            $oldName = (string) ($old['name'] ?? '');
+            if ($newName !== '' && $newName !== $oldName) {
+                (new LeadModel())->builder()
+                    ->where('client_id', $cid)
+                    ->where('reference_name', $oldName)
+                    ->update(['reference_name' => $newName]);
+            }
+        }
+
+        return $resp;
+    }
+
+    public function deleteReference(int $id)
+    {
+        $cid  = $this->clientId();
+        $resp = $this->deleteLookup(LeadReferenceModel::class, 'reference', $id);
+
+        // Detach the reference from any staff who had it, so they fall back to the
+        // normal assigned-to visibility instead of scoping to a deleted reference.
+        if ($resp->getStatusCode() === 200) {
+            (new ClientStaffModel())->builder()
+                ->where('client_id', $cid)
+                ->where('reference_id', $id)
+                ->update(['reference_id' => null]);
+        }
+
+        return $resp;
+    }
+
+    public function reorderReferences()
+    {
+        return $this->reorderLookup(LeadReferenceModel::class);
     }
 
     // --- States ----------------------------------------------------------
@@ -5119,8 +5195,9 @@ class ClientController extends ApiController
                 'department'      => array_map(static fn ($d) => ['id' => (int) $d['id'], 'category' => 'department', 'name' => $d['name']], $this->departments($cid)),
                 'office_location' => array_map(static fn ($o) => ['id' => (int) $o['id'], 'category' => 'office_location', 'name' => $o['name']], $this->officeLocations($cid)),
                 'lead_type'       => array_map(static fn ($t) => ['id' => (int) $t['id'], 'category' => 'lead_type', 'name' => $t['name']], $this->lookupRows(LeadTypeModel::class, $cid)),
+                'reference'       => array_map(static fn ($r) => ['id' => (int) $r['id'], 'category' => 'reference', 'name' => $r['name']], $this->lookupRows(LeadReferenceModel::class, $cid)),
             ],
-            'categories' => ['department', 'office_location', 'lead_type'],
+            'categories' => ['department', 'office_location', 'lead_type', 'reference'],
         ]);
     }
 
@@ -5145,6 +5222,7 @@ class ClientController extends ApiController
         $depts = $this->idNameMap($this->departments($cid));
         $offices = $this->idNameMap($this->officeLocations($cid));
         $leadTypes = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
+        $references = $this->idNameMap($this->lookupRows(LeadReferenceModel::class, $cid));
 
         foreach ($staff as &$s) {
             $s['has_password'] = ! empty($s['password'] ?? null);
@@ -5154,6 +5232,7 @@ class ClientController extends ApiController
             $s['department']        = $s['department_id'] ? ($depts[$s['department_id']] ?? null) : null;
             $s['office_name']       = $s['office_location_id'] ? ($offices[$s['office_location_id']] ?? null) : null;
             $s['lead_type']         = $s['lead_type_id'] ? ($leadTypes[$s['lead_type_id']] ?? null) : null;
+            $s['reference_name']    = $s['reference_id'] ? ($references[$s['reference_id']] ?? null) : null;
             $extra                  = json_decode((string) ($s['extra_permissions'] ?? ''), true);
             $s['extra_permissions'] = is_array($extra) ? $extra : [];
             $s['custom_fields']     = $this->decodeCustom($s['custom_fields'] ?? null);
@@ -5282,6 +5361,7 @@ class ClientController extends ApiController
         if ($errs = $this->formFieldErrors('staff', $data, $custom)) {
             return $this->failValidationErrors($errs);
         }
+        $data['emp_code']      = $this->nextEmpCode($cid); // auto-generated, not editable
         $data['custom_fields'] = json_encode($custom);
         $model                 = new ClientStaffModel();
         $id                    = $model->insert($data);
@@ -5516,6 +5596,29 @@ class ClientController extends ApiController
         }
     }
 
+    /**
+     * Next auto Employee Code for a client — "EMP0001", "EMP0002", … The number
+     * is one past the highest existing EMP#### (including archived staff, so a
+     * code is never reused), with a collision guard for any manual codes.
+     */
+    private function nextEmpCode(int $cid): string
+    {
+        $model = new ClientStaffModel();
+        $max   = 0;
+        foreach ($model->withDeleted()->where('client_id', $cid)->findAll() as $r) {
+            if (preg_match('/^EMP(\d+)$/', (string) ($r['emp_code'] ?? ''), $m)) {
+                $max = max($max, (int) $m[1]);
+            }
+        }
+        $n = $max + 1;
+        do {
+            $code = 'EMP' . str_pad((string) $n, 4, '0', STR_PAD_LEFT);
+            $n++;
+        } while ($model->withDeleted()->where('client_id', $cid)->where('emp_code', $code)->countAllResults() > 0);
+
+        return $code;
+    }
+
     private function staffData(int $cid, bool $partial = false): array
     {
         $data = [
@@ -5524,12 +5627,14 @@ class ClientController extends ApiController
             'email'              => trim((string) ($this->input('email') ?? '')) ?: null,
             'phone'              => trim((string) ($this->input('phone') ?? '')) ?: null,
             'avatar'             => trim((string) ($this->input('avatar') ?? '')) ?: null,
-            'emp_code'           => trim((string) ($this->input('emp_code') ?? '')) ?: null,
+            // emp_code is auto-generated on create (nextEmpCode) and never editable,
+            // so it's intentionally NOT read from the request here.
             'designation'        => trim((string) ($this->input('designation') ?? '')) ?: null,
             'alt_phone'          => trim((string) ($this->input('alt_phone') ?? '')) ?: null,
             'role_id'            => (int) $this->input('role_id') ?: null,
             'reports_to'         => (int) $this->input('reports_to') ?: null,
             'lead_type_id'       => (int) $this->input('lead_type_id') ?: null,
+            'reference_id'       => (int) $this->input('reference_id') ?: null,
             'office_location_id' => (int) $this->input('office_location_id') ?: null,
             'department_id'      => (int) $this->input('department_id') ?: null,
             'facebook'           => trim((string) ($this->input('facebook') ?? '')) ?: null,
@@ -5726,6 +5831,177 @@ class ClientController extends ApiController
         ]);
     }
 
+    // --- Task stages (kanban columns) ------------------------------------
+
+    /** The default board columns provisioned for a client on first use. */
+    private const DEFAULT_TASK_STAGES = [
+        ['key' => 'open',        'name' => 'Backlog',     'color' => 'slate',   'is_done' => 0, 'is_system' => 1],
+        ['key' => 'in_progress', 'name' => 'In Progress', 'color' => 'indigo',  'is_done' => 0, 'is_system' => 0],
+        ['key' => 'in_review',   'name' => 'In Review',   'color' => 'amber',   'is_done' => 0, 'is_system' => 0],
+        ['key' => 'done',        'name' => 'Done',        'color' => 'emerald', 'is_done' => 1, 'is_system' => 1],
+    ];
+
+    /**
+     * This client's kanban stages, ordered. Seeds the defaults the first time a
+     * client opens the board so existing tenants gain stages without a data
+     * migration. Returns rows with ints/bools normalised for the API.
+     */
+    private function taskStages(int $cid): array
+    {
+        $model = new TaskStageModel();
+        $rows  = $model->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->findAll();
+
+        if (! $rows) {
+            foreach (self::DEFAULT_TASK_STAGES as $i => $s) {
+                $model->insert($s + ['client_id' => $cid, 'sequence' => $i]);
+            }
+            $rows = $model->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->findAll();
+        }
+
+        foreach ($rows as &$r) {
+            $r['id']        = (int) $r['id'];
+            $r['sequence']  = (int) $r['sequence'];
+            $r['is_done']   = ! empty($r['is_done']);
+            $r['is_system'] = ! empty($r['is_system']);
+        }
+        unset($r);
+
+        return $rows;
+    }
+
+    /** GET /client/task-stages */
+    public function taskStagesList()
+    {
+        if ($resp = $this->requirePermission('tasks')) {
+            return $resp;
+        }
+
+        return $this->respond(['stages' => $this->taskStages($this->clientId())]);
+    }
+
+    /** Build a unique slug key for a new stage from its name. */
+    private function taskStageKey(int $cid, string $name): string
+    {
+        $base = preg_replace('/[^a-z0-9_]/', '', strtolower(str_replace([' ', '-'], '_', $name)));
+        $base = trim((string) $base, '_') ?: 'stage';
+        $model = new TaskStageModel();
+        $key   = $base;
+        $n     = 1;
+        while ($model->where('client_id', $cid)->where('key', $key)->first()) {
+            $key = $base . '_' . (++$n);
+        }
+
+        return $key;
+    }
+
+    /** POST /client/task-stages — create a board column. */
+    public function createTaskStage()
+    {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new TaskStageModel();
+        $this->taskStages($cid); // ensure defaults exist before adding
+
+        $name = trim((string) $this->input('name'));
+        if ($name === '') {
+            return $this->failValidationErrors(['name' => 'A stage name is required.']);
+        }
+        $max = (int) ($model->where('client_id', $cid)->selectMax('sequence')->first()['sequence'] ?? 0);
+
+        $data = [
+            'client_id' => $cid,
+            'name'      => $name,
+            'key'       => $this->taskStageKey($cid, $name),
+            'color'     => trim((string) ($this->input('color') ?? 'slate')) ?: 'slate',
+            'is_done'   => $this->input('is_done') ? 1 : 0,
+            'is_system' => 0,
+            'sequence'  => $max + 1,
+        ];
+        $id = $model->insert($data);
+        if ($id === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('created', 'task_stage', (int) $id, 'Added task stage ' . $name);
+
+        return $this->respondCreated(['message' => 'Created', 'id' => $id]);
+    }
+
+    /** POST /client/task-stages/{id} — rename / recolour / toggle done. Key is immutable. */
+    public function updateTaskStage(int $id)
+    {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new TaskStageModel();
+        $row   = $model->where('client_id', $cid)->find($id);
+        if (! $row) {
+            return $this->failNotFound('Stage not found');
+        }
+
+        $name = trim((string) $this->input('name'));
+        if ($name === '') {
+            return $this->failValidationErrors(['name' => 'A stage name is required.']);
+        }
+        $data = [
+            'name'  => $name,
+            'color' => trim((string) ($this->input('color') ?? 'slate')) ?: 'slate',
+        ];
+        // System stages (entry/terminal) keep their done semantics fixed.
+        if (empty($row['is_system'])) {
+            $data['is_done'] = $this->input('is_done') ? 1 : 0;
+        }
+        if ($model->update($id, $data) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('updated', 'task_stage', $id, 'Updated task stage ' . $name);
+
+        return $this->respond(['message' => 'Updated']);
+    }
+
+    /** POST /client/task-stages/{id}/delete — blocked for system stages or while in use. */
+    public function deleteTaskStage(int $id)
+    {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new TaskStageModel();
+        $row   = $model->where('client_id', $cid)->find($id);
+        if (! $row) {
+            return $this->failNotFound('Stage not found');
+        }
+        if (! empty($row['is_system'])) {
+            return $this->failValidationErrors(['stage' => 'The entry and Done stages cannot be deleted.']);
+        }
+        $inUse = (new ClientTaskModel())->where('client_id', $cid)->where('status', $row['key'])->countAllResults();
+        if ($inUse > 0) {
+            return $this->failValidationErrors(['stage' => "Move the {$inUse} task(s) in this stage before deleting it."]);
+        }
+        $model->delete($id);
+        $this->logActivity('deleted', 'task_stage', $id, 'Deleted task stage ' . ($row['name'] ?? ''));
+
+        return $this->respond(['message' => 'Deleted']);
+    }
+
+    /** POST /client/task-stages/reorder — `order` is stage ids in their new order. */
+    public function reorderTaskStages()
+    {
+        if ($resp = $this->requirePermission('tasks', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $order = (array) ($this->input('order') ?? []);
+        $model = new TaskStageModel();
+        foreach ($order as $i => $rowId) {
+            $model->where('client_id', $cid)->update((int) $rowId, ['sequence' => (int) $i]);
+        }
+
+        return $this->respond(['message' => 'Reordered']);
+    }
+
     /** GET /client/tasks — every task for this client, assignee names + overdue flag. */
     public function tasks()
     {
@@ -5761,6 +6037,7 @@ class ClientController extends ApiController
         return $this->respond([
             'tasks'    => $tasks,
             'summary'  => $this->taskSummary($tasks),
+            'stages'   => $this->taskStages($cid),
         ]);
     }
 
@@ -5840,12 +6117,15 @@ class ClientController extends ApiController
         $data['updated_by']      = $this->actorId();
         $data['updated_by_name'] = $this->actorName();
 
-        // On-time tracking: stamp completion when entering Done, clear when it
-        // leaves Done (re-opened).
+        // On-time tracking: stamp completion when entering a done stage, clear
+        // when it leaves one (re-opened).
         if (isset($data['status']) && $data['status'] !== $before['status']) {
-            if ($data['status'] === 'done') {
+            $done    = $this->doneTaskStageKeys($cid);
+            $nowDone = in_array($data['status'], $done, true);
+            $wasDone = in_array((string) $before['status'], $done, true);
+            if ($nowDone && ! $wasDone) {
                 $data['completed_at'] = date('Y-m-d H:i:s');
-            } elseif ($before['status'] === 'done') {
+            } elseif ($wasDone && ! $nowDone) {
                 $data['completed_at'] = null;
             }
         }
@@ -6444,10 +6724,10 @@ class ClientController extends ApiController
         return $data;
     }
 
-    /** A task is overdue when it has a past due date and isn't done. */
+    /** A task is overdue when it has a past due date and isn't in a done stage. */
     private function isOverdue(array $task): bool
     {
-        if (($task['status'] ?? '') === 'done' || empty($task['due_date'])) {
+        if (in_array($task['status'] ?? '', $this->doneTaskStageKeys($this->clientId()), true) || empty($task['due_date'])) {
             return false;
         }
 
@@ -6459,6 +6739,7 @@ class ClientController extends ApiController
     {
         $s = ['total' => 0, 'open' => 0, 'in_progress' => 0, 'done' => 0, 'overdue' => 0, 'due_today' => 0];
         $today = date('Y-m-d');
+        $done  = $this->doneTaskStageKeys($this->clientId());
 
         foreach ($tasks as $t) {
             $s['total']++;
@@ -6467,7 +6748,7 @@ class ClientController extends ApiController
             if ($this->isOverdue($t)) {
                 $s['overdue']++;
             }
-            if ($status !== 'done' && ! empty($t['due_date']) && substr((string) $t['due_date'], 0, 10) === $today) {
+            if (! in_array($status, $done, true) && ! empty($t['due_date']) && substr((string) $t['due_date'], 0, 10) === $today) {
                 $s['due_today']++;
             }
         }
@@ -6475,14 +6756,37 @@ class ClientController extends ApiController
         return $s;
     }
 
+    /** Per-request cache of this client's stage key => display name. */
+    private ?array $taskStageLabelCache = null;
+
+    /** Per-request cache of this client's stage keys flagged as "done". */
+    private ?array $doneStageKeysCache = null;
+
+    /** The stage keys that count a task as completed (is_done). */
+    private function doneTaskStageKeys(int $cid): array
+    {
+        if ($this->doneStageKeysCache === null) {
+            $this->doneStageKeysCache = [];
+            foreach ($this->taskStages($cid) as $s) {
+                if (! empty($s['is_done'])) {
+                    $this->doneStageKeysCache[] = $s['key'];
+                }
+            }
+        }
+
+        return $this->doneStageKeysCache;
+    }
+
     private function statusLabel(string $status): string
     {
-        return [
-            'open'        => 'Backlog',
-            'in_progress' => 'In Progress',
-            'in_review'   => 'In Review',
-            'done'        => 'Done',
-        ][$status] ?? ucfirst(str_replace('_', ' ', $status));
+        if ($this->taskStageLabelCache === null) {
+            $this->taskStageLabelCache = [];
+            foreach ($this->taskStages($this->clientId()) as $s) {
+                $this->taskStageLabelCache[$s['key']] = $s['name'];
+            }
+        }
+
+        return $this->taskStageLabelCache[$status] ?? ucfirst(str_replace('_', ' ', $status));
     }
 
     private function staffName(int $id): string
@@ -6555,7 +6859,7 @@ class ClientController extends ApiController
 
             $tasks = (new ClientTaskModel())
                 ->where('client_id', $cid)
-                ->where('status !=', 'done')
+                ->whereNotIn('status', $this->doneTaskStageKeys($cid) ?: ['done'])
                 ->where('due_date IS NOT NULL')
                 ->where('due_date <=', $today . ' 23:59:59')
                 ->findAll();

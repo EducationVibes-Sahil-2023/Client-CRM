@@ -13,6 +13,7 @@ class ClientModel extends BaseModel
     protected $allowedFields = [
         'name', 'subdomain', 'db_name', 'db_username', 'db_password', 'plan',
         'email', 'phone', 'avatar', 'status', 'plan_start', 'plan_end',
+        'call_api_key',
     ];
 
     // Soft delete: deleting a client archives it (reversible) — its database and

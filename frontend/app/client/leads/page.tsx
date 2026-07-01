@@ -6,7 +6,7 @@ import {
   getLeadsSetup, getStaff, getMe, getLeadAnalytics,
   getLeadDetail, createLeadReminder, deleteLeadReminder, createLeadNote, deleteLeadNote,
   getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS,
-  type Lead, type LeadStatus, type LeadSource, type LeadType, type Staff, type LeadImportResult, type LeadDetail,
+  type Lead, type LeadStatus, type LeadSource, type LeadType, type LeadReference, type Staff, type LeadImportResult, type LeadDetail,
   type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
   type LeadImportColumn,
 } from "../../lib/client";
@@ -43,13 +43,13 @@ interface LeadFilters {
   assigned: string[];   // staff ids, plus the literal "unassigned"
   leadType: string[];
   followStatus: string[]; // follow-up flag: "upcoming" | "overdue" | "done"
-  reference: string;
+  reference: string[];    // reference names
   created: DateRange;
   assignedDate: DateRange;
   follow: DateRange;
 }
 const BLANK_FILTERS: LeadFilters = {
-  status: [], sub: [], source: [], assigned: [], leadType: [], followStatus: [], reference: "",
+  status: [], sub: [], source: [], assigned: [], leadType: [], followStatus: [], reference: [],
   created: EMPTY_RANGE, assignedDate: EMPTY_RANGE, follow: EMPTY_RANGE,
 };
 
@@ -91,12 +91,12 @@ const SUMMARY_DIMS: { key: SummaryDimKey; label: string; filterKey: "status" | "
 
 const filtersActive = (f: LeadFilters): boolean =>
   !!(f.status.length || f.sub.length || f.source.length || f.assigned.length || f.leadType.length ||
-    f.followStatus.length || f.reference.trim() || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow));
+    f.followStatus.length || f.reference.length || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow));
 
 // How many filter groups are active — drives the count badge on the Filters button.
 const countActiveFilters = (f: LeadFilters): number =>
   [f.status.length, f.sub.length, f.source.length, f.assigned.length, f.leadType.length,
-    f.followStatus.length, f.reference.trim(), rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow)]
+    f.followStatus.length, f.reference.length, rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow)]
     .filter(Boolean).length;
 
 interface Draft {
@@ -295,6 +295,7 @@ export default function ClientLeads() {
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
   const [leadTypes, setLeadTypes] = useState<LeadType[]>([]);
+  const [references, setReferences] = useState<LeadReference[]>([]);
   const [states, setStates] = useState<State[]>([]);
   const [cities, setCities] = useState<City[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
@@ -391,6 +392,7 @@ export default function ClientLeads() {
           setStatuses(setup.lead_statuses ?? []);
           setSources(setup.lead_sources ?? []);
           setLeadTypes(setup.lead_types ?? []);
+          setReferences(setup.references ?? []);
           setStates(setup.states ?? []);
           setCities(setup.cities ?? []);
           setRequiredFields(new Set(setup.required_fields ?? []));
@@ -436,12 +438,21 @@ export default function ClientLeads() {
   }, [leadTypes]);
   // Sub-statuses available for the chosen status — a sub-status can list this
   // status among its parents (multi-parent), with a legacy single-parent fallback.
+  // A sub-status may also be tied to a lead type: when one is picked, only show
+  // sub-statuses for that type (or untyped/global ones).
   const draftStatusId = draft?.status_id;
+  const draftLeadTypeId = draft?.lead_type_id;
   const subOptions = useMemo(
     () => (draftStatusId
-      ? statuses.filter((s) => (s.parent_ids ?? []).map(String).includes(draftStatusId) || String(s.parent_id ?? "") === draftStatusId)
+      ? statuses.filter((s) => {
+          const parentMatch = (s.parent_ids ?? []).map(String).includes(draftStatusId) || String(s.parent_id ?? "") === draftStatusId;
+          if (!parentMatch) return false;
+          if (!draftLeadTypeId) return true;
+          const tids = (s.type_ids ?? []).map(String);
+          return tids.length === 0 || tids.includes(draftLeadTypeId);
+        })
       : []),
-    [statuses, draftStatusId],
+    [statuses, draftStatusId, draftLeadTypeId],
   );
 
   // Sub-status options for the filter bar — narrowed to the statuses currently
@@ -457,6 +468,42 @@ export default function ClientLeads() {
   // Options for the searchable filter dropdowns. Status/sub-status carry a
   // colour dot so they read the same as the table chips.
   const statusDot = (color?: string) => <span className={`h-2 w-2 rounded-full ${dotClass(color ?? "slate")}`} style={dotStyle(color ?? "slate")} />;
+
+  // Reference-aware assignee options. A staff "agent" tied to a reference only
+  // ever sees that reference's leads (their scope ignores assignment), so when
+  // assigning a lead with a reference we float the agent(s) who handle it to the
+  // top with a ★, and every reference-agent shows the reference they own so an
+  // admin can pick the right owner instead of a flat, ambiguous name list.
+  const buildAssignees = useCallback((matchRef: string, withBlank: boolean): SelectOption[] => {
+    const want = (matchRef ?? "").trim().toLowerCase();
+    const refOf = (s: Staff) => (s.reference_name ?? "").trim();
+    const isMatch = (s: Staff) => want !== "" && refOf(s).toLowerCase() === want;
+    const decorate = (s: Staff): SelectOption => {
+      const ref = refOf(s);
+      return {
+        value: String(s.id),
+        label: ref ? `${s.name} · ${ref}` : s.name,
+        prefix: isMatch(s)
+          ? <span title={`Handles "${ref}"`} className="text-sm leading-none text-amber-500">★</span>
+          : ref
+            ? <span title={`Reference agent · ${ref}`} className="h-2 w-2 rounded-full bg-emerald-400" />
+            : undefined,
+      };
+    };
+    const opts = [...staff]
+      .sort((a, b) => Number(isMatch(b)) - Number(isMatch(a)))
+      .map(decorate);
+    return withBlank ? [{ value: "", label: "— Unassigned —" }, ...opts] : opts;
+  }, [staff]);
+
+  // The single reference shared by every selected lead (blank when they differ
+  // or none have one) — drives the bulk modal's reference-aware assignee lists.
+  const bulkLeadRef = useMemo(() => {
+    const refs = new Set(
+      leads.filter((l) => selectedIds.has(l.id)).map((l) => (l.reference_name ?? "").trim()).filter(Boolean),
+    );
+    return refs.size === 1 ? [...refs][0] : "";
+  }, [leads, selectedIds]);
   const statusFilterOptions = useMemo<SelectOption[]>(
     () => topStatuses.map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) })),
     [topStatuses],
@@ -473,6 +520,16 @@ export default function ClientLeads() {
     () => leadTypes.map((t) => ({ value: String(t.id), label: t.name, prefix: statusDot(t.color) })),
     [leadTypes],
   );
+  // References by name (managed list + any legacy free-text values still on leads).
+  const referenceFilterOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = references.map((r) => ({ value: r.name, label: r.name, prefix: statusDot(r.color) }));
+    const known = new Set(references.map((r) => r.name));
+    for (const l of leads) {
+      const v = (l.reference_name ?? "").trim();
+      if (v && !known.has(v)) { known.add(v); opts.push({ value: v, label: v }); }
+    }
+    return opts;
+  }, [references, leads]);
   const assignedFilterOptions = useMemo<SelectOption[]>(
     () => [{ value: "unassigned", label: "Unassigned" }, ...staff.map((s) => ({ value: String(s.id), label: s.name }))],
     [staff],
@@ -490,13 +547,22 @@ export default function ClientLeads() {
     [sources],
   );
   const formAssignedOptions = useMemo<SelectOption[]>(
-    () => [{ value: "", label: "— Unassigned —" }, ...staff.map((s) => ({ value: String(s.id), label: s.name }))],
-    [staff],
+    () => buildAssignees(draft?.reference_name ?? "", true),
+    [buildAssignees, draft?.reference_name],
   );
   const formLeadTypeOptions = useMemo<SelectOption[]>(
     () => [{ value: "", label: "— None —" }, ...leadTypes.map((t) => ({ value: String(t.id), label: t.name, prefix: statusDot(t.color) }))],
     [leadTypes],
   );
+  // References store the reference NAME on the lead (back-compat + name-based
+  // scoping). A legacy free-text value not in the managed list is kept as an
+  // option so editing a lead never silently drops it.
+  const formReferenceOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = references.map((r) => ({ value: r.name, label: r.name, prefix: statusDot(r.color) }));
+    const cur = (draft?.reference_name ?? "").trim();
+    if (cur && !references.some((r) => r.name === cur)) opts.unshift({ value: cur, label: `${cur} (existing)` });
+    return [{ value: "", label: "— None —" }, ...opts];
+  }, [references, draft?.reference_name]);
   // Bulk-edit: sub-statuses under the chosen bulk status; team members for round-robin.
   const bulkSubOptions = useMemo<SelectOption[]>(
     () => [{ value: "", label: "— None —" }, ...allSubStatuses
@@ -504,7 +570,9 @@ export default function ClientLeads() {
       .map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }))],
     [allSubStatuses, bStatus],
   );
-  const robinOptions = useMemo<SelectOption[]>(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
+  // Bulk modal assignee lists, reference-aware to the selected leads' reference.
+  const bulkAssignOptions = useMemo<SelectOption[]>(() => buildAssignees(bulkLeadRef, true), [buildAssignees, bulkLeadRef]);
+  const robinOptions = useMemo<SelectOption[]>(() => buildAssignees(bulkLeadRef, false), [buildAssignees, bulkLeadRef]);
   // Lead options for the per-lead "Log visitor" modal's optional lead link.
   const leadVisitorOpts = useMemo<SelectOption[]>(
     () => [{ value: "", label: "— Not linked —" }, ...leads.map((l) => ({ value: String(l.id), label: l.name?.trim() || l.phone }))],
@@ -555,7 +623,6 @@ export default function ClientLeads() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const f = appliedFilters;
-    const ref = f.reference.trim().toLowerCase();
     return leads.filter((l) => {
       if (q && ![l.name, l.phone, l.email, l.city, l.state, l.status, l.sub_status, l.assigned_to_name]
         .some((v) => (v ?? "").toLowerCase().includes(q))) return false;
@@ -569,7 +636,7 @@ export default function ClientLeads() {
         const byUnassigned = !l.assigned_to && f.assigned.includes("unassigned");
         if (!byId && !byUnassigned) return false;
       }
-      if (ref && !(l.reference_name ?? "").toLowerCase().includes(ref)) return false;
+      if (f.reference.length && !f.reference.includes(l.reference_name ?? "")) return false;
       if (!inDateRange(l.created_date ?? l.created_at, f.created)) return false;
       if (!inDateRange(l.assigned_date, f.assignedDate)) return false;
       if (!inDateRange(l.follow_date, f.follow)) return false;
@@ -730,8 +797,9 @@ export default function ClientLeads() {
       setDraft((d) => {
         if (!d) return d;
         const next = { ...d, [key]: v };
-        // Changing status invalidates a sub-status that no longer belongs to it.
-        if (key === "status_id") next.sub_status_id = "";
+        // A sub-status is scoped by both status and lead type, so changing
+        // either may invalidate the chosen sub-status — clear it.
+        if (key === "status_id" || key === "lead_type_id") next.sub_status_id = "";
         // Changing state clears a city that belonged to the previous state.
         if (key === "state") next.city = "";
         return next;
@@ -929,7 +997,7 @@ export default function ClientLeads() {
     const sid = Number(iStatus);
     return statuses.filter((s) => (s.parent_ids ?? []).includes(sid)).map((s) => ({ value: String(s.id), label: s.name, prefix: statusDot(s.color) }));
   }, [statuses, iStatus]);
-  const staffOptions = useMemo<SelectOption[]>(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
+  const staffOptions = useMemo<SelectOption[]>(() => buildAssignees("", false), [buildAssignees]);
 
   async function runImport() {
     if (!importRows.length) return;
@@ -1187,8 +1255,8 @@ export default function ClientLeads() {
 
         {!filterPrefs.isHidden("reference") && (
           <label className="flex flex-col gap-1">
-            <FilterLabel>Reference name</FilterLabel>
-            <input value={filters.reference} onChange={(e) => setFilter("reference", e.target.value)} placeholder="Reference…" className={`${selCls} w-full`} />
+            <FilterLabel>Reference</FilterLabel>
+            <MultiSelect ariaLabel="Filter by reference" value={filters.reference} onChange={(v) => setFilter("reference", v)} options={referenceFilterOptions} placeholder="All references" searchPlaceholder="Search reference…" />
           </label>
         )}
 
@@ -1371,8 +1439,8 @@ export default function ClientLeads() {
             <FieldRow label="Name" required={requiredFields.has("name")} error={errors.name}>
               <input className={inputCls(errors.name)} placeholder="Lead name" value={draft.name} onChange={(e) => setField("name")(e.target.value)} />
             </FieldRow>
-            <FieldRow label="Reference name" required={requiredFields.has("reference_name")} error={errors.reference_name}>
-              <input className={inputCls(errors.reference_name)} value={draft.reference_name} onChange={(e) => setField("reference_name")(e.target.value)} />
+            <FieldRow label="Reference" required={requiredFields.has("reference_name")} error={errors.reference_name}>
+              <SearchSelect ariaLabel="Reference" value={draft.reference_name} onChange={setField("reference_name")} options={formReferenceOptions} placeholder="— None —" searchPlaceholder="Search references…" />
             </FieldRow>
 
             <FieldRow label="Phone" required error={errors.phone} hint="10 digits, without +91">
@@ -1382,10 +1450,13 @@ export default function ClientLeads() {
               <input className={inputCls(errors.alt_phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.alt_phone} onChange={(e) => setField("alt_phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
             </FieldRow>
 
+            <FieldRow label="Lead type" required={requiredFields.has("lead_type_id")} error={errors.lead_type_id} hint="Categorise this lead. Choosing a type narrows the sub-statuses below. Manage types in Leads Setup.">
+              <SearchSelect ariaLabel="Select lead type" value={draft.lead_type_id} onChange={setField("lead_type_id")} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" className={errors.lead_type_id ? "ring-2 ring-red-500/30" : ""} />
+            </FieldRow>
             <FieldRow label="Status" required error={errors.status_id}>
               <SearchSelect ariaLabel="Select status" value={draft.status_id} onChange={setField("status_id")} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" className={errors.status_id ? "ring-2 ring-red-500/30" : ""} />
             </FieldRow>
-            <FieldRow label="Sub status" required={requiredFields.has("sub_status_id")} error={errors.sub_status_id} hint={draft.status_id ? (subOptions.length ? undefined : "No sub-statuses for this status") : "Pick a status first"}>
+            <FieldRow label="Sub status" required={requiredFields.has("sub_status_id")} error={errors.sub_status_id} hint={draft.status_id ? (subOptions.length ? undefined : "No sub-statuses for this status/type") : "Pick a status first"}>
               {subOptions.length ? (
                 <SearchSelect ariaLabel="Select sub status" value={draft.sub_status_id} onChange={setField("sub_status_id")} options={formSubOptions} placeholder="— None —" searchPlaceholder="Search sub status…" className={errors.sub_status_id ? "ring-2 ring-red-500/30" : ""} />
               ) : (
@@ -1395,10 +1466,6 @@ export default function ClientLeads() {
 
             <FieldRow label="Lead source" required={requiredFields.has("source_id")} error={errors.source_id} hint="Where this lead came from. Manage sources in Leads Setup.">
               <SearchSelect ariaLabel="Select lead source" value={draft.source_id} onChange={setField("source_id")} options={formSourceOptions} placeholder="— None —" searchPlaceholder="Search source…" className={errors.source_id ? "ring-2 ring-red-500/30" : ""} />
-            </FieldRow>
-
-            <FieldRow label="Lead type" required={requiredFields.has("lead_type_id")} error={errors.lead_type_id} hint="Categorise this lead. Manage types in Leads Setup.">
-              <SearchSelect ariaLabel="Select lead type" value={draft.lead_type_id} onChange={setField("lead_type_id")} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" className={errors.lead_type_id ? "ring-2 ring-red-500/30" : ""} />
             </FieldRow>
 
             <FieldRow label="Email" required={requiredFields.has("email")} error={errors.email}>
@@ -1663,13 +1730,16 @@ export default function ClientLeads() {
           {/* Assignment */}
           <BulkField checked={bChg.assign} onToggle={() => toggleChg("assign")} label="Assignment">
             <div className="space-y-2">
+              {bulkLeadRef && (
+                <p className="text-xs text-amber-600">★ marks the agent who handles the <strong>{bulkLeadRef}</strong> reference these leads belong to.</p>
+              )}
               <div className="flex gap-2">
                 {([["single", "Single user"], ["robin", "Round-robin"]] as const).map(([m, lbl]) => (
                   <button key={m} type="button" onClick={() => setBMode(m)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${bMode === m ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}>{lbl}</button>
                 ))}
               </div>
               {bMode === "single" ? (
-                <SearchSelect ariaLabel="Assign to" value={bAssignees[0] ?? ""} onChange={(v) => setBAssignees(v ? [v] : [])} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" />
+                <SearchSelect ariaLabel="Assign to" value={bAssignees[0] ?? ""} onChange={(v) => setBAssignees(v ? [v] : [])} options={bulkAssignOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" />
               ) : (
                 <>
                   <MultiSelect ariaLabel="Round-robin members" value={bAssignees} onChange={setBAssignees} options={robinOptions} placeholder="Pick 2 or more members" searchPlaceholder="Search team…" />

@@ -6,7 +6,7 @@ class LeadStatusModel extends TenantModel
 {
     protected $table         = 'lead_statuses';
     protected $primaryKey    = 'id';
-    protected $allowedFields = ['client_id', 'name', 'parent_id', 'parent_ids', 'color', 'conversion_type', 'sequence', 'enabled'];
+    protected $allowedFields = ['client_id', 'name', 'parent_id', 'parent_ids', 'type_ids', 'color', 'conversion_type', 'sequence', 'enabled'];
 
     protected $useSoftDeletes = true;
     protected $deletedField   = 'deleted_at';

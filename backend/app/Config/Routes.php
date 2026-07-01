@@ -14,6 +14,10 @@ $routes->get('landing', 'PublicController::landing');
 $routes->post('contact', 'PublicController::contact');
 $routes->post('demo-request', 'PublicController::demoRequest');
 
+// Public call-log ingest for external dialer/IVR apps. Not session-based:
+// authenticated by a per-client API key (header X-API-Key / Bearer / api_key).
+$routes->post('calls/ingest', 'CallIngest::store');
+
 // Authentication
 $routes->group('auth', static function (RouteCollection $routes) {
     $routes->post('login', 'Auth::login');
@@ -218,6 +222,9 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('call-logs', 'ClientController::createCallLogs');
         $routes->get('calls', 'ClientController::calls');
         $routes->get('call-dashboard', 'ClientController::callDashboard');
+        // The API key the external calling app uses for /calls/ingest (admin-only).
+        $routes->get('call-api-key', 'ClientController::callApiKey');
+        $routes->post('call-api-key/rotate', 'ClientController::rotateCallApiKey');
     });
 
     // Follow-up tracker dashboard (gated by the 'followups' feature)
@@ -282,6 +289,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
 
         $routes->get('leads-setup', 'ClientController::leadsSetup');
         $routes->post('lead-field-settings', 'ClientController::saveLeadRequiredFields');
+        $routes->post('sub-status-rules', 'ClientController::saveSubStatusRules');
         $routes->get('marketing-types', 'ClientController::marketingTypes');
         $routes->post('marketing-types', 'ClientController::createMarketingType');
         $routes->post('marketing-types/reorder', 'ClientController::reorderMarketingTypes');
@@ -297,6 +305,11 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('lead-types/reorder', 'ClientController::reorderLeadTypes');
         $routes->post('lead-types/(:num)', 'ClientController::updateLeadType/$1');
         $routes->post('lead-types/(:num)/delete', 'ClientController::deleteLeadType/$1');
+        $routes->get('references', 'ClientController::references');
+        $routes->post('references', 'ClientController::createReference');
+        $routes->post('references/reorder', 'ClientController::reorderReferences');
+        $routes->post('references/(:num)', 'ClientController::updateReference/$1');
+        $routes->post('references/(:num)/delete', 'ClientController::deleteReference/$1');
         $routes->get('conversion-types', 'ClientController::conversionTypes');
         $routes->post('conversion-types', 'ClientController::createConversionType');
         $routes->post('conversion-types/reorder', 'ClientController::reorderConversionTypes');
@@ -331,6 +344,12 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
 
     // Tasks (gated by the 'tasks' plan feature)
     $routes->get('tasks', 'ClientController::tasks', ['filter' => 'feature:tasks']);
+    // Task stages (kanban columns) — admin-managed, data-driven board
+    $routes->get('task-stages', 'ClientController::taskStagesList', ['filter' => 'feature:tasks']);
+    $routes->post('task-stages', 'ClientController::createTaskStage', ['filter' => 'feature:tasks']);
+    $routes->post('task-stages/reorder', 'ClientController::reorderTaskStages', ['filter' => 'feature:tasks']);
+    $routes->post('task-stages/(:num)', 'ClientController::updateTaskStage/$1', ['filter' => 'feature:tasks']);
+    $routes->post('task-stages/(:num)/delete', 'ClientController::deleteTaskStage/$1', ['filter' => 'feature:tasks']);
     $routes->get('task-setup', 'ClientController::taskSetup', ['filter' => 'feature:tasks']);
     $routes->post('task-field-settings', 'ClientController::saveTaskFieldSettings', ['filter' => 'feature:tasks']);
     $routes->post('tasks', 'ClientController::createTask', ['filter' => 'feature:tasks']);

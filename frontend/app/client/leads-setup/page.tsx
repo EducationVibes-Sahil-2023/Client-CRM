@@ -5,6 +5,7 @@ import {
   getLeadsSetup,
   createLeadStatus, updateLeadStatus, deleteLeadStatus,
   createLeadType, updateLeadType, deleteLeadType,
+  createReference, updateReference, deleteReference,
   createLeadSource, updateLeadSource, deleteLeadSource,
   createMarketingType, updateMarketingType, deleteMarketingType,
   createConversionType, updateConversionType, deleteConversionType,
@@ -12,13 +13,15 @@ import {
   createState, updateState, deleteState,
   createCity, updateCity, deleteCity,
   getLeadImportSetup, saveLeadImportSetup,
-  type LeadStatus, type LeadType, type LeadSource, type MarketingType, type ConversionType, type FollowupGroup,
-  type State, type City, type LeadImportColumn,
+  saveSubStatusRules,
+  type LeadStatus, type LeadType, type LeadReference, type LeadSource, type MarketingType, type ConversionType, type FollowupGroup,
+  type State, type City, type LeadImportColumn, type SubStatusRules,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { useClient } from "../ClientContext";
 import { PageHeader, Card, Modal, SkeletonText } from "../../admin/ui";
+import { SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 
 const COLORS = ["indigo", "violet", "emerald", "amber", "rose", "sky", "teal", "pink", "orange", "lime", "cyan", "slate"];
 const DOT: Record<string, string> = {
@@ -28,30 +31,40 @@ const DOT: Record<string, string> = {
 };
 const field = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
 
+// Singularise a tab label for modal titles / confirm copy. A naïve trailing-"s"
+// strip turns "Statuses" → "Statuse" and "Cities" → "Citie", so handle the
+// "-ies" and "-ses" endings first.
+const singular = (label: string) =>
+  /ies$/.test(label) ? label.replace(/ies$/, "y")
+    : /ses$/.test(label) ? label.replace(/es$/, "")
+      : label.replace(/s$/, "");
+
 // A color can be a named preset ("indigo") or a custom hex ("#16a34a").
 const isHex = (c: string) => /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c);
 const dotClass = (c: string) => (isHex(c) ? "" : DOT[c] ?? "bg-slate-400");
 const dotStyle = (c: string): React.CSSProperties | undefined => (isHex(c) ? { backgroundColor: c } : undefined);
 
-type EntityKey = "statuses" | "sub_statuses" | "lead_types" | "sources" | "marketing" | "conversions" | "followup_groups" | "states" | "cities" | "import";
+type EntityKey = "statuses" | "sub_statuses" | "lead_types" | "references" | "sources" | "marketing" | "conversions" | "followup_groups" | "states" | "cities" | "import";
 
 interface Draft {
   id?: number;
   name: string;
   color: string;
   parent_ids: number[];        // sub status → parent statuses (can be many)
+  type_ids: number[];          // sub status → lead type (optional, single)
   marketing_type_id: string;   // lead source
   lead_status_ids: number[];   // conversion type → grouped lead statuses
   percentage: string;          // conversion type → win % (manual mode)
   auto_percentage: boolean;    // conversion type → auto-calc % from lead counts
   state_id: string;            // city → parent state
 }
-const blank: Draft = { name: "", color: "indigo", parent_ids: [], marketing_type_id: "", lead_status_ids: [], percentage: "", auto_percentage: false, state_id: "" };
+const blank: Draft = { name: "", color: "indigo", parent_ids: [], type_ids: [], marketing_type_id: "", lead_status_ids: [], percentage: "", auto_percentage: false, state_id: "" };
 
 const TABS: { key: EntityKey; label: string; hint: string }[] = [
   { key: "statuses", label: "Lead Statuses", hint: "Pipeline stages a lead moves through." },
   { key: "sub_statuses", label: "Sub Statuses", hint: "A finer stage under one or more statuses — the same sub-status can sit under several statuses." },
   { key: "lead_types", label: "Lead Types", hint: "Categorise leads (e.g. Buyer, Seller)." },
+  { key: "references", label: "References", hint: "Reference names a lead can come under. Assign one to a team member and they'll see only that reference's leads." },
   { key: "sources", label: "Lead Sources", hint: "Where leads come from, grouped by marketing type." },
   { key: "marketing", label: "Marketing Types", hint: "Channels that group your lead sources." },
   { key: "conversions", label: "Conversion Types", hint: "Group lead statuses into a pipeline stage with a win % (e.g. Prospect = Fresh + Warm)." },
@@ -74,16 +87,24 @@ export default function LeadsSetupPage() {
   const [loading, setLoading] = useState(true);
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [leadTypes, setLeadTypes] = useState<LeadType[]>([]);
+  const [references, setReferences] = useState<LeadReference[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
   const [marketing, setMarketing] = useState<MarketingType[]>([]);
   const [conversions, setConversions] = useState<ConversionType[]>([]);
   const [followupGroups, setFollowupGroups] = useState<FollowupGroup[]>([]);
   const [states, setStates] = useState<State[]>([]);
   const [cities, setCities] = useState<City[]>([]);
+  // Admin rules for the "add sub-status" form (whether parent / type required).
+  const [subRules, setSubRules] = useState<SubStatusRules>({ require_parent: true, require_type: false });
+  const [subRulesSaving, setSubRulesSaving] = useState(false);
 
   const [tab, setTab] = useState<EntityKey>("statuses");
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [errs, setErrs] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // Close the editor modal and clear any field errors.
+  const closeDraft = () => { setDraft(null); setErrs({}); };
 
   // Import-template column config (which columns + mandatory).
   const [importCols, setImportCols] = useState<LeadImportColumn[]>([]);
@@ -106,6 +127,21 @@ export default function LeadsSetupPage() {
     }
   }
 
+  async function persistSubRules(next: SubStatusRules) {
+    const prev = subRules;
+    setSubRules(next); // optimistic
+    setSubRulesSaving(true);
+    try {
+      const d = await saveSubStatusRules(next);
+      setSubRules(d.sub_status_rules);
+    } catch (e) {
+      setSubRules(prev);
+      toast.error(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSubRulesSaving(false);
+    }
+  }
+
   const load = useCallback(() => {
     return getLeadsSetup()
       .then((d) => {
@@ -113,10 +149,12 @@ export default function LeadsSetupPage() {
         setSources(d.lead_sources ?? []);
         setMarketing(d.marketing_types ?? []);
         setLeadTypes(d.lead_types ?? []);
+        setReferences(d.references ?? []);
         setConversions(d.conversion_types ?? []);
         setFollowupGroups(d.followup_groups ?? []);
         setStates(d.states ?? []);
         setCities(d.cities ?? []);
+        if (d.sub_status_rules) setSubRules(d.sub_status_rules);
       })
       .catch(() => toast.error("Could not load leads setup."))
       .finally(() => setLoading(false));
@@ -132,6 +170,7 @@ export default function LeadsSetupPage() {
       case "statuses": return topStatuses;
       case "sub_statuses": return subStatuses;
       case "lead_types": return leadTypes;
+      case "references": return references;
       case "sources": return sources;
       case "marketing": return marketing;
       case "conversions": return conversions;
@@ -140,18 +179,22 @@ export default function LeadsSetupPage() {
       case "cities": return cities;
       case "import": return [];
     }
-  }, [tab, topStatuses, subStatuses, leadTypes, sources, marketing, conversions, followupGroups, states, cities]);
+  }, [tab, topStatuses, subStatuses, leadTypes, references, sources, marketing, conversions, followupGroups, states, cities]);
 
-  function openNew() { setDraft({ ...blank }); }
+  function openNew() { setErrs({}); setDraft({ ...blank }); }
 
-  function openEdit(it: LeadStatus | LeadType | LeadSource | MarketingType | ConversionType | FollowupGroup | State | City) {
+  function openEdit(it: LeadStatus | LeadType | LeadReference | LeadSource | MarketingType | ConversionType | FollowupGroup | State | City) {
+    setErrs({});
     setDraft({
       id: it.id,
       name: it.name,
       color: it.color || "indigo",
-      parent_ids: (it as LeadStatus).parent_ids ?? [],
+      // Coerce id lists to numbers: the API sends decoded arrays as ints but
+      // option ids (s.id/t.id) arrive from the DB as strings, so keep both sides numeric.
+      parent_ids: ((it as LeadStatus).parent_ids ?? []).map(Number),
+      type_ids: ((it as LeadStatus).type_ids ?? []).map(Number),
       marketing_type_id: (it as LeadSource).marketing_type_id ? String((it as LeadSource).marketing_type_id) : "",
-      lead_status_ids: (it as ConversionType).lead_status_ids ?? [],
+      lead_status_ids: ((it as ConversionType).lead_status_ids ?? []).map(Number),
       percentage: (it as ConversionType).percentage != null ? String((it as ConversionType).percentage) : "",
       auto_percentage: !!(it as ConversionType).auto_percentage,
       state_id: (it as City).state_id ? String((it as City).state_id) : "",
@@ -160,7 +203,19 @@ export default function LeadsSetupPage() {
 
   async function save() {
     if (!draft) return;
-    if (draft.name.trim().length < 1) { toast.warning("Enter a name."); return; }
+
+    // Inline validation — collect field errors and show them in the form
+    // (instead of transient toasts) so the user sees exactly what's missing.
+    const e: Record<string, string> = {};
+    if (draft.name.trim().length < 1) e.name = "Name is required.";
+    if (tab === "sub_statuses") {
+      if (subRules.require_parent && draft.parent_ids.length === 0) e.parent = "Pick at least one parent status.";
+      if (subRules.require_type && draft.type_ids.length === 0) e.type = "Pick at least one lead type.";
+    }
+    if (tab === "cities" && !draft.state_id) e.state = "Pick the state this city belongs to.";
+    setErrs(e);
+    if (Object.keys(e).length > 0) return;
+
     setSaving(true);
     try {
       const id = draft.id;
@@ -168,12 +223,14 @@ export default function LeadsSetupPage() {
         const body = { name: draft.name, color: draft.color, parent_ids: [] as number[] };
         if (id) await updateLeadStatus(id, body); else await createLeadStatus(body);
       } else if (tab === "sub_statuses") {
-        if (draft.parent_ids.length === 0) { toast.warning("Pick at least one parent status."); setSaving(false); return; }
-        const body = { name: draft.name, color: draft.color, parent_ids: draft.parent_ids };
+        const body = { name: draft.name, color: draft.color, parent_ids: draft.parent_ids, type_ids: draft.type_ids };
         if (id) await updateLeadStatus(id, body); else await createLeadStatus(body);
       } else if (tab === "lead_types") {
         const body = { name: draft.name, color: draft.color };
         if (id) await updateLeadType(id, body); else await createLeadType(body);
+      } else if (tab === "references") {
+        const body = { name: draft.name, color: draft.color };
+        if (id) await updateReference(id, body); else await createReference(body);
       } else if (tab === "sources") {
         const body = { name: draft.name, color: draft.color, marketing_type_id: draft.marketing_type_id ? Number(draft.marketing_type_id) : null };
         if (id) await updateLeadSource(id, body); else await createLeadSource(body);
@@ -191,7 +248,6 @@ export default function LeadsSetupPage() {
         const body = { name: draft.name, color: draft.color };
         if (id) await updateState(id, body); else await createState(body);
       } else if (tab === "cities") {
-        if (!draft.state_id) { toast.warning("Pick the state this city belongs to."); setSaving(false); return; }
         const body = { name: draft.name, color: draft.color, state_id: Number(draft.state_id) };
         if (id) await updateCity(id, body); else await createCity(body);
       } else {
@@ -199,7 +255,7 @@ export default function LeadsSetupPage() {
         if (id) await updateFollowupGroup(id, body); else await createFollowupGroup(body);
       }
       toast.success(id ? "Saved." : "Added.");
-      setDraft(null);
+      closeDraft();
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not save.");
@@ -209,7 +265,7 @@ export default function LeadsSetupPage() {
   }
 
   async function remove(it: { id: number; name: string }) {
-    const noun = activeTab.label.replace(/s$/, "").toLowerCase();
+    const noun = singular(activeTab.label).toLowerCase();
     const ok = await confirm({
       danger: true,
       title: `Delete ${noun} “${it.name}”?`,
@@ -225,6 +281,7 @@ export default function LeadsSetupPage() {
     try {
       if (tab === "statuses" || tab === "sub_statuses") await deleteLeadStatus(it.id);
       else if (tab === "lead_types") await deleteLeadType(it.id);
+      else if (tab === "references") await deleteReference(it.id);
       else if (tab === "sources") await deleteLeadSource(it.id);
       else if (tab === "marketing") await deleteMarketingType(it.id);
       else if (tab === "conversions") await deleteConversionType(it.id);
@@ -240,14 +297,18 @@ export default function LeadsSetupPage() {
 
   const activeTab = TABS.find((t) => t.key === tab)!;
 
-  function subtitle(it: LeadStatus | LeadType | LeadSource | MarketingType | ConversionType | FollowupGroup | State | City): string | null {
+  function subtitle(it: LeadStatus | LeadType | LeadReference | LeadSource | MarketingType | ConversionType | FollowupGroup | State | City): string | null {
     if (tab === "cities") return (it as City).state ? `State: ${(it as City).state}` : "No state";
     if (tab === "sub_statuses") {
       const s = it as LeadStatus;
       const names = s.parent_names?.length
         ? s.parent_names
         : (s.parent_ids ?? []).map((id) => statuses.find((x) => x.id === id)?.name).filter(Boolean);
-      return names.length ? `Under: ${names.join(", ")}` : "No parent status";
+      const typeNames = s.type_names?.length
+        ? s.type_names
+        : (s.type_ids ?? []).map((id) => leadTypes.find((x) => x.id === id)?.name).filter(Boolean);
+      const base = names.length ? `Under: ${names.join(", ")}` : "No parent status";
+      return typeNames.length ? `${base} · ${typeNames.join(", ")}` : base;
     }
     if (tab === "sources") return (it as LeadSource).marketing_type ? `Marketing: ${(it as LeadSource).marketing_type}` : "No marketing type";
     if (tab === "conversions") {
@@ -279,6 +340,26 @@ export default function LeadsSetupPage() {
 
       <Card>
         <p className="mb-4 text-sm text-slate-500">{activeTab.hint}</p>
+        {tab === "sub_statuses" && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-400">Required when adding a sub-status</span>
+            <div className="flex flex-wrap gap-4">
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" disabled={!canUpdate || subRulesSaving} checked={subRules.require_parent}
+                  onChange={(e) => persistSubRules({ ...subRules, require_parent: e.target.checked })}
+                  className="h-4 w-4 cursor-pointer accent-emerald-600 disabled:opacity-50" />
+                Parent status
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" disabled={!canUpdate || subRulesSaving} checked={subRules.require_type}
+                  onChange={(e) => persistSubRules({ ...subRules, require_type: e.target.checked })}
+                  className="h-4 w-4 cursor-pointer accent-emerald-600 disabled:opacity-50" />
+                Lead type
+              </label>
+            </div>
+            <span className="mt-2 block text-xs text-slate-400">Choose which fields an admin must fill before a new sub-status can be saved.</span>
+          </div>
+        )}
         {tab === "import" ? (
           <div className="space-y-1">
             <div className="flex items-center justify-between border-b border-slate-100 pb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
@@ -336,12 +417,13 @@ export default function LeadsSetupPage() {
         )}
       </Card>
 
-      <Modal open={!!draft} onClose={() => setDraft(null)} title={`${draft?.id ? "Edit" : "New"} ${activeTab.label.replace(/s$/, "").toLowerCase()}`}>
+      <Modal open={!!draft} onClose={closeDraft} title={`${draft?.id ? "Edit" : "New"} ${singular(activeTab.label).toLowerCase()}`}>
         {draft && (
           <div className="space-y-3">
             <label className="block text-sm">
               <span className="mb-1 block font-medium text-slate-600">Name</span>
-              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Name" className={field} autoFocus />
+              <input value={draft.name} onChange={(e) => { setDraft({ ...draft, name: e.target.value }); if (errs.name) setErrs({ ...errs, name: "" }); }} placeholder="Name" className={`${field} ${errs.name ? "border-red-400 focus:border-red-500 focus:ring-red-500/15" : ""}`} autoFocus />
+              {errs.name && <span className="mt-1 block text-xs text-red-500">{errs.name}</span>}
             </label>
 
             <div>
@@ -380,16 +462,17 @@ export default function LeadsSetupPage() {
 
             {tab === "sub_statuses" && (
               <div className="text-sm">
-                <span className="mb-1 block font-medium text-slate-600">Parent statuses</span>
+                <span className="mb-1 block font-medium text-slate-600">Parent statuses{subRules.require_parent ? "" : " (optional)"}</span>
                 {topStatuses.length === 0 ? (
                   <p className="text-xs text-slate-400">Add lead statuses first, then choose which ones this sub-status sits under.</p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     {topStatuses.map((s) => {
-                      const on = draft.parent_ids.includes(s.id);
+                      const sid = Number(s.id); // option ids come from the DB as strings; selections are numbers
+                      const on = draft.parent_ids.includes(sid);
                       return (
                         <button key={s.id} type="button"
-                          onClick={() => setDraft({ ...draft, parent_ids: on ? draft.parent_ids.filter((x) => x !== s.id) : [...draft.parent_ids, s.id] })}
+                          onClick={() => setDraft({ ...draft, parent_ids: on ? draft.parent_ids.filter((x) => x !== sid) : [...draft.parent_ids, sid] })}
                           className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${on ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500 hover:bg-slate-50"}`}>
                           <span className={`h-2 w-2 rounded-full ${dotClass(s.color)}`} style={dotStyle(s.color)} />
                           {s.name}
@@ -399,32 +482,69 @@ export default function LeadsSetupPage() {
                   </div>
                 )}
                 <span className="mt-1.5 block text-xs text-slate-400">Select one or more statuses. The same sub-status can sit under several statuses, and shows on the lead form under each.</span>
+                {errs.parent && <span className="mt-1 block text-xs text-red-500">{errs.parent}</span>}
+              </div>
+            )}
+
+            {tab === "sub_statuses" && (
+              <div className="text-sm">
+                <span className="mb-1 block font-medium text-slate-600">Lead types{subRules.require_type ? "" : " (optional)"}</span>
+                {leadTypes.length === 0 ? (
+                  <p className="text-xs text-slate-400">Add lead types first to tie this sub-status to a type.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {leadTypes.map((t) => {
+                      const tid = Number(t.id); // option ids come from the DB as strings; selections are numbers
+                      const on = draft.type_ids.includes(tid);
+                      return (
+                        <button key={t.id} type="button"
+                          onClick={() => setDraft({ ...draft, type_ids: on ? draft.type_ids.filter((x) => x !== tid) : [...draft.type_ids, tid] })}
+                          className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${on ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500 hover:bg-slate-50"}`}>
+                          <span className={`h-2 w-2 rounded-full ${dotClass(t.color)}`} style={dotStyle(t.color)} />
+                          {t.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <span className="mt-1.5 block text-xs text-slate-400">On the lead form, this sub-status shows when its parent status and one of these lead types are chosen. Leave empty to show it for any type.</span>
+                {errs.type && <span className="mt-1 block text-xs text-red-500">{errs.type}</span>}
               </div>
             )}
 
             {tab === "sources" && (
-              <label className="block text-sm">
+              <div className="text-sm">
                 <span className="mb-1 block font-medium text-slate-600">Marketing type</span>
-                <select value={draft.marketing_type_id} onChange={(e) => setDraft({ ...draft, marketing_type_id: e.target.value })} className={field}>
-                  <option value="">None</option>
-                  {marketing.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-                </select>
-              </label>
+                <SearchSelect
+                  ariaLabel="Marketing type"
+                  value={draft.marketing_type_id}
+                  onChange={(v) => setDraft({ ...draft, marketing_type_id: v })}
+                  options={[{ value: "", label: "None" }, ...marketing.map((m): SelectOption => ({ value: String(m.id), label: m.name, prefix: <span className={`h-2 w-2 rounded-full ${dotClass(m.color)}`} style={dotStyle(m.color)} /> }))]}
+                  placeholder="None"
+                  searchPlaceholder="Search marketing types…"
+                />
+              </div>
             )}
 
             {tab === "cities" && (
-              <label className="block text-sm">
+              <div className="text-sm">
                 <span className="mb-1 block font-medium text-slate-600">State</span>
                 {states.length === 0 ? (
                   <p className="text-xs text-slate-400">Add a state first, then assign this city to it.</p>
                 ) : (
-                  <select value={draft.state_id} onChange={(e) => setDraft({ ...draft, state_id: e.target.value })} className={field}>
-                    <option value="">Select a state…</option>
-                    {states.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
+                  <SearchSelect
+                    ariaLabel="State"
+                    value={draft.state_id}
+                    onChange={(v) => { setDraft({ ...draft, state_id: v }); if (errs.state) setErrs({ ...errs, state: "" }); }}
+                    options={[{ value: "", label: "Select a state…" }, ...states.map((s): SelectOption => ({ value: String(s.id), label: s.name, prefix: <span className={`h-2 w-2 rounded-full ${dotClass(s.color)}`} style={dotStyle(s.color)} /> }))]}
+                    placeholder="Select a state…"
+                    searchPlaceholder="Search states…"
+                    className={errs.state ? "ring-2 ring-red-500/30" : ""}
+                  />
                 )}
+                {errs.state && <span className="mt-1 block text-xs text-red-500">{errs.state}</span>}
                 <span className="mt-1.5 block text-xs text-slate-400">The city is shown on the lead form only after this state is picked.</span>
-              </label>
+              </div>
             )}
 
             {tab === "conversions" && (
@@ -469,10 +589,11 @@ export default function LeadsSetupPage() {
                   ) : (
                     <div className="flex flex-wrap gap-2">
                       {statuses.map((s) => {
-                        const on = draft.lead_status_ids.includes(s.id);
+                        const sid = Number(s.id);
+                        const on = draft.lead_status_ids.includes(sid);
                         return (
                           <button key={s.id} type="button"
-                            onClick={() => setDraft({ ...draft, lead_status_ids: on ? draft.lead_status_ids.filter((x) => x !== s.id) : [...draft.lead_status_ids, s.id] })}
+                            onClick={() => setDraft({ ...draft, lead_status_ids: on ? draft.lead_status_ids.filter((x) => x !== sid) : [...draft.lead_status_ids, sid] })}
                             className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${on ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500 hover:bg-slate-50"}`}>
                             <span className={`h-2 w-2 rounded-full ${dotClass(s.color)}`} style={dotStyle(s.color)} />
                             {s.name}
@@ -493,10 +614,11 @@ export default function LeadsSetupPage() {
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     {statuses.map((s) => {
-                      const on = draft.lead_status_ids.includes(s.id);
+                      const sid = Number(s.id);
+                      const on = draft.lead_status_ids.includes(sid);
                       return (
                         <button key={s.id} type="button"
-                          onClick={() => setDraft({ ...draft, lead_status_ids: on ? draft.lead_status_ids.filter((x) => x !== s.id) : [...draft.lead_status_ids, s.id] })}
+                          onClick={() => setDraft({ ...draft, lead_status_ids: on ? draft.lead_status_ids.filter((x) => x !== sid) : [...draft.lead_status_ids, sid] })}
                           className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${on ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500 hover:bg-slate-50"}`}>
                           <span className={`h-2 w-2 rounded-full ${dotClass(s.color)}`} style={dotStyle(s.color)} />
                           {s.name}
@@ -510,7 +632,7 @@ export default function LeadsSetupPage() {
             )}
 
             <div className="flex justify-end gap-2 pt-1">
-              <button onClick={() => setDraft(null)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+              <button onClick={closeDraft} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
               <button onClick={save} disabled={saving} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{saving ? "Saving…" : "Save"}</button>
             </div>
           </div>

@@ -415,7 +415,24 @@ html::-webkit-scrollbar {
   }
 }
 
+/* Loader: 3×3 grid cells fade/scale in a diagonal wave (see Loader.tsx). */
+@keyframes ldr-grid {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.6);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 /* ---------- Utility classes ---------- */
+.ldr-grid {
+  animation: ldr-grid 1.3s ease-in-out infinite;
+}
 .animate-float {
   animation: float 6s ease-in-out infinite;
 }

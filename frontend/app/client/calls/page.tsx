@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  getCallDashboard, getCalls, getLeadsSetup, getStaff, getLookups,
-  type CallDashboard, type CallRep, type CallLog, type LeadStatus, type LeadSource, type Staff, type LookupItem,
+  getCallDashboard, getCalls, getLeadsSetup, getStaff, getLookups, getCallApiKey, rotateCallApiKey,
+  type CallDashboard, type CallRep, type CallLog, type LeadStatus, type LeadSource, type Staff, type LookupItem, type CallApiKeyInfo,
 } from "../../lib/client";
+import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useClient } from "../ClientContext";
 import { Card, PageHeader, Spinner, EmptyState, SkeletonStats, SkeletonBlock, fmtDateTime } from "../../admin/ui";
@@ -216,13 +217,180 @@ function RepTable({ reps }: { reps: CallRep[] }) {
 
 const isSubStatus = (s: LeadStatus) => (s.parent_ids?.length ?? 0) > 0 || !!s.parent_id;
 
+/**
+ * "Connect your calling app" — shows the per-client API key + endpoint the
+ * external dialer/IVR app posts call logs to (admin only). Lets the admin reveal,
+ * copy and rotate the key, with a ready-to-use request example.
+ */
+function ConnectAppPanel() {
+  const toast = useToast();
+  const [info, setInfo] = useState<CallApiKeyInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [reveal, setReveal] = useState(false);
+  const [confirmRotate, setConfirmRotate] = useState(false);
+  const [rotating, setRotating] = useState(false);
+
+  useEffect(() => {
+    getCallApiKey().then(setInfo).catch(() => toast.error("Could not load the API key.")).finally(() => setLoading(false));
+  }, [toast]);
+
+  const fullUrl = useMemo(() => {
+    if (!info) return "";
+    const base = API_URL.startsWith("http") ? API_URL : (typeof window !== "undefined" ? window.location.origin : "") + API_URL;
+    return `${base}${info.endpoint}`;
+  }, [info]);
+
+  const key = info?.api_key ?? "";
+  const masked = key ? `${key.slice(0, 6)}${"•".repeat(Math.max(0, key.length - 10))}${key.slice(-4)}` : "";
+
+  function copy(text: string, label: string) {
+    if (!text) return;
+    navigator.clipboard?.writeText(text).then(() => toast.success(`${label} copied.`)).catch(() => toast.error("Copy failed — select and copy manually."));
+  }
+
+  async function rotate() {
+    setRotating(true);
+    try {
+      const d = await rotateCallApiKey();
+      setInfo(d);
+      setReveal(true);
+      setConfirmRotate(false);
+      toast.success("New key generated. Update your calling app with it now.", { title: "Key rotated" });
+    } catch {
+      toast.error("Could not rotate the key.");
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  // The JSON body to POST. Send a `calls` array — one or many call objects.
+  const sampleJson = `{
+  "calls": [
+    {
+      "contact": "9876543210",
+      "staff_contact": "9000000000",
+      "type": "outgoing",
+      "source": "phone",
+      "status": "ANSWERED",
+      "duration": 87,
+      "call_start": "2026-06-30 10:15:00",
+      "call_end": "2026-06-30 10:16:27"
+    }
+  ]
+}`;
+
+  const sample = `curl -X POST "${fullUrl}" \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: ${reveal ? key : "YOUR_API_KEY"}" \\
+  -d '{"calls":[{"contact":"9876543210","staff_contact":"9000000000","type":"outgoing","source":"phone","status":"ANSWERED","duration":87,"call_start":"2026-06-30 10:15:00","call_end":"2026-06-30 10:16:27"}]}'`;
+
+  // What each field in a call object means (shown as a how-to-pass-data table).
+  // All fields are mandatory on this API.
+  const FIELDS: { name: string; req: boolean; desc: string }[] = [
+    { name: "contact", req: true, desc: "The lead's number (any format — last 10 digits are used to match the lead)." },
+    { name: "staff_contact", req: true, desc: "The agent's number; if it matches a staff member, the call is attributed to them." },
+    { name: "type", req: true, desc: "incoming, outgoing or missed." },
+    { name: "source", req: true, desc: "ivr or phone (where the call happened)." },
+    { name: "status", req: true, desc: "Free text shown as-is, e.g. ANSWERED, MISSED, Busy." },
+    { name: "duration", req: true, desc: "Call length in seconds (0 or more). Connected is auto-set when duration > 0." },
+    { name: "call_start", req: true, desc: "YYYY-MM-DD HH:MM:SS or a UNIX timestamp — stored in IST (UTC+5:30)." },
+    { name: "call_end", req: true, desc: "YYYY-MM-DD HH:MM:SS or a UNIX timestamp — stored in IST (UTC+5:30)." },
+  ];
+
+  const fieldCls = "flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700";
+  const btnCls = "flex-shrink-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50";
+
+  if (loading) return <Card><Spinner /></Card>;
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <Card>
+        <h3 className="font-semibold text-slate-900">Connect your calling app</h3>
+        <p className="mt-1 text-sm text-slate-500">
+          Point your IVR or device dialer at the endpoint below and authenticate with
+          this workspace&apos;s API key. Calls are matched to leads and staff by phone
+          number automatically. No login needed — keep the key secret.
+        </p>
+
+        <div className="mt-5 space-y-4">
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint (POST)</label>
+            <div className={fieldCls}>
+              <span className="flex-1 truncate">{fullUrl}</span>
+              <button onClick={() => copy(fullUrl, "Endpoint")} className={btnCls}>Copy</button>
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-400">API key</label>
+            <div className={fieldCls}>
+              <span className="flex-1 truncate">{reveal ? key : masked}</span>
+              <button onClick={() => setReveal((r) => !r)} className={btnCls}>{reveal ? "Hide" : "Reveal"}</button>
+              <button onClick={() => copy(key, "API key")} className={btnCls}>Copy</button>
+            </div>
+            <p className="mt-1.5 text-xs text-slate-400">Unique to this workspace. Send it as the <code className="font-mono">X-API-Key</code> header (or <code className="font-mono">Authorization: Bearer</code>, or an <code className="font-mono">api_key</code> field).</p>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <h4 className="mb-1 text-sm font-semibold text-slate-700">Request body (JSON)</h4>
+        <p className="mb-2 text-sm text-slate-500">POST this as the body. Send a <code className="font-mono">calls</code> array — add as many call objects as you like in one request. <strong className="text-slate-600">All fields are required</strong> for every call; times are read in <strong className="text-slate-600">IST (UTC+5:30)</strong>.</p>
+        <pre className="overflow-x-auto rounded-lg bg-slate-900 p-4 text-xs leading-relaxed text-slate-100"><code>{sampleJson}</code></pre>
+        <button onClick={() => copy(sampleJson, "Sample JSON")} className={`${btnCls} mt-2`}>Copy JSON</button>
+
+        <h4 className="mb-2 mt-5 text-sm font-semibold text-slate-700">How to pass the data</h4>
+        <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
+              <tr>
+                <th className="px-3 py-2 font-medium">Field</th>
+                <th className="px-3 py-2 font-medium">Required</th>
+                <th className="px-3 py-2 font-medium">Meaning</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {FIELDS.map((f) => (
+                <tr key={f.name} className="align-top">
+                  <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-700">{f.name}</td>
+                  <td className="px-3 py-2">
+                    {f.req
+                      ? <span className="inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600">Required</span>
+                      : <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">Optional</span>}
+                  </td>
+                  <td className="px-3 py-2 text-slate-600">{f.desc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-xs text-slate-400">A successful call returns <code className="font-mono">{`{ "status": 1, "inserted": <n> }`}</code>. Unmatched numbers are still saved (shown as “Unmatched”). Sending the same call twice creates two rows — post each once.</p>
+      </Card>
+
+      <Card>
+        <h4 className="text-sm font-semibold text-slate-700">Rotate key</h4>
+        <p className="mt-1 text-sm text-slate-500">Generate a new key if the current one may be exposed. The old key stops working immediately — you&apos;ll need to update your calling app.</p>
+        {!confirmRotate ? (
+          <button onClick={() => setConfirmRotate(true)} className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-100">Rotate API key</button>
+        ) : (
+          <div className="mt-3 flex items-center gap-2">
+            <span className="text-sm font-medium text-slate-700">Replace the current key?</span>
+            <button onClick={rotate} disabled={rotating} className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-60">{rotating ? "Rotating…" : "Yes, rotate"}</button>
+            <button onClick={() => setConfirmRotate(false)} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 // =============================================================================
 
 
 export default function ClientCalls() {
   const toast = useToast();
-  const { defaultPageSize } = useClient();
-  const [tab, setTab] = useState<"dashboard" | "log">("dashboard");
+  const { defaultPageSize, isAdmin } = useClient();
+  const [tab, setTab] = useState<"dashboard" | "log" | "connect">("dashboard");
 
   // ---- dashboard state ----
   const [dash, setDash] = useState<CallDashboard | null>(null);
@@ -359,12 +527,14 @@ export default function ClientCalls() {
 
       {/* View toggle */}
       <div className="mb-4 inline-flex rounded-xl border border-slate-200 bg-white p-1">
-        {([["dashboard", "Dashboard"], ["log", "Call log"]] as const).map(([v, lbl]) => (
+        {(([["dashboard", "Dashboard"], ["log", "Call log"], ...(isAdmin ? [["connect", "Connect app"]] : [])]) as [typeof tab, string][]).map(([v, lbl]) => (
           <button key={v} onClick={() => setTab(v)} className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${tab === v ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100"}`}>{lbl}</button>
         ))}
       </div>
 
-      {tab === "dashboard" ? (
+      {tab === "connect" ? (
+        <ConnectAppPanel />
+      ) : tab === "dashboard" ? (
         <div className={`space-y-4 ${filterRailPad(filterOpen)}`}>
           {/* Filters — Date + Refresh stay in the bar; the rest live in the right-side rail. */}
           <div className="flex flex-wrap items-center justify-between gap-3">

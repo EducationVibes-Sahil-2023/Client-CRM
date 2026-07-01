@@ -12,6 +12,11 @@ import {
   getTaskComments,
   getTasks,
   getTaskSetup,
+  getTaskStages,
+  createTaskStage,
+  updateTaskStage,
+  deleteTaskStage,
+  reorderTaskStages,
   saveTaskFieldSettings,
   updateTask,
   TASK_REQUIRABLE_FIELDS,
@@ -20,6 +25,7 @@ import {
   type Task,
   type TaskComment,
   type TaskCustomField,
+  type TaskStage,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { ConfirmDialog, Drawer, PageHeader, SkeletonBlock, fmtDate, fmtDateTime, timeAgo } from "../../admin/ui";
@@ -48,12 +54,26 @@ const blank: Draft = { title: "", description: "", assigned_to: "", start_date: 
 /** Plain-text from a rich-text HTML string (for previews + "is it empty" checks). */
 const stripHtml = (h: string) => h.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
-const STATUS_OPTIONS: SelectOption[] = [
-  { value: "open", label: "Backlog" },
-  { value: "in_progress", label: "In Progress" },
-  { value: "in_review", label: "In Review" },
-  { value: "done", label: "Done" },
-];
+// Board columns are data-driven (admin-managed task stages). Each stage carries
+// a named colour; these static class sets keep Tailwind's JIT happy (no string
+// interpolation) while letting every stage pick its own tint.
+interface StageClasses { dot: string; head: string; count: string; active: string; ring: string; swatch: string }
+const STAGE_COLORS: Record<string, StageClasses> = {
+  slate:   { dot: "bg-slate-400",   head: "bg-slate-100",   count: "text-slate-500",   active: "bg-slate-600",   ring: "ring-slate-400",   swatch: "bg-slate-500" },
+  indigo:  { dot: "bg-indigo-500",  head: "bg-indigo-50",   count: "text-indigo-600",  active: "bg-indigo-600",  ring: "ring-indigo-400",  swatch: "bg-indigo-500" },
+  violet:  { dot: "bg-violet-500",  head: "bg-violet-50",   count: "text-violet-600",  active: "bg-violet-600",  ring: "ring-violet-400",  swatch: "bg-violet-500" },
+  amber:   { dot: "bg-amber-500",   head: "bg-amber-50",    count: "text-amber-600",   active: "bg-amber-500",   ring: "ring-amber-400",   swatch: "bg-amber-500" },
+  emerald: { dot: "bg-emerald-500", head: "bg-emerald-50",  count: "text-emerald-600", active: "bg-emerald-600", ring: "ring-emerald-400", swatch: "bg-emerald-500" },
+  teal:    { dot: "bg-teal-500",    head: "bg-teal-50",     count: "text-teal-600",    active: "bg-teal-600",    ring: "ring-teal-400",    swatch: "bg-teal-500" },
+  sky:     { dot: "bg-sky-500",     head: "bg-sky-50",      count: "text-sky-600",     active: "bg-sky-600",     ring: "ring-sky-400",     swatch: "bg-sky-500" },
+  rose:    { dot: "bg-rose-500",    head: "bg-rose-50",     count: "text-rose-600",    active: "bg-rose-600",    ring: "ring-rose-400",    swatch: "bg-rose-500" },
+  pink:    { dot: "bg-pink-500",    head: "bg-pink-50",     count: "text-pink-600",    active: "bg-pink-600",    ring: "ring-pink-400",    swatch: "bg-pink-500" },
+  orange:  { dot: "bg-orange-500",  head: "bg-orange-50",   count: "text-orange-600",  active: "bg-orange-600",  ring: "ring-orange-400",  swatch: "bg-orange-500" },
+  lime:    { dot: "bg-lime-500",    head: "bg-lime-50",     count: "text-lime-600",    active: "bg-lime-600",    ring: "ring-lime-400",    swatch: "bg-lime-500" },
+  cyan:    { dot: "bg-cyan-500",    head: "bg-cyan-50",     count: "text-cyan-600",    active: "bg-cyan-600",    ring: "ring-cyan-400",    swatch: "bg-cyan-500" },
+};
+const STAGE_PALETTE = Object.keys(STAGE_COLORS);
+const stageClasses = (color: string): StageClasses => STAGE_COLORS[color] ?? STAGE_COLORS.slate;
 
 // ---- Filters (a draft the user edits in the rail + the applied set that
 // actually filters; synced on "Apply", mirroring the Announcements section). ----
@@ -97,12 +117,10 @@ const TYPE_META: Record<string, { label: string; cls: string; icon: string }> = 
 };
 const typeMeta = (t: string) => TYPE_META[t] ?? TYPE_META.task;
 
-const COLUMNS = [
-  { key: "open", label: "Backlog", dot: "bg-slate-400", head: "bg-slate-100", count: "text-slate-500", active: "bg-slate-600" },
-  { key: "in_progress", label: "In Progress", dot: "bg-indigo-500", head: "bg-indigo-50", count: "text-indigo-600", active: "bg-indigo-600" },
-  { key: "in_review", label: "In Review", dot: "bg-amber-500", head: "bg-amber-50", count: "text-amber-600", active: "bg-amber-500" },
-  { key: "done", label: "Done", dot: "bg-emerald-500", head: "bg-emerald-50", count: "text-emerald-600", active: "bg-emerald-600" },
-] as const;
+/** A board column built from an admin-defined stage. */
+interface StageColumn extends StageClasses { key: string; label: string; is_done: boolean }
+const toColumns = (stages: TaskStage[]): StageColumn[] =>
+  stages.map((s) => ({ key: s.key, label: s.name, is_done: s.is_done, ...stageClasses(s.color) }));
 
 const ACTION_META: Record<string, { cls: string; icon: string }> = {
   created: { cls: "bg-emerald-100 text-emerald-600", icon: "M12 5v14M5 12h14" },
@@ -112,25 +130,30 @@ const ACTION_META: Record<string, { cls: string; icon: string }> = {
 };
 const actionMeta = (a: string) => ACTION_META[a] ?? { cls: "bg-slate-100 text-slate-500", icon: "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" };
 
-function isOverdue(t: Task) {
-  return t.status !== "done" && !!t.due_date && t.due_date.slice(0, 10) < new Date().toISOString().slice(0, 10);
+// A task is "done" when its stage is flagged done (defaults to the "done" key
+// before stages load).
+const isDoneTask = (t: Task, done: Set<string>) => done.has(t.status);
+
+function isOverdue(t: Task, done: Set<string>) {
+  return !isDoneTask(t, done) && !!t.due_date && t.due_date.slice(0, 10) < new Date().toISOString().slice(0, 10);
 }
 
-function cardDue(t: Task) {
+function cardDue(t: Task, done: Set<string>) {
   if (!t.due_date) return null;
   const d = new Date(t.due_date.replace(" ", "T"));
   if (Number.isNaN(d.getTime())) return null;
   const text = d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
   const today = new Date().toISOString().slice(0, 10);
   const iso = t.due_date.slice(0, 10);
-  if (t.status !== "done" && iso < today) return { text, tone: "text-red-600" };
-  if (t.status !== "done" && iso === today) return { text, tone: "text-amber-600" };
+  const open = !isDoneTask(t, done);
+  if (open && iso < today) return { text, tone: "text-red-600" };
+  if (open && iso === today) return { text, tone: "text-amber-600" };
   return { text, tone: "text-slate-500" };
 }
 
 // Start→due progress + on-time status — drives the per-card and drawer time bar.
-function timeBar(t: Task) {
-  if (t.status === "done") {
+function timeBar(t: Task, done: Set<string>) {
+  if (isDoneTask(t, done)) {
     if (t.completed_at && t.due_date) {
       const onTime = t.completed_at.slice(0, 10) <= t.due_date.slice(0, 10);
       return { pct: 100, bar: onTime ? "bg-emerald-500" : "bg-amber-500", label: onTime ? "Completed on time" : "Completed late", tone: onTime ? "text-emerald-600" : "text-amber-600" };
@@ -161,10 +184,14 @@ export default function TasksPage() {
   const toast = useToast();
   const { refreshNotifications, isAdmin, can } = useClient();
   const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [stages, setStages] = useState<TaskStage[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // Admin-managed kanban stages (board columns).
+  const [stageMgrOpen, setStageMgrOpen] = useState(false);
 
   // Admin-configured form fields: which built-ins are mandatory + custom fields.
   const [requiredFields, setRequiredFields] = useState<Set<string>>(new Set());
@@ -191,17 +218,28 @@ export default function TasksPage() {
   const [applied, setApplied] = useState<TaskFilters>(BLANK_TASK_FILTERS);
   const [filterOpen, setFilterOpen] = useState(false);
   const setFilter = <K extends keyof TaskFilters>(key: K, value: TaskFilters[K]) => setFilters((f) => ({ ...f, [key]: value }));
-  const [listStatus, setListStatus] = useState<"all" | "open" | "in_progress" | "in_review" | "done" | "overdue">("all");
+  const [listStatus, setListStatus] = useState<string>("all");
   const [dragId, setDragId] = useState<number | null>(null);
 
   function load() {
-    getTasks().then((d) => setTasks(d.tasks)).catch(() => setTasks([]));
+    getTasks().then((d) => { setTasks(d.tasks); if (d.stages) setStages(d.stages); }).catch(() => setTasks([]));
     getStaff().then((d) => setStaff(d.staff)).catch(() => {});
   }
   function loadSetup() {
     getTaskSetup().then((d) => { setRequiredFields(new Set(d.required_fields ?? [])); setCustomFields(d.custom_fields ?? []); }).catch(() => {});
   }
+  function reloadStages() {
+    getTaskStages().then((d) => setStages(d.stages)).catch(() => {});
+  }
   useEffect(() => { load(); loadSetup(); }, []);
+
+  // Derived stage data: board columns, the set of "done" keys, and the keys
+  // used to default a new task / toggle completion.
+  const columns = useMemo(() => toColumns(stages), [stages]);
+  const doneKeys = useMemo(() => new Set(stages.filter((s) => s.is_done).map((s) => s.key)), [stages]);
+  const statusOptions = useMemo<SelectOption[]>(() => stages.map((s) => ({ value: s.key, label: s.name })), [stages]);
+  const firstStageKey = stages[0]?.key ?? "open";
+  const doneStageKey = stages.find((s) => s.is_done)?.key ?? "done";
 
   const summary = useMemo(() => {
     const t = tasks ?? [];
@@ -304,7 +342,7 @@ export default function TasksPage() {
     setErrors({});
     setDraft({ id: t.id, title: t.title, description: t.description ?? "", assigned_to: t.assigned_to ? String(t.assigned_to) : "", start_date: t.start_date ? t.start_date.slice(0, 10) : "", due_date: t.due_date ? t.due_date.slice(0, 10) : "", priority: t.priority, type: t.type || "task", status: t.status, custom: { ...(t.custom_fields ?? {}) } });
   }
-  function newDraft() { setErrors({}); setDraft({ ...blank, custom: {} }); }
+  function newDraft() { setErrors({}); setDraft({ ...blank, status: firstStageKey, custom: {} }); }
 
   // ---- detail drawer ----
   function openDetail(t: Task) {
@@ -351,7 +389,7 @@ export default function TasksPage() {
     { label: "Bugs", value: summary.bugs, tone: "text-rose-600" },
   ];
 
-  const detailTb = detail ? timeBar(detail) : null;
+  const detailTb = detail ? timeBar(detail, doneKeys) : null;
 
   return (
     <>
@@ -360,6 +398,12 @@ export default function TasksPage() {
         subtitle="Assign, track and complete work across your team"
         action={
           <div className="flex items-center gap-2">
+            {canManageFields && (
+              <button onClick={() => setStageMgrOpen(true)} title="Manage board stages" className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="5" height="16" rx="1" /><rect x="17" y="4" width="4" height="16" rx="1" /></svg>
+                Stages
+              </button>
+            )}
             {canManageFields && (
               <button onClick={() => setSetupOpen(true)} title="Configure task form fields" className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M10.3 4.3a2 2 0 013.4 0l.5.9 1-.2a2 2 0 012.4 2.4l-.2 1 .9.5a2 2 0 010 3.4l-.9.5.2 1a2 2 0 01-2.4 2.4l-1-.2-.5.9a2 2 0 01-3.4 0l-.5-.9-1 .2a2 2 0 01-2.4-2.4l.2-1-.9-.5a2 2 0 010-3.4l.9-.5-.2-1a2 2 0 012.4-2.4l1 .2z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
@@ -412,15 +456,15 @@ export default function TasksPage() {
             <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
             Board View
           </div>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {COLUMNS.map((col) => {
+          <div className="flex gap-4 overflow-x-auto pb-2">
+            {columns.map((col) => {
               const items = filtered.filter((t) => t.status === col.key);
               return (
                 <div
                   key={col.key}
                   onDragOver={(e) => { e.preventDefault(); }}
                   onDrop={() => { const t = (tasks ?? []).find((x) => x.id === dragId); if (t) changeStatus(t, col.key); setDragId(null); }}
-                  className="flex flex-col"
+                  className="flex w-[300px] flex-shrink-0 flex-col"
                 >
                   <div className={`mb-3 flex items-center justify-between rounded-xl px-4 py-3 ${col.head}`}>
                     <div className="flex items-center gap-2">
@@ -431,9 +475,9 @@ export default function TasksPage() {
                   </div>
                   <div className="flex min-h-[80px] flex-col gap-3">
                     {items.map((t) => {
-                      const due = cardDue(t);
+                      const due = cardDue(t, doneKeys);
                       const tm = typeMeta(t.type);
-                      const tb = timeBar(t);
+                      const tb = timeBar(t, doneKeys);
                       return (
                         <div
                           key={t.id}
@@ -441,7 +485,7 @@ export default function TasksPage() {
                           onDragStart={() => setDragId(t.id)}
                           onDragEnd={() => setDragId(null)}
                           onClick={() => openDetail(t)}
-                          className={`group cursor-pointer rounded-xl border bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${isOverdue(t) ? "border-red-200" : "border-slate-200"}`}
+                          className={`group cursor-pointer rounded-xl border bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${isOverdue(t, doneKeys) ? "border-red-200" : "border-slate-200"}`}
                         >
                           <div className="mb-2 flex flex-wrap items-center gap-1.5">
                             <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${tm.cls}`}>
@@ -450,7 +494,7 @@ export default function TasksPage() {
                             </span>
                             <span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold capitalize ${priorityTone[t.priority] ?? priorityTone.medium}`}>{t.priority}</span>
                           </div>
-                          <h4 className={`text-[15px] font-semibold leading-snug ${t.status === "done" ? "text-slate-400 line-through" : "text-slate-900"}`}>{t.title}</h4>
+                          <h4 className={`text-[15px] font-semibold leading-snug ${isDoneTask(t, doneKeys) ? "text-slate-400 line-through" : "text-slate-900"}`}>{t.title}</h4>
                           {stripHtml(t.description ?? "") && <p className="mt-1.5 line-clamp-2 text-[13px] leading-relaxed text-slate-500">{stripHtml(t.description ?? "")}</p>}
                           {tb && (
                             <div className="mt-3">
@@ -503,10 +547,12 @@ export default function TasksPage() {
       ) : (
         <ListView
           tasks={filtered}
+          columns={columns}
+          doneKeys={doneKeys}
           listStatus={listStatus}
           setListStatus={setListStatus}
           onOpen={openDetail}
-          onToggle={(t) => changeStatus(t, t.status === "done" ? "open" : "done")}
+          onToggle={(t) => changeStatus(t, isDoneTask(t, doneKeys) ? firstStageKey : doneStageKey)}
           onDelete={remove}
         />
       )}
@@ -594,7 +640,7 @@ export default function TasksPage() {
                 <SearchSelect ariaLabel="Assignee" value={draft.assigned_to} onChange={(v) => setDraft({ ...draft, assigned_to: v })} options={assigneeFormOpts} placeholder="Unassigned" searchPlaceholder="Search team…" className={errCls("assigned_to")} />
               </label>
               <label className="text-sm"><span className="mb-1 block font-medium text-slate-600">Status</span>
-                <SearchSelect ariaLabel="Status" value={draft.status} onChange={(v) => setDraft({ ...draft, status: v })} options={STATUS_OPTIONS} placeholder="— Select —" searchPlaceholder="Search…" />
+                <SearchSelect ariaLabel="Status" value={draft.status} onChange={(v) => setDraft({ ...draft, status: v })} options={statusOptions} placeholder="— Select —" searchPlaceholder="Search…" />
               </label>
             </div>
 
@@ -672,7 +718,7 @@ export default function TasksPage() {
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Stage</div>
               <div className="flex flex-wrap gap-1.5">
-                {COLUMNS.map((c) => {
+                {columns.map((c) => {
                   const active = detail.status === c.key;
                   return (
                     <button key={c.key} onClick={() => changeStatus(detail, c.key)} className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${active ? `${c.active} text-white` : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>
@@ -699,12 +745,12 @@ export default function TasksPage() {
             {/* Meta */}
             <dl className="grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4 text-sm">
               <div><dt className="text-slate-400">Start date</dt><dd className="mt-0.5 font-medium text-slate-800">{detail.start_date ? fmtDate(detail.start_date) : "—"}</dd></div>
-              <div><dt className="text-slate-400">Due date</dt><dd className={`mt-0.5 font-medium ${isOverdue(detail) ? "text-red-600" : "text-slate-800"}`}>{detail.due_date ? fmtDate(detail.due_date) : "—"}</dd></div>
+              <div><dt className="text-slate-400">Due date</dt><dd className={`mt-0.5 font-medium ${isOverdue(detail, doneKeys) ? "text-red-600" : "text-slate-800"}`}>{detail.due_date ? fmtDate(detail.due_date) : "—"}</dd></div>
               <div><dt className="text-slate-400">Assignee</dt><dd className="mt-0.5 font-medium text-slate-800">{detail.assignee_name || "Unassigned"}</dd></div>
               <div><dt className="text-slate-400">Created</dt><dd className="mt-0.5 font-medium text-slate-800">{fmtDate(detail.created_at)}</dd></div>
               <div><dt className="text-slate-400">Created by</dt><dd className="mt-0.5 font-medium text-slate-800">{detail.created_by_name || "—"}</dd></div>
               <div className="col-span-2"><dt className="text-slate-400">Last updated by</dt><dd className="mt-0.5 font-medium text-slate-800">{detail.updated_by_name || "—"}</dd></div>
-              {detail.status === "done" && detail.completed_at && (
+              {isDoneTask(detail, doneKeys) && detail.completed_at && (
                 <div className="col-span-2"><dt className="text-slate-400">Completed</dt><dd className="mt-0.5 font-medium text-slate-800">{fmtDateTime(detail.completed_at)}
                   {detail.due_date && (
                     <span className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${detail.completed_at.slice(0, 10) <= detail.due_date.slice(0, 10) ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}>
@@ -813,24 +859,23 @@ export default function TasksPage() {
 }
 
 function ListView({
-  tasks, listStatus, setListStatus, onOpen, onToggle, onDelete,
+  tasks, columns, doneKeys, listStatus, setListStatus, onOpen, onToggle, onDelete,
 }: {
   tasks: Task[];
-  listStatus: "all" | "open" | "in_progress" | "in_review" | "done" | "overdue";
-  setListStatus: (v: "all" | "open" | "in_progress" | "in_review" | "done" | "overdue") => void;
+  columns: StageColumn[];
+  doneKeys: Set<string>;
+  listStatus: string;
+  setListStatus: (v: string) => void;
   onOpen: (t: Task) => void;
   onToggle: (t: Task) => void;
   onDelete: (t: Task) => void;
 }) {
   const tabs = [
-    { key: "all" as const, label: "All" },
-    { key: "open" as const, label: "Backlog" },
-    { key: "in_progress" as const, label: "In Progress" },
-    { key: "in_review" as const, label: "In Review" },
-    { key: "done" as const, label: "Done" },
-    { key: "overdue" as const, label: "Overdue" },
+    { key: "all", label: "All" },
+    ...columns.map((c) => ({ key: c.key, label: c.label })),
+    { key: "overdue", label: "Overdue" },
   ];
-  const rows = tasks.filter((t) => listStatus === "all" ? true : listStatus === "overdue" ? isOverdue(t) : t.status === listStatus);
+  const rows = tasks.filter((t) => listStatus === "all" ? true : listStatus === "overdue" ? isOverdue(t, doneKeys) : t.status === listStatus);
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -844,15 +889,16 @@ function ListView({
       ) : (
         <ul className="divide-y divide-slate-100">
           {rows.map((t) => {
-            const due = cardDue(t);
+            const due = cardDue(t, doneKeys);
             const tm = typeMeta(t.type);
+            const done = isDoneTask(t, doneKeys);
             return (
               <li key={t.id} className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50">
-                <button onClick={() => onToggle(t)} className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border-2 ${t.status === "done" ? "border-emerald-500 bg-emerald-500" : "border-slate-300"}`} aria-label="Toggle done">
-                  {t.status === "done" && <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                <button onClick={() => onToggle(t)} className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border-2 ${done ? "border-emerald-500 bg-emerald-500" : "border-slate-300"}`} aria-label="Toggle done">
+                  {done && <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>}
                 </button>
                 <button onClick={() => onOpen(t)} className="min-w-0 flex-1 text-left">
-                  <span className={`block truncate text-sm font-medium ${t.status === "done" ? "text-slate-400 line-through" : "text-slate-800"}`}>{t.title}</span>
+                  <span className={`block truncate text-sm font-medium ${done ? "text-slate-400 line-through" : "text-slate-800"}`}>{t.title}</span>
                   <span className="flex items-center gap-2 text-xs text-slate-400">
                     <span className="capitalize">{t.assignee_name || "Unassigned"}</span>
                     {due && <><span>·</span><span className={due.tone}>{due.text}</span></>}

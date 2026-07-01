@@ -13,8 +13,17 @@ import {
 import { getBranding, getFeatures, getMe, pollReminders, getAnnouncementsUnread, markAllAnnouncementsRead, stopImpersonation, type FeatureMap, type LimitMap, type Perm, type UsageMap } from "../lib/client";
 import { requestNotifyPermission, notifyMessage } from "../lib/notify";
 import { subscribeToPush } from "../lib/push";
-import { DEFAULT_BRANDING, resolvePageSize, type Branding } from "../lib/theme";
+import { DEFAULT_BRANDING, resolvePageSize, resolveLoaderStyle, type Branding, type LoaderStyle } from "../lib/theme";
+import Loader from "../components/Loader";
+import { useMounted } from "../lib/useMounted";
 import ForcePasswordChange from "./ForcePasswordChange";
+
+/** localStorage keys caching the last-known loader style + brand colour, so the
+ *  boot screen shows the client's chosen animation in their brand colour
+ *  immediately — before branding loads (the .client-shell isn't mounted yet, so
+ *  the brand CSS vars aren't applied during boot). */
+const LOADER_CACHE_KEY = "client_loader_style";
+const BRAND_CACHE_KEY = "client_brand_color";
 
 interface ClientUser {
   id: number;
@@ -103,6 +112,25 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
 
   const [branding, setBranding] = useState<Branding>(DEFAULT_BRANDING);
   const [brandingLoaded, setBrandingLoaded] = useState(false);
+  // Loader style to show on the boot screen (before branding loads), seeded from
+  // the cached choice so the chosen animation shows on every reload. Read lazily
+  // (once) from localStorage; the wrapper carries suppressHydrationWarning since
+  // this is a client-only value the server can't know.
+  const [bootLoader] = useState<LoaderStyle>(() =>
+    resolveLoaderStyle(typeof window !== "undefined" ? localStorage.getItem(LOADER_CACHE_KEY) : null),
+  );
+  const [bootBrand] = useState<string>(() =>
+    (typeof window !== "undefined" && localStorage.getItem(BRAND_CACHE_KEY)) || DEFAULT_BRANDING.brand_color,
+  );
+  // Whether a brand colour was cached. When it wasn't (first-ever load), we hold
+  // the boot loader back until branding loads rather than flash the default
+  // colour — so the loader is *always* shown in the tenant's theme colour.
+  const [bootBrandCached] = useState<boolean>(() =>
+    typeof window !== "undefined" && !!localStorage.getItem(BRAND_CACHE_KEY),
+  );
+  // Gate the boot loader until the client knows the chosen style, so the first
+  // loader painted is the selected one (no default-then-selected flash).
+  const mounted = useMounted();
 
   const [permissions, setPermissions] = useState<Record<string, Perm>>({});
   const [isAdmin, setIsAdmin] = useState(true); // assume admin until /me resolves
@@ -141,7 +169,16 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
   // Load the client's branding/appearance config once (themes the whole panel).
   useEffect(() => {
     getBranding()
-      .then((d) => setBranding({ ...DEFAULT_BRANDING, ...d.branding }))
+      .then((d) => {
+        const b = { ...DEFAULT_BRANDING, ...d.branding };
+        setBranding(b);
+        // Cache the chosen loader + brand colour so the next boot screen shows
+        // the right animation in the right colour instantly.
+        try {
+          localStorage.setItem(LOADER_CACHE_KEY, resolveLoaderStyle(b.loader_style));
+          localStorage.setItem(BRAND_CACHE_KEY, b.brand_color);
+        } catch {}
+      })
       .catch(() => {})
       .finally(() => setBrandingLoaded(true));
   }, []);
@@ -321,7 +358,13 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
         exitImpersonation,
         branding,
         brandingLoaded,
-        updateBranding: setBranding,
+        updateBranding: (b: Branding) => {
+          setBranding(b);
+          try {
+            localStorage.setItem(LOADER_CACHE_KEY, resolveLoaderStyle(b.loader_style));
+            localStorage.setItem(BRAND_CACHE_KEY, b.brand_color);
+          } catch {}
+        },
         defaultPageSize: resolvePageSize(branding.default_page_size),
         notifications,
         unread,
@@ -334,11 +377,10 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
       }}
     >
       {!booted ? (
-        <div className="flex min-h-screen items-center justify-center bg-slate-50 text-slate-400">
-          <svg className="h-8 w-8 animate-spin text-emerald-500" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
-          </svg>
+        <div className="flex min-h-screen items-center justify-center bg-slate-50" style={{ color: brandingLoaded ? branding.brand_color : bootBrand }} suppressHydrationWarning>
+          {mounted && (brandingLoaded || bootBrandCached) && (
+            <Loader variant={brandingLoaded ? branding.loader_style : bootLoader} size={36} />
+          )}
         </div>
       ) : mustChangePassword ? (
         <ForcePasswordChange

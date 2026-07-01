@@ -7,6 +7,9 @@ import { useAdmin } from "./AdminContext";
 import { API_URL } from "../lib/api";
 import type { NotificationItem } from "../lib/admin";
 import { timeAgo } from "../lib/datetime";
+import Loader from "../components/Loader";
+import { useAdminLoader } from "../lib/adminPrefs";
+import { LOADER_STYLE_OPTIONS } from "../lib/theme";
 
 function useClickOutside(onClose: () => void) {
   const ref = useRef<HTMLDivElement>(null);
@@ -36,6 +39,7 @@ export default function Topbar() {
 
   const notifRef = useClickOutside(() => setNotifOpen(false));
   const profileRef = useClickOutside(() => setProfileOpen(false));
+  const [loaderStyle, setLoaderStyle] = useAdminLoader();
 
   const initials = (user?.name || user?.email || "A").slice(0, 1).toUpperCase();
 
@@ -149,6 +153,26 @@ export default function Topbar() {
                   <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" strokeLinecap="round" strokeLinejoin="round" /></svg>
                   Log out
                 </button>
+              </div>
+
+              {/* Loading animation — saved per browser (no per-admin store). */}
+              <div className="border-t border-slate-100 px-3 py-3">
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Loading animation</div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {LOADER_STYLE_OPTIONS.map((o) => {
+                    const active = loaderStyle === o.value;
+                    return (
+                      <button
+                        key={o.value}
+                        onClick={() => setLoaderStyle(o.value)}
+                        title={o.label}
+                        className={`flex h-11 items-center justify-center rounded-lg border transition ${active ? "border-indigo-500 bg-indigo-50 text-indigo-600 ring-2 ring-indigo-500/20" : "border-slate-200 text-slate-500 hover:border-indigo-300 hover:bg-slate-50"}`}
+                      >
+                        <Loader variant={o.value} size={22} />
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           )}

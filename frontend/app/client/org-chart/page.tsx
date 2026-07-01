@@ -9,10 +9,21 @@ import { PageHeader, Card, SkeletonBlock } from "../../admin/ui";
 export default function OrgChartPage() {
   const toast = useToast();
   const [staff, setStaff] = useState<Staff[] | null>(null);
+  // Zoom so a wide chart can be shrunk to fit one screen; collapsed holds the
+  // ids of managers whose subtree is currently folded away.
+  const [zoom, setZoom] = useState(1);
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     getStaff().then((d) => setStaff(d.staff)).catch(() => { setStaff([]); toast.error("Could not load team."); });
   }, [toast]);
+
+  const toggle = (id: number) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   // Build the reporting tree: childrenOf[managerId] = direct reports.
   const { childrenOf, roots } = useMemo(() => {
@@ -30,6 +41,10 @@ export default function OrgChartPage() {
     }
     return { childrenOf, roots };
   }, [staff]);
+
+  // Ids that have reports (collapsible) and the set of top-level ids.
+  const managerIds = useMemo(() => [...childrenOf.keys()], [childrenOf]);
+  const rootIds = useMemo(() => new Set(roots.map((r) => r.id)), [roots]);
 
   const avatarUrl = (s: Staff) => (s.avatar ? `${API_URL}${s.avatar}` : undefined);
 
@@ -61,10 +76,22 @@ export default function OrgChartPage() {
     if (seen.has(s.id)) return null; // guard against accidental cycles
     const next = new Set(seen).add(s.id);
     const kids = childrenOf.get(s.id) ?? [];
+    const hasKids = kids.length > 0;
+    const isCollapsed = collapsed.has(s.id);
     return (
       <li className="relative flex flex-col items-center">
         <PersonCard s={s} />
-        {kids.length > 0 && (
+        {hasKids && (
+          <button
+            type="button"
+            onClick={() => toggle(s.id)}
+            title={isCollapsed ? `Expand ${kids.length} report${kids.length > 1 ? "s" : ""}` : "Collapse"}
+            className="relative z-10 -mt-2 flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-xs font-bold leading-none text-slate-500 shadow-sm transition hover:border-emerald-400 hover:text-emerald-600"
+          >
+            {isCollapsed ? "+" : "–"}
+          </button>
+        )}
+        {hasKids && !isCollapsed && (
           <>
             <div className="h-6 w-px bg-slate-300" />
             <ul className="flex items-start">
@@ -97,17 +124,32 @@ export default function OrgChartPage() {
         <Card><div className="py-12 text-center text-sm text-slate-400">No team members yet. Add staff and set their reporting person to see the hierarchy.</div></Card>
       ) : (
         <Card>
-          <div className="mb-4 flex flex-wrap gap-4 text-sm text-slate-500">
-            <span><b className="text-slate-800">{staff.length}</b> people</span>
-            <span><b className="text-slate-800">{roots.length}</b> top-level</span>
-            <span><b className="text-slate-800">{staff.filter((s) => (childrenOf.get(s.id)?.length ?? 0) > 0).length}</b> managers</span>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-4 text-sm text-slate-500">
+              <span><b className="text-slate-800">{staff.length}</b> people</span>
+              <span><b className="text-slate-800">{roots.length}</b> top-level</span>
+              <span><b className="text-slate-800">{managerIds.length}</b> managers</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Fold/unfold every manager's subtree (roots stay visible). */}
+              <button onClick={() => setCollapsed(new Set(managerIds.filter((id) => !rootIds.has(id))))} className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Collapse all</button>
+              <button onClick={() => setCollapsed(new Set())} className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Expand all</button>
+              {/* Zoom so the whole chart fits one screen. */}
+              <div className="flex items-center overflow-hidden rounded-lg border border-slate-300">
+                <button onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))} className="px-2.5 py-1.5 text-sm font-bold text-slate-600 hover:bg-slate-50" title="Zoom out" aria-label="Zoom out">−</button>
+                <button onClick={() => setZoom(1)} className="border-x border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 tabular-nums" title="Reset zoom">{Math.round(zoom * 100)}%</button>
+                <button onClick={() => setZoom((z) => Math.min(1.5, +(z + 0.1).toFixed(2)))} className="px-2.5 py-1.5 text-sm font-bold text-slate-600 hover:bg-slate-50" title="Zoom in" aria-label="Zoom in">+</button>
+              </div>
+            </div>
           </div>
-          <div className="overflow-x-auto pb-4">
-            <ul className="flex min-w-max items-start justify-center gap-8 px-2 pt-2">
-              {roots.map((r) => (
-                <Node key={r.id} s={r} seen={new Set()} />
-              ))}
-            </ul>
+          <div className="overflow-auto pb-4">
+            <div style={{ zoom } as React.CSSProperties} className="w-max min-w-full">
+              <ul className="flex min-w-max items-start justify-center gap-8 px-2 pt-2">
+                {roots.map((r) => (
+                  <Node key={r.id} s={r} seen={new Set()} />
+                ))}
+              </ul>
+            </div>
           </div>
         </Card>
       )}
