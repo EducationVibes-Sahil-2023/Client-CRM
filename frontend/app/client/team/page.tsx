@@ -631,7 +631,7 @@ export default function TeamPage() {
                   <input className={`${inputCls()} cursor-not-allowed bg-slate-50 text-slate-500`} value={draft.id ? draft.emp_code : "Auto-generated on save"} readOnly disabled />
                 </FieldRow>
                 <FieldRow label="Email" required error={errors.email} hint="Used to sign in to the staff panel.">
-                  <input className={inputCls(errors.email)} placeholder="jane@company.com" value={draft.email} onChange={(e) => set("email")(e.target.value)} />
+                  <input className={inputCls(errors.email)} placeholder="jane@company.com" value={draft.email} onChange={(e) => set("email")(e.target.value)} autoComplete="off" />
                 </FieldRow>
                 <FieldRow label="Phone" error={errors.phone}>
                   <input className={inputCls(errors.phone)} placeholder="+91 98765 43210" value={draft.phone} onChange={(e) => set("phone")(e.target.value)} />
@@ -647,7 +647,7 @@ export default function TeamPage() {
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Work</h4>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <FieldRow label="Designation" hint="Job title, e.g. Senior Sales Executive." full>
-                  <input className={inputCls()} placeholder="e.g. Sales Manager" value={draft.designation} onChange={(e) => set("designation")(e.target.value)} />
+                  <input className={inputCls()} placeholder="e.g. Sales Manager" value={draft.designation} onChange={(e) => set("designation")(e.target.value)} autoComplete="off" />
                 </FieldRow>
                 <FieldRow label="Role (base permissions)">
                   <SearchSelect ariaLabel="Role" value={draft.role_id} onChange={onRoleChange} placeholder="— Select —" searchPlaceholder="Search roles…"
@@ -704,7 +704,7 @@ export default function TeamPage() {
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Login</h4>
               <FieldRow label="Password" required={!draft.id} error={errors.password} hint={draft.id ? "Leave blank to keep the current password." : "Minimum 8 characters."}>
                 <div className="relative">
-                  <input type={showPwd ? "text" : "password"} className={`${inputCls(errors.password)} pr-10`} placeholder={draft.id ? "••••••••" : "Login password"} value={draft.password} onChange={(e) => set("password")(e.target.value)} />
+                  <input type={showPwd ? "text" : "password"} className={`${inputCls(errors.password)} pr-10`} placeholder={draft.id ? "••••••••" : "Login password"} value={draft.password} onChange={(e) => set("password")(e.target.value)} autoComplete="new-password" />
                   <button type="button" onClick={() => setShowPwd((s) => !s)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-600" title={showPwd ? "Hide" : "Show"}>
                     {showPwd ? (
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8M9.9 5.1A9.5 9.5 0 0112 5c6 0 10 7 10 7a17 17 0 01-3.2 3.9M6.2 6.2A17 17 0 002 12s4 7 10 7a9.5 9.5 0 003.9-.8" strokeLinecap="round" strokeLinejoin="round" /></svg>

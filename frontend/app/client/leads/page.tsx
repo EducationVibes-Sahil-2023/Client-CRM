@@ -25,7 +25,7 @@ import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterR
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../../admin/ui";
-import { DataTable, IconButton, sortRows, type Column, type SortState } from "../../admin/DataTable";
+import { DataTable, IconButton, type Column, type SortState } from "../../admin/DataTable";
 import { DonutSelect } from "../../admin/Charts";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
@@ -353,8 +353,9 @@ export default function ClientLeads() {
   const [applying, setApplying] = useState(false);
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [page, setPage] = useState(1);
-  // Active column sort (admin default + user header clicks), reported by the
-  // DataTable so we can sort the whole filtered set before paginating.
+  // Active column sort (admin whole-team default + user header clicks), reported
+  // by the DataTable. Sorting is done in SQL: the key+dir are sent to getLeads so
+  // the query returns rows already ordered.
   const [tableSort, setTableSort] = useState<SortState>(null);
   const [perPage, setPerPage] = useState(defaultPageSize);
   const filterPrefs = useHiddenPrefs("leads_filters");
@@ -398,7 +399,9 @@ export default function ClientLeads() {
   const [iAssignees, setIAssignees] = useState<string[]>([]);
   const [iNotify, setINotify] = useState(true);
 
-  const load = useCallback(() => {
+  // Plain function (not memoised) so it always reads the current sort/tableSort
+  // when called from a mutation handler; the mount effect calls it once.
+  const load = () => {
     // The summary counts load in parallel and refresh after any change.
     getLeadAnalytics().then(setAnalytics).catch(() => {});
     // Reference data (setup) and the staff directory are best-effort: a user who
@@ -406,7 +409,7 @@ export default function ClientLeads() {
     // with fewer filter/assignee options — instead of the whole page failing.
     const setupP = getLeadsSetup().catch(() => null);
     const staffP = getStaff().catch(() => null);
-    return getLeads()
+    return getLeads(tableSort?.key, tableSort?.dir)
       .then(async (l) => {
         setLeads(l.leads ?? []);
         const setup = await setupP;
@@ -424,8 +427,18 @@ export default function ClientLeads() {
       })
       .catch(() => toast.error("Could not load leads."))
       .finally(() => setLoading(false));
-  }, [toast]);
-  useEffect(() => { load(); }, [load]);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, []);
+  // Re-fetch leads (only) whenever the active sort changes — the ORDER BY runs in
+  // SQL. Skips the very first run since load() already did the initial fetch.
+  const firstLeadFetch = useRef(true);
+  useEffect(() => {
+    if (firstLeadFetch.current) { firstLeadFetch.current = false; return; }
+    getLeads(tableSort?.key, tableSort?.dir)
+      .then((l) => setLeads(l.leads ?? []))
+      .catch(() => toast.error("Could not load leads."));
+  }, [tableSort, toast]);
   useEffect(() => { getMe().then((m) => setIsAdmin(!!m.is_admin)).catch(() => {}); }, []);
   // Admin-defined custom fields for the lead form (Form Setup).
   useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
@@ -1188,10 +1201,10 @@ export default function ClientLeads() {
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
 
-  // Sort the whole filtered set by the active column, then paginate. Using
-  // allColumns (not just the visible ones) so a sort key stays valid even if
-  // its column is hidden. Clamp the page so a shrinking set never strands it.
-  const sortedFiltered = useMemo(() => sortRows(filtered, allColumns, tableSort), [filtered, allColumns, tableSort]);
+  // `filtered` already arrives in the SQL ORDER BY order (Array.filter keeps
+  // order), so we just paginate it. Clamp the page so a shrinking set never
+  // strands it.
+  const sortedFiltered = filtered;
   const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / perPage));
   const safePage = Math.min(page, totalPages);
   const pageRows = useMemo(() => sortedFiltered.slice((safePage - 1) * perPage, safePage * perPage), [sortedFiltered, safePage, perPage]);
@@ -1453,6 +1466,7 @@ export default function ClientLeads() {
         emptyTitle={activeFilters ? "No matching leads" : "No leads yet"}
         emptyHint={activeFilters ? "Try clearing or widening your filters." : "Add your first lead or import a CSV file."}
         onRowClick={(l) => openView(l)}
+        serverSorted
         onSortChange={(s) => { setTableSort(s); setPage(1); }}
         page={safePage}
         totalPages={totalPages}

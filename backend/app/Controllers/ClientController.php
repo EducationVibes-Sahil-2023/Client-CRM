@@ -1755,7 +1755,40 @@ class ClientController extends ApiController
     // sub-status is a status with a parent_id); assigned_to points at staff.
     // Deletes are soft (the frontend confirms first).
 
-    /** GET /client/leads — this client's leads, newest first, name-decorated. */
+    /**
+     * Resolve a client-supplied sort key + direction into a safe [column, dir]
+     * for the leads ORDER BY. Only whitelisted columns are allowed; name-based
+     * columns (status/source/type/assignee) sort by their underlying id, and
+     * computed columns (last call, follow flag) fall back to id. Anything
+     * unknown → newest-first (id DESC).
+     */
+    private function leadSortColumn($sort, $dir): array
+    {
+        $map = [
+            'name'           => 'name',
+            'phone'          => 'phone',
+            'alt_phone'      => 'alt_phone',
+            'email'          => 'email',
+            'city'           => 'city',
+            'state'          => 'state',
+            'assigned_date'  => 'assigned_date',
+            'created_date'   => 'created_at',
+            'follow_date'    => 'follow_date',
+            'updated_at'     => 'updated_at',
+            'status'         => 'status_id',
+            'sub_status'     => 'sub_status_id',
+            'source'         => 'source_id',
+            'lead_type'      => 'lead_type_id',
+            'assigned'       => 'assigned_to',
+            'reference_name' => 'reference_name',
+        ];
+        $col = $map[(string) $sort] ?? 'id';
+        $dir = strtolower((string) $dir) === 'asc' ? 'ASC' : 'DESC';
+
+        return [$col, $dir];
+    }
+
+    /** GET /client/leads — this client's leads, ordered per the request, name-decorated. */
     public function leads()
     {
         if ($resp = $this->requirePermission('leads')) {
@@ -1770,7 +1803,15 @@ class ClientController extends ApiController
         // Staff see only the leads in their visibility scope — reference "agents"
         // see only their reference's leads; everyone else, their assigned leads.
         $this->applyLeadScope($q);
-        $rows = $q->orderBy('id', 'DESC')->findAll();
+
+        // Server-side ordering — driven by the admin's whole-team default sort
+        // and per-column asc/desc header toggles (sort=<column>&dir=asc|desc).
+        [$col, $dir] = $this->leadSortColumn($this->request->getGet('sort'), $this->request->getGet('dir'));
+        $q->orderBy($col, $dir);
+        if ($col !== 'id') {
+            $q->orderBy('id', 'DESC'); // stable tiebreak so equal keys keep a fixed order
+        }
+        $rows = $q->findAll();
 
         $statusNames = $this->idNameMap($this->lookupRows(LeadStatusModel::class, $cid));
         $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());

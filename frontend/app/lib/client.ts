@@ -521,7 +521,13 @@ export interface LeadAnalytics {
   by_conversion: LeadCount[];
 }
 
-export const getLeads = () => clientGet<{ leads: Lead[] }>("/leads");
+export const getLeads = (sort?: string | null, dir?: "asc" | "desc" | null) => {
+  const q = new URLSearchParams();
+  if (sort) q.set("sort", sort);
+  if (dir) q.set("dir", dir);
+  const qs = q.toString();
+  return clientGet<{ leads: Lead[] }>(`/leads${qs ? `?${qs}` : ""}`);
+};
 export const getLeadAnalytics = () => clientGet<LeadAnalytics>("/lead-analytics");
 export const createLead = (b: Record<string, unknown>) => clientPost("/leads", b);
 export const updateLead = (id: number, b: Record<string, unknown>) => clientPost(`/leads/${id}`, b);

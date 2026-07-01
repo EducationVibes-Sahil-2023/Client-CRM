@@ -76,6 +76,10 @@ interface DataTableProps<T> {
   /** Fired with the active client-side sort (self-contained mode) so a page
    *  that slices rows itself can sort the full dataset the same way. */
   onSortChange?: (sort: SortState) => void;
+  /** The incoming `rows` are already sorted (e.g. the page sorts in SQL from the
+   *  onSortChange key). Keeps admin-config sortability + asc/desc reporting but
+   *  skips DataTable's own client-side re-sort so the server order is preserved. */
+  serverSorted?: boolean;
   rowActions?: (row: T) => RowAction<T>[];
   quickActions?: (row: T) => React.ReactNode;
   onRowClick?: (row: T) => void;
@@ -148,6 +152,7 @@ export function DataTable<T>({
   sort,
   onSort,
   onSortChange,
+  serverSorted,
   rowActions,
   quickActions,
   onRowClick,
@@ -247,8 +252,8 @@ export function DataTable<T>({
   // Client-side sort (self-contained mode only — controlled tables arrive
   // already ordered from the page). Sorts the whole filtered set before paging.
   const visible = useMemo(
-    () => (controlledSort ? searched : sortRows(searched, cols, effectiveSort)),
-    [searched, controlledSort, effectiveSort, cols],
+    () => (controlledSort || serverSorted ? searched : sortRows(searched, cols, effectiveSort)),
+    [searched, controlledSort, serverSorted, effectiveSort, cols],
   );
 
   // Report the active sort so pages that own their pagination (slice rows before
