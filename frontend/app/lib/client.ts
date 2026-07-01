@@ -116,6 +116,13 @@ export interface Department {
   enabled: number | boolean;
 }
 
+/** One weekday's working window (index 0 = Sunday … 6 = Saturday). */
+export interface WorkingHoursDay {
+  off: boolean;
+  open: string;  // "HH:MM"
+  close: string; // "HH:MM"
+}
+
 export interface OfficeLocation {
   id: number;
   name: string;
@@ -126,9 +133,25 @@ export interface OfficeLocation {
   latitude: string | null;
   longitude: string | null;
   map_url: string | null;
+  /** Weekly schedule (7 entries, Sun→Sat) driving the first-response SLA. */
+  working_hours?: WorkingHoursDay[];
   sequence: number;
   enabled: number | boolean;
 }
+
+export interface Holiday {
+  id: number;
+  office_location_id: number | null; // null = all offices
+  office_name: string | null;
+  holiday_date: string;              // YYYY-MM-DD
+  name: string;
+}
+
+export const getHolidays = (year?: number) =>
+  clientGet<{ holidays: Holiday[]; year: number; years: number[] }>(`/holidays${year ? `?year=${year}` : ""}`);
+export const createHoliday = (b: Record<string, unknown>) => clientPost("/holidays", b);
+export const updateHoliday = (id: number, b: Record<string, unknown>) => clientPost(`/holidays/${id}`, b);
+export const deleteHoliday = (id: number) => clientPost(`/holidays/${id}/delete`);
 
 export interface Asset {
   id: number;
@@ -228,8 +251,14 @@ export interface Lead {
    * green), or null when the lead has no follow-up date.
    */
   follow_flag: "upcoming" | "overdue" | "done" | null;
-  /** Latest connected (answered) call to this lead's phone, or null if none. */
+  /** Latest call of any status to this lead's phone (connected or not), or null. */
   last_call_at?: string | null;
+  /** Latest connected (answered) call to this lead's phone, or null if none. */
+  last_connected_at?: string | null;
+  /** First-response SLA: working seconds from assignment → first connected call
+   *  by the assigned user (10 = off-day credit), or null if not yet responded. */
+  first_response_seconds?: number | string | null;
+  first_response_at?: string | null;
   custom_fields?: Record<string, string>;
 }
 

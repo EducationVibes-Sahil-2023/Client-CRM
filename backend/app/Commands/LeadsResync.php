@@ -25,6 +25,11 @@ use CodeIgniter\Database\BaseConnection;
  *                          follow_date on a lead with no reminders is preserved.
  *   - leads.reference_id → linked from the lead's reference_name to the matching
  *                          Reference row (the reference feature keys off the id).
+ *   - calls.lead_id      → linked from the call's `contact` phone to the matching
+ *                          lead (imported calls often carry only the phone).
+ *   - leads.updated_at   → bumped to the newest activity on the lead: MAX of its
+ *                          latest note, latest reminder and latest call (matched by
+ *                          phone). So "Last updated" reflects manual/imported work.
  */
 class LeadsResync extends BaseCommand
 {
@@ -63,6 +68,9 @@ class LeadsResync extends BaseCommand
             }
             $this->syncFollowDates($db, $dryRun);
             $this->backfillReferenceIds($db, $dryRun);
+            $this->backfillCallLeadIds($db, $dryRun);
+            $this->recomputeUpdatedAt($db, $dryRun);
+            $this->stampFirstResponse($db, (int) $c['id'], $dryRun);
         }
 
         CLI::write($dryRun ? 'Dry run complete.' : 'Resync complete.', 'green');
@@ -136,5 +144,89 @@ class LeadsResync extends BaseCommand
                   AND l.reference_name IS NOT NULL AND TRIM(l.reference_name) <> ''");
         }
         CLI::write("  • reference_id: {$pending} lead(s) " . ($dryRun ? 'would be linked' : 'linked'), 'green');
+    }
+
+    /** First-response SLA (assignment → first connected call by the assigned user). */
+    private function stampFirstResponse(BaseConnection $db, int $clientId, bool $dryRun): void
+    {
+        if ($dryRun) {
+            CLI::write('  • first_response: skipped (dry run)', 'dark_gray');
+
+            return;
+        }
+        $n = \App\Libraries\FirstResponseService::recompute($db, $clientId);
+        CLI::write("  • first_response: {$n} lead(s) stamped", 'green');
+    }
+
+    /** calls.lead_id linked from the call's contact phone → the matching lead. */
+    private function backfillCallLeadIds(BaseConnection $db, bool $dryRun): void
+    {
+        if (! $db->tableExists('calls') || ! $db->tableExists('leads')) {
+            return;
+        }
+
+        $sql = "
+            FROM `calls` c
+            JOIN `leads` l ON l.phone = c.contact AND l.deleted_at IS NULL
+            WHERE c.deleted_at IS NULL
+              AND (c.lead_id IS NULL OR c.lead_id = 0)
+              AND c.contact IS NOT NULL AND TRIM(c.contact) <> ''";
+
+        $pending = (int) ($db->query("SELECT COUNT(*) AS n {$sql}")->getRow()->n ?? 0);
+        if ($pending === 0) {
+            CLI::write('  • calls.lead_id: already linked', 'dark_gray');
+
+            return;
+        }
+        if (! $dryRun) {
+            $db->query("UPDATE `calls` c
+                JOIN `leads` l ON l.phone = c.contact AND l.deleted_at IS NULL
+                SET c.lead_id = l.id
+                WHERE c.deleted_at IS NULL AND (c.lead_id IS NULL OR c.lead_id = 0)
+                  AND c.contact IS NOT NULL AND TRIM(c.contact) <> ''");
+        }
+        CLI::write("  • calls.lead_id: {$pending} call(s) " . ($dryRun ? 'would be linked' : 'linked'), 'green');
+    }
+
+    /**
+     * leads.updated_at = the newest activity on the lead: MAX of its latest note
+     * (created_at), latest reminder (created_at) and latest call (call_start,
+     * matched by phone — any call, connected or not). Never moves backwards.
+     */
+    private function recomputeUpdatedAt(BaseConnection $db, bool $dryRun): void
+    {
+        if (! $db->tableExists('leads')) {
+            return;
+        }
+        $floor = "'1000-01-01 00:00:00'";
+        $joins = '';
+        $terms = ["COALESCE(l.updated_at, l.created_at, {$floor})"];
+
+        if ($db->tableExists('lead_notes')) {
+            $joins   .= ' LEFT JOIN (SELECT lead_id, MAX(created_at) m FROM `lead_notes` WHERE deleted_at IS NULL GROUP BY lead_id) n ON n.lead_id = l.id';
+            $terms[] = "COALESCE(n.m, {$floor})";
+        }
+        if ($db->tableExists('lead_reminders')) {
+            $joins   .= ' LEFT JOIN (SELECT lead_id, MAX(created_at) m FROM `lead_reminders` WHERE deleted_at IS NULL GROUP BY lead_id) r ON r.lead_id = l.id';
+            $terms[] = "COALESCE(r.m, {$floor})";
+        }
+        if ($db->tableExists('calls')) {
+            $joins   .= " LEFT JOIN (SELECT contact, MAX(call_start) m FROM `calls` WHERE deleted_at IS NULL AND contact IS NOT NULL AND TRIM(contact) <> '' GROUP BY contact) c ON c.contact = l.phone";
+            $terms[] = "COALESCE(c.m, {$floor})";
+        }
+
+        $greatest = 'GREATEST(' . implode(', ', $terms) . ')';
+        $where    = "WHERE l.deleted_at IS NULL AND {$greatest} <> COALESCE(l.updated_at, {$floor})";
+
+        $pending = (int) ($db->query("SELECT COUNT(*) AS n FROM `leads` l {$joins} {$where}")->getRow()->n ?? 0);
+        if ($pending === 0) {
+            CLI::write('  • updated_at: already current', 'dark_gray');
+
+            return;
+        }
+        if (! $dryRun) {
+            $db->query("UPDATE `leads` l {$joins} SET l.updated_at = {$greatest} {$where}");
+        }
+        CLI::write("  • updated_at: {$pending} lead(s) " . ($dryRun ? 'would be updated' : 'updated'), 'green');
     }
 }

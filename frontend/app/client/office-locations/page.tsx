@@ -8,14 +8,28 @@ import {
   deleteOfficeLocation,
   restoreOfficeLocation,
   type OfficeLocation,
+  type WorkingHoursDay,
 } from "../../lib/client";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { useClient } from "../ClientContext";
 import { Drawer, PageHeader } from "../../admin/ui";
 import { DataTable, EntityCard, IconButton, type Column } from "../../admin/DataTable";
+import HolidaysPanel from "./HolidaysPanel";
 
 const field = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
+
+// Weekly schedule: array index 0 = Sunday … 6 = Saturday. Displayed Mon→Sun.
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+const defaultHours = (): WorkingHoursDay[] =>
+  Array.from({ length: 7 }, (_, d) => ({ off: d === 0, open: "10:00", close: "19:00" }));
+const summariseHours = (wh?: WorkingHoursDay[]): string => {
+  if (!wh || wh.length !== 7) return "Not set";
+  const on = DAY_ORDER.filter((d) => !wh[d].off);
+  if (on.length === 0) return "Closed all week";
+  return `${on.map((d) => DAY_LABELS[d]).join(", ")} · ${wh[on[0]].open}–${wh[on[0]].close}`;
+};
 
 interface Draft {
   id?: number;
@@ -27,13 +41,15 @@ interface Draft {
   latitude: string;
   longitude: string;
   map_url: string;
+  working_hours: WorkingHoursDay[];
 }
-const blank: Draft = { name: "", address: "", city: "", pincode: "", phone: "", latitude: "", longitude: "", map_url: "" };
+const blank: Draft = { name: "", address: "", city: "", pincode: "", phone: "", latitude: "", longitude: "", map_url: "", working_hours: defaultHours() };
 
 function toDraft(o: OfficeLocation): Draft {
   return {
     id: o.id, name: o.name, address: o.address ?? "", city: o.city ?? "", pincode: o.pincode ?? "",
     phone: o.phone ?? "", latitude: o.latitude ?? "", longitude: o.longitude ?? "", map_url: o.map_url ?? "",
+    working_hours: (o.working_hours && o.working_hours.length === 7) ? o.working_hours.map((h) => ({ ...h })) : defaultHours(),
   };
 }
 
@@ -59,6 +75,7 @@ export default function OfficeLocationsPage() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [selected, setSelected] = useState<OfficeLocation | null>(null);
   const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<"offices" | "holidays">("offices");
 
   const load = useCallback(() => {
     return getOfficeLocations()
@@ -89,6 +106,7 @@ export default function OfficeLocationsPage() {
         latitude: draft.latitude.trim() === "" ? null : draft.latitude.trim(),
         longitude: draft.longitude.trim() === "" ? null : draft.longitude.trim(),
         map_url: draft.map_url,
+        working_hours: draft.working_hours,
       };
       if (draft.id) { await updateOfficeLocation(draft.id, body); toast.success("Office updated."); }
       else { await createOfficeLocation(body); toast.success("Office added."); }
@@ -130,14 +148,16 @@ export default function OfficeLocationsPage() {
     { key: "address", header: "Address", render: (o) => <span className="text-slate-600">{o.address || "—"}</span> },
     { key: "city", header: "City", render: (o) => <span className="text-slate-600">{o.city || "—"}</span> },
     { key: "phone", header: "Phone", render: (o) => <span className="whitespace-nowrap text-slate-600">{o.phone || "—"}</span> },
+    { key: "hours", header: "Working hours", render: (o) => <span className="text-xs text-slate-500">{summariseHours(o.working_hours)}</span> },
   ];
 
   return (
     <>
       <PageHeader
         title="Office Locations"
-        subtitle="Your offices and branches. Archived offices can be restored anytime."
+        subtitle="Offices, their weekly working hours, and the holiday calendar — used for first-response tracking."
         action={
+          tab !== "offices" ? null :
           <div className="flex items-center gap-3">
             {archived.length > 0 && (
               <button onClick={() => setShowArchived((v) => !v)} className="text-sm font-medium text-slate-500 hover:text-slate-700">
@@ -153,6 +173,18 @@ export default function OfficeLocationsPage() {
         }
       />
 
+      <div className="mb-4 inline-flex rounded-xl border border-slate-200 bg-white p-1">
+        {(["offices", "holidays"] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} className={`rounded-lg px-4 py-1.5 text-sm font-medium capitalize transition ${tab === t ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>
+            {t === "offices" ? "Offices & hours" : "Holidays"}
+          </button>
+        ))}
+      </div>
+
+      {tab === "holidays" ? (
+        <HolidaysPanel offices={offices ?? []} canCreate={can("team", "create")} canUpdate={can("team", "update")} canDelete={can("team", "delete")} />
+      ) : (
+      <>
       <DataTable
         tableKey="office_locations"
         canRenameColumns={isAdmin}
@@ -216,6 +248,8 @@ export default function OfficeLocationsPage() {
           </ul>
         </div>
       )}
+      </>
+      )}
 
       {/* Add / edit — right-side drawer */}
       <Drawer
@@ -275,6 +309,32 @@ export default function OfficeLocationsPage() {
                   Open in Google Maps
                 </a>
               )}
+            </section>
+
+            {/* Weekly working hours — drives the first-response SLA. */}
+            <section className="rounded-xl border border-slate-200 p-3">
+              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Working hours</h4>
+              <div className="space-y-1.5">
+                {DAY_ORDER.map((d) => {
+                  const h = draft.working_hours[d];
+                  const setDay = (patch: Partial<WorkingHoursDay>) =>
+                    setDraft((dr) => dr && { ...dr, working_hours: dr.working_hours.map((x, i) => (i === d ? { ...x, ...patch } : x)) });
+                  return (
+                    <div key={d} className="flex items-center gap-2">
+                      <span className="w-10 text-sm font-medium text-slate-600">{DAY_LABELS[d]}</span>
+                      <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                        <input type="checkbox" checked={!h.off} onChange={(e) => setDay({ off: !e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+                        Open
+                      </label>
+                      <input type="time" value={h.open} disabled={h.off} onChange={(e) => setDay({ open: e.target.value })} className={`${field} w-28 py-1 ${h.off ? "opacity-40" : ""}`} />
+                      <span className="text-slate-400">–</span>
+                      <input type="time" value={h.close} disabled={h.off} onChange={(e) => setDay({ close: e.target.value })} className={`${field} w-28 py-1 ${h.off ? "opacity-40" : ""}`} />
+                      {h.off && <span className="text-xs font-medium text-slate-400">Weekly off</span>}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-[11px] text-slate-400">Uncheck a day to mark it a weekly off. First-response time is counted only within these hours (holidays excluded).</p>
             </section>
           </div>
         )}

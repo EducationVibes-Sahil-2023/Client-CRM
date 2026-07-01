@@ -17,6 +17,7 @@ class LeadModel extends TenantModel
         'client_id', 'name', 'phone', 'alt_phone', 'status_id', 'sub_status_id',
         'lead_type_id', 'source_id',
         'reference_id', 'reference_name', 'email', 'assigned_to', 'created_by', 'assigned_date', 'city', 'state',
+        'first_response_seconds', 'first_response_at',
         'follow_date', 'created_date', 'pending_transfer', 'custom_fields',
     ];
 

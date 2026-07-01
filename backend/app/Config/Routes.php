@@ -387,6 +387,11 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->post('office-locations/(:num)', 'ClientController::updateOfficeLocation/$1', ['filter' => 'feature:team']);
     $routes->post('office-locations/(:num)/delete', 'ClientController::deleteOfficeLocation/$1', ['filter' => 'feature:team']);
     $routes->post('office-locations/(:num)/restore', 'ClientController::restoreOfficeLocation/$1', ['filter' => 'feature:team']);
+    // Holidays (year-wise) — feed the first-response SLA
+    $routes->get('holidays', 'ClientController::holidays', ['filter' => 'feature:team']);
+    $routes->post('holidays', 'ClientController::createHoliday', ['filter' => 'feature:team']);
+    $routes->post('holidays/(:num)', 'ClientController::updateHoliday/$1', ['filter' => 'feature:team']);
+    $routes->post('holidays/(:num)/delete', 'ClientController::deleteHoliday/$1', ['filter' => 'feature:team']);
 
     // Asset management (gated by the 'assets' plan feature)
     $routes->group('', ['filter' => 'feature:assets'], static function (RouteCollection $routes) {

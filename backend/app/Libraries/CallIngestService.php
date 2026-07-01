@@ -309,6 +309,29 @@ class CallIngestService
 
         if ($toInsert) {
             $model->insertBatch($toInsert, null, 500); // CI4 chunks internally
+
+            // Reflect the call activity on each matched lead's "Last updated" — bump
+            // updated_at to the newest of (existing, this batch's call for the lead).
+            $leadMaxCall = [];
+            foreach ($toInsert as $c) {
+                $lid = $c['lead_id'];
+                $cs  = $c['call_start'];
+                if ($lid && $cs && (! isset($leadMaxCall[$lid]) || $cs > $leadMaxCall[$lid])) {
+                    $leadMaxCall[$lid] = $cs;
+                }
+            }
+            foreach ($leadMaxCall as $lid => $cs) {
+                $db->table('leads')
+                    ->where('id', (int) $lid)->where('client_id', $clientId)
+                    ->set('updated_at', "GREATEST(COALESCE(updated_at, created_at, '1000-01-01 00:00:00'), " . $db->escape($cs) . ')', false)
+                    ->update();
+            }
+
+            // Stamp first-response for any of those leads that just got their first
+            // connected call from the assigned user (one-time; only unset leads).
+            if ($leadMaxCall) {
+                FirstResponseService::recompute($db, $clientId, array_map('intval', array_keys($leadMaxCall)));
+            }
         }
 
         return ['inserted' => count($toInsert), 'skipped' => $skipped];

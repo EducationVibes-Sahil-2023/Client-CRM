@@ -10,7 +10,7 @@ class OfficeLocationModel extends TenantModel
 {
     protected $table         = 'office_locations';
     protected $primaryKey    = 'id';
-    protected $allowedFields = ['client_id', 'name', 'address', 'city', 'pincode', 'phone', 'latitude', 'longitude', 'map_url', 'sequence', 'enabled'];
+    protected $allowedFields = ['client_id', 'name', 'address', 'city', 'pincode', 'phone', 'latitude', 'longitude', 'map_url', 'working_hours', 'sequence', 'enabled'];
 
     protected $useSoftDeletes = true;
     protected $deletedField   = 'deleted_at';

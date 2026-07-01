@@ -52,6 +52,7 @@ class TenantSchema
         'cities',
         'departments',
         'office_locations',
+        'holidays',
         'settings',
         'user_table_prefs',
         'calls',

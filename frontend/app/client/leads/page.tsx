@@ -205,6 +205,18 @@ function toLocalInput(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+/** Human working-duration, e.g. "47m 29s", "1h 5m", "1d 4h". "—" when unset. */
+function fmtDuration(secs: number | string | null | undefined): string {
+  if (secs === null || secs === undefined || secs === "") return "—";
+  const s = Number(secs);
+  if (Number.isNaN(s) || s < 0) return "—";
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d >= 1) return `${d}d ${h % 24}h`;
+  if (h >= 1) return `${h}h ${m % 60}m`;
+  return `${m}m ${s % 60}s`;
+}
+
 /** Human date+time, e.g. "5 Jun 2026, 3:30 PM". */
 function fmtDateTime(s: string | null | undefined): string {
   if (!s) return "—";
@@ -1178,10 +1190,14 @@ export default function ClientLeads() {
     { key: "city", header: "City", width: 120, render: (l) => l.city ?? dash },
     // Follow-up shows the lead's latest reminder (date over time); blank if none.
     { key: "follow_date", header: "Follow-up", width: 140, sortAccessor: (l) => l.last_reminder_at, render: (l) => stackedDateTime(l.last_reminder_at) },
-    // Latest connected (answered) call to this lead's phone.
+    // Latest call of any status (connected or not) to this lead's phone.
     { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) ?? dash },
+    // Latest connected (answered) call.
+    { key: "last_connected", header: "Last connected", width: 150, sortAccessor: (l) => l.last_connected_at ?? null, render: (l) => stackedDateTime(l.last_connected_at) ?? dash },
     // Follow-up status flag (orange upcoming / red overdue / green done), server-computed.
     { key: "follow_flag", header: "Follow-up status", width: 150, render: (l) => followFlagBadge(l.follow_flag) ?? dash },
+    // First-response SLA: working time from assignment → first connected call by the assigned user.
+    { key: "first_response", header: "First response", width: 130, sortAccessor: (l) => (l.first_response_seconds == null ? null : Number(l.first_response_seconds)), render: (l) => <span className="tabular-nums text-slate-600">{fmtDuration(l.first_response_seconds)}</span> },
     { key: "assigned_date", header: "Assigned date", width: 140, render: (l) => stackedDateTime(l.assigned_date) ?? dash },
     { key: "created_date", header: "Created", width: 150, sortAccessor: (l) => l.created_at, render: (l) => stackedDateTime(l.created_at) ?? dash },
     { key: "updated_at", header: "Last updated", width: 150, render: (l) => stackedDateTime(l.updated_at) ?? dash },
@@ -1196,8 +1212,8 @@ export default function ClientLeads() {
   // and hide assignment columns for reference-scoped agents (assignment doesn't
   // govern their view — their leads are scoped by reference).
   const hiddenColKeys = new Set<string>([
-    ...(canViewCalls ? [] : ["last_call"]),
-    ...(isAgent ? ["assigned", "assigned_date"] : []),
+    ...(canViewCalls ? [] : ["last_call", "last_connected"]),
+    ...(isAgent ? ["assigned", "assigned_date", "first_response"] : []),
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
 
@@ -1662,6 +1678,7 @@ export default function ClientLeads() {
                     ["Email", lead.email || "—"],
                     ["Assigned to", lead.assigned_to_name || "Unassigned"],
                     ["Assigned date", lead.assigned_date ? fmtDateTime(lead.assigned_date) : "—"],
+                    ...(isAgent ? [] : [["First response", lead.first_response_at ? `${fmtDuration(lead.first_response_seconds)} · ${fmtDateTime(lead.first_response_at)}` : "—"] as [string, React.ReactNode]]),
                     ["City", lead.city || "—"],
                     ["State", lead.state || "—"],
                     ["Follow-up date", lead.last_reminder_at ? fmtDateTime(lead.last_reminder_at) : "—"],

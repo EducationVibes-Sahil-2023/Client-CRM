@@ -29,6 +29,7 @@ use App\Models\ClientTaskModel;
 use App\Models\ConversionTypeModel;
 use App\Models\FollowupGroupModel;
 use App\Models\DepartmentModel;
+use App\Models\HolidayModel;
 use App\Models\LeadModel;
 use App\Models\LeadNoteModel;
 use App\Models\LeadReferenceModel;
@@ -1829,15 +1830,27 @@ class ClientController extends ApiController
         foreach ((new LeadNoteModel())->select('lead_id, created_at')->where('client_id', $cid)->findAll() as $row) {
             $notesByLead[(int) $row['lead_id']][] = $row['created_at'];
         }
-        // Latest connected (answered) call per phone — for the "Last call" column.
-        $callByPhone = [];
-        foreach ((new CallLogModel())->select('contact, call_start')->where('client_id', $cid)->where('connected', 1)->findAll() as $row) {
+        // Calls per phone (matched by contact). We track:
+        //   - the latest call of ANY status  → "Last call" column (all calls),
+        //   - the latest CONNECTED call       → "Last connected" column,
+        //   - the connected call times list   → the follow-up flag (a connected
+        //     call at/after the follow-up marks it done).
+        $lastCallByPhone = []; // any call
+        $lastConnByPhone = []; // connected only
+        $connTimesByPhone = [];
+        foreach ((new CallLogModel())->select('contact, call_start, connected')->where('client_id', $cid)->findAll() as $row) {
             $k = (string) ($row['contact'] ?? '');
             if ($k === '' || $row['call_start'] === null) {
                 continue;
             }
-            if (! isset($callByPhone[$k]) || $row['call_start'] > $callByPhone[$k]) {
-                $callByPhone[$k] = $row['call_start'];
+            if (! isset($lastCallByPhone[$k]) || $row['call_start'] > $lastCallByPhone[$k]) {
+                $lastCallByPhone[$k] = $row['call_start'];
+            }
+            if ((int) $row['connected']) {
+                $connTimesByPhone[$k][] = $row['call_start'];
+                if (! isset($lastConnByPhone[$k]) || $row['call_start'] > $lastConnByPhone[$k]) {
+                    $lastConnByPhone[$k] = $row['call_start'];
+                }
             }
         }
         $today = date('Y-m-d'); // IST (app timezone)
@@ -1857,9 +1870,16 @@ class ClientController extends ApiController
 
             $rem = $remindersByLead[(int) $r['id']] ?? [];
             $r['last_reminder_at'] = $rem ? max($rem) : null;
-            $r['follow_flag']      = $this->followFlag($r['follow_date'], $rem, $notesByLead[(int) $r['id']] ?? [], $today);
-            $r['last_call_at']     = $callByPhone[(string) ($r['phone'] ?? '')]
-                ?? (($r['alt_phone'] ?? '') !== '' ? ($callByPhone[(string) $r['alt_phone']] ?? null) : null);
+            $ph  = (string) ($r['phone'] ?? '');
+            $alt = (string) ($r['alt_phone'] ?? '');
+            $connCalls = array_merge(
+                $connTimesByPhone[$ph] ?? [],
+                $alt !== '' ? ($connTimesByPhone[$alt] ?? []) : [],
+            );
+            $r['follow_flag']      = $this->followFlag($r['follow_date'], $rem, $notesByLead[(int) $r['id']] ?? [], $connCalls, $today);
+            // "Last call" = latest call of any status; "Last connected" = latest answered call.
+            $r['last_call_at']      = $this->laterOf($lastCallByPhone[$ph] ?? null, $alt !== '' ? ($lastCallByPhone[$alt] ?? null) : null);
+            $r['last_connected_at'] = $this->laterOf($lastConnByPhone[$ph] ?? null, $alt !== '' ? ($lastConnByPhone[$alt] ?? null) : null);
             $r['custom_fields']    = $this->decodeCustom($r['custom_fields'] ?? null);
         }
         unset($r);
@@ -1870,13 +1890,14 @@ class ClientController extends ApiController
     /**
      * Follow-up status flag for the leads table:
      *   - 'upcoming' (orange): the follow-up date is still in the future.
-     *   - 'done'     (green):  the follow-up is due/past AND a note was logged on
-     *                          the follow-up date, after that day's reminder time
-     *                          (evidence the lead was actually followed up).
-     *   - 'overdue'  (red):    the follow-up is due/past with no such note.
-     * Returns null when the lead has no follow-up date.
+     *   - 'done'     (green):  the follow-up is due/past AND the lead was actioned
+     *                          at/after the follow-up reminder — a note logged or a
+     *                          call connected on the follow-up day OR any day after.
+     *   - 'overdue'  (red):    the follow-up is due/past with no such note/call.
+     * Returns null when the lead has no follow-up date. `$calls` = the lead's
+     * connected call_start times (matched by phone).
      */
-    private function followFlag(?string $followDate, array $reminders, array $notes, string $today): ?string
+    private function followFlag(?string $followDate, array $reminders, array $notes, array $calls, string $today): ?string
     {
         if (empty($followDate)) {
             return null;
@@ -1886,21 +1907,42 @@ class ClientController extends ApiController
             return 'upcoming';
         }
 
-        // The reminder set for the follow-up day (latest, if several); notes count
-        // only when logged on that day at or after the reminder fired.
+        // Threshold = the follow-up reminder's fire time (latest reminder on fd),
+        // else the start of the follow-up day. Any note or connected call at/after
+        // it — that day or later — is evidence the lead was followed up → 'done'
+        // (so a lead actioned a day late reads 'done', not 'overdue').
         $reminderAt = null;
         foreach ($reminders as $ra) {
             if (substr((string) $ra, 0, 10) === $fd && ($reminderAt === null || $ra > $reminderAt)) {
                 $reminderAt = $ra;
             }
         }
+        $threshold = $reminderAt ?? ($fd . ' 00:00:00');
         foreach ($notes as $na) {
-            if (substr((string) $na, 0, 10) === $fd && ($reminderAt === null || $na >= $reminderAt)) {
+            if ((string) $na >= $threshold) {
+                return 'done';
+            }
+        }
+        foreach ($calls as $ca) {
+            if ((string) $ca >= $threshold) {
                 return 'done';
             }
         }
 
         return 'overdue';
+    }
+
+    /** The later of two nullable datetime strings (null-safe). */
+    private function laterOf(?string $a, ?string $b): ?string
+    {
+        if ($a === null) {
+            return $b;
+        }
+        if ($b === null) {
+            return $a;
+        }
+
+        return $a >= $b ? $a : $b;
     }
 
     /**
@@ -3866,14 +3908,18 @@ class ClientController extends ApiController
         // joining the call-tracking table to follow-ups. Also track the most
         // recent attempt for the "N days ago" column.
         $callStats = [];
+        $connCallsByLead = []; // lead_id => connected call_start[] (feeds followFlag)
         foreach ((new CallLogModel())->select('lead_id, connected, call_start')->where('client_id', $cid)->where('lead_id IS NOT NULL')->findAll() as $c) {
             $lid = (int) $c['lead_id'];
             $callStats[$lid] ??= ['attempts' => 0, 'connected' => 0, 'last' => null];
             $callStats[$lid]['attempts']++;
+            $cs = (string) ($c['call_start'] ?? '');
             if ((int) $c['connected']) {
                 $callStats[$lid]['connected']++;
+                if ($cs !== '') {
+                    $connCallsByLead[$lid][] = $cs;
+                }
             }
-            $cs = (string) ($c['call_start'] ?? '');
             if ($cs !== '' && ($callStats[$lid]['last'] === null || $cs > $callStats[$lid]['last'])) {
                 $callStats[$lid]['last'] = $cs;
             }
@@ -3954,7 +4000,7 @@ class ClientController extends ApiController
             if (($from !== '' && $fd < $from) || ($to !== '' && $fd > $to)) {
                 continue;
             }
-            $isDone = $this->followFlag($l['follow_date'], $remByLead[(int) $l['id']] ?? [], $notesByLead[(int) $l['id']] ?? [], $date) === 'done';
+            $isDone = $this->followFlag($l['follow_date'], $remByLead[(int) $l['id']] ?? [], $notesByLead[(int) $l['id']] ?? [], $connCallsByLead[(int) $l['id']] ?? [], $date) === 'done';
             if ($isDone) {
                 $bucket = 'done';
             } elseif ($fd > $date) {
@@ -4189,6 +4235,21 @@ class ClientController extends ApiController
         ]);
     }
 
+    /**
+     * Bump a lead's `updated_at` to now — called whenever work happens ON the lead
+     * (note/reminder add or edit) so "Last updated" tracks activity, not just edits
+     * to the lead row itself. Uses the builder to set the timestamp directly.
+     */
+    private function touchLead(int $cid, int $leadId): void
+    {
+        if ($leadId <= 0) {
+            return;
+        }
+        (new LeadModel())->builder()
+            ->where('client_id', $cid)->where('id', $leadId)
+            ->update(['updated_at' => date('Y-m-d H:i:s')]);
+    }
+
     /** POST /client/leads/{id}/reminders — schedule a future reminder. */
     public function createReminder(int $id)
     {
@@ -4228,6 +4289,7 @@ class ClientController extends ApiController
             return $this->failValidationErrors($model->errors());
         }
         $this->syncFollowDate($cid, $id);
+        $this->touchLead($cid, $id);
         $this->logActivity('created', 'lead', $id, 'Set a reminder for ' . date('d M Y, g:i A', $remindAt));
 
         return $this->respondCreated(['message' => 'Reminder set', 'id' => $rid]);
@@ -4270,6 +4332,7 @@ class ClientController extends ApiController
             return $this->failValidationErrors($model->errors());
         }
         $this->syncFollowDate($cid, (int) $row['lead_id']);
+        $this->touchLead($cid, (int) $row['lead_id']);
         $this->logActivity('updated', 'lead', (int) $row['lead_id'], 'Edited a reminder');
 
         return $this->respond(['message' => 'Reminder updated']);
@@ -4328,6 +4391,7 @@ class ClientController extends ApiController
             return $this->failValidationErrors($model->errors());
         }
         $this->logActivity('created', 'lead', $id, 'Added a note');
+        $this->touchLead($cid, $id);
 
         return $this->respondCreated(['message' => 'Note added', 'id' => $nid]);
     }
@@ -4391,6 +4455,7 @@ class ClientController extends ApiController
             return $this->failValidationErrors($model->errors());
         }
         $this->logActivity('updated', 'lead', (int) $row['lead_id'], 'Edited a note');
+        $this->touchLead($cid, (int) $row['lead_id']);
 
         return $this->respond(['message' => 'Note updated']);
     }
@@ -5566,8 +5631,14 @@ class ClientController extends ApiController
         $cid   = $this->clientId();
         $model = new OfficeLocationModel();
 
+        $offices = $model->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('name', 'ASC')->findAll();
+        foreach ($offices as &$o) {
+            $o['working_hours'] = $this->decodeWorkingHours($o['working_hours'] ?? null);
+        }
+        unset($o);
+
         return $this->respond([
-            'office_locations' => $model->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('name', 'ASC')->findAll(),
+            'office_locations' => $offices,
             'archived'         => $model->onlyDeleted()->where('client_id', $cid)->orderBy('name', 'ASC')->findAll(),
         ]);
     }
@@ -5644,13 +5715,127 @@ class ClientController extends ApiController
         return $this->respond(['message' => 'Office restored']);
     }
 
+    // --- Holidays (year-wise; drive the first-response SLA) -----------------
+
+    /** GET /client/holidays?year=YYYY — holidays for a year + the years that have any. */
+    public function holidays()
+    {
+        if ($resp = $this->requirePermission('team')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $year  = (int) ($this->request->getGet('year') ?: date('Y'));
+        $model = new HolidayModel();
+
+        $rows = $model->where('client_id', $cid)
+            ->where('YEAR(holiday_date)', $year)
+            ->orderBy('holiday_date', 'ASC')->findAll();
+
+        $officeNames = $this->idNameMap((new OfficeLocationModel())->where('client_id', $cid)->findAll());
+        foreach ($rows as &$h) {
+            $oid                = $h['office_location_id'] !== null ? (int) $h['office_location_id'] : null;
+            $h['office_location_id'] = $oid;
+            $h['office_name']   = $oid ? ($officeNames[$oid] ?? null) : null; // null = all offices
+        }
+        unset($h);
+
+        // Distinct years that have holidays, so the UI can offer a year switcher.
+        $years = [];
+        foreach ($model->select('holiday_date')->where('client_id', $cid)->orderBy('holiday_date', 'DESC')->findAll() as $r) {
+            $y         = (int) substr((string) $r['holiday_date'], 0, 4);
+            $years[$y] = true;
+        }
+        $years = array_keys($years);
+        if (! in_array($year, $years, true)) {
+            $years[] = $year;
+        }
+        rsort($years);
+
+        return $this->respond(['holidays' => $rows, 'year' => $year, 'years' => array_values($years)]);
+    }
+
+    /** Build a holiday row from the request body. */
+    private function holidayData(int $cid): array
+    {
+        $oid = (int) $this->input('office_location_id');
+
+        return [
+            'client_id'          => $cid,
+            'office_location_id' => $oid > 0 ? $oid : null, // 0 / empty = all offices
+            'holiday_date'       => $this->normalizeDate($this->input('holiday_date')),
+            'name'               => trim((string) $this->input('name')),
+        ];
+    }
+
+    /** POST /client/holidays */
+    public function createHoliday()
+    {
+        if ($resp = $this->requirePermission('team', 'create')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new HolidayModel();
+        $data  = $this->holidayData($cid);
+        if (empty($data['holiday_date'])) {
+            return $this->failValidationErrors(['holiday_date' => 'Pick a valid date.']);
+        }
+        $id = $model->insert($data);
+        if ($id === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('created', 'holiday', (int) $id, 'Added holiday ' . $data['name']);
+
+        return $this->respondCreated(['message' => 'Holiday added', 'id' => $id]);
+    }
+
+    /** POST /client/holidays/{id} */
+    public function updateHoliday(int $id)
+    {
+        if ($resp = $this->requirePermission('team', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new HolidayModel();
+        if (! $model->where('client_id', $cid)->find($id)) {
+            return $this->failNotFound('Holiday not found');
+        }
+        $data = $this->holidayData($cid);
+        if (empty($data['holiday_date'])) {
+            return $this->failValidationErrors(['holiday_date' => 'Pick a valid date.']);
+        }
+        if ($model->update($id, $data) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('updated', 'holiday', $id, 'Updated holiday ' . $data['name']);
+
+        return $this->respond(['message' => 'Holiday updated']);
+    }
+
+    /** POST /client/holidays/{id}/delete — soft delete. */
+    public function deleteHoliday(int $id)
+    {
+        if ($resp = $this->requirePermission('team', 'delete')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new HolidayModel();
+        $row   = $model->where('client_id', $cid)->find($id);
+        if (! $row) {
+            return $this->failNotFound('Holiday not found');
+        }
+        $model->delete($id);
+        $this->logActivity('deleted', 'holiday', $id, 'Deleted holiday ' . ($row['name'] ?? ''));
+
+        return $this->respond(['message' => 'Holiday deleted']);
+    }
+
     /** Office fields from the request body. */
     private function officeData(int $cid): array
     {
         $lat = $this->input('latitude');
         $lng = $this->input('longitude');
 
-        return [
+        $data = [
             'client_id' => $cid,
             'name'      => trim((string) $this->input('name')),
             'address'   => trim((string) ($this->input('address') ?? '')) ?: null,
@@ -5661,6 +5846,53 @@ class ClientController extends ApiController
             'longitude' => is_numeric($lng) ? (float) $lng : null,
             'map_url'   => trim((string) ($this->input('map_url') ?? '')) ?: null,
         ];
+        // Only touch the weekly schedule when the form sends it (the office
+        // details form doesn't, so it won't wipe the hours).
+        if ($this->input('working_hours') !== null) {
+            $data['working_hours'] = json_encode($this->normalizeWorkingHours($this->input('working_hours')));
+        }
+
+        return $data;
+    }
+
+    /** Days of the week, index 0 = Sunday (matches JS Date.getDay()). */
+    private const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    /** Default weekly schedule: Mon–Sat 10:00–19:00, Sunday off. */
+    private function defaultWorkingHours(): array
+    {
+        $days = [];
+        for ($d = 0; $d <= 6; $d++) {
+            $days[] = ['off' => $d === 0, 'open' => '10:00', 'close' => '19:00'];
+        }
+
+        return $days;
+    }
+
+    /** Validate a posted weekly schedule into the canonical 7-day structure. */
+    private function normalizeWorkingHours($in): array
+    {
+        $default = $this->defaultWorkingHours();
+        if (! is_array($in)) {
+            return $default;
+        }
+        $out = [];
+        for ($d = 0; $d <= 6; $d++) {
+            $row   = is_array($in[$d] ?? null) ? $in[$d] : [];
+            $open  = preg_match('/^\d{2}:\d{2}$/', (string) ($row['open'] ?? '')) ? $row['open'] : $default[$d]['open'];
+            $close = preg_match('/^\d{2}:\d{2}$/', (string) ($row['close'] ?? '')) ? $row['close'] : $default[$d]['close'];
+            $out[] = ['off' => ! empty($row['off']), 'open' => $open, 'close' => $close];
+        }
+
+        return $out;
+    }
+
+    /** Decode a stored working_hours JSON to the canonical structure (with defaults). */
+    private function decodeWorkingHours($json): array
+    {
+        $d = json_decode((string) $json, true);
+
+        return is_array($d) && count($d) === 7 ? $this->normalizeWorkingHours($d) : $this->defaultWorkingHours();
     }
 
     /** Active (non-archived) office locations for this client. */
