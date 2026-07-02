@@ -53,6 +53,7 @@ class TenantSchema
         'departments',
         'office_locations',
         'holidays',
+        'shifts',
         'settings',
         'user_table_prefs',
         'calls',

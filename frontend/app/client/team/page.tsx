@@ -7,6 +7,7 @@ import {
   deleteStaff,
   getLookups,
   getRoles,
+  getShifts,
   getStaff,
   getStaffLeadLoad,
   reassignStaffLeads,
@@ -22,6 +23,7 @@ import {
   type LeadStatus,
   type LeadSource,
   type LeadType,
+  type Shift,
 } from "../../lib/client";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
@@ -59,7 +61,7 @@ interface Draft {
   name: string; email: string; phone: string; alt_phone: string; emp_code: string; designation: string;
   avatar: string; role_id: string; reports_to: string; lead_type_id: string; reference_id: string;
   staff_type: StaffType;
-  office_location_id: string; department_id: string;
+  office_location_id: string; shift_id: string; department_id: string;
   facebook: string; linkedin: string; skype: string; email_signature: string;
   password: string; status: string;
   permissions: Record<string, Perm>;
@@ -67,7 +69,7 @@ interface Draft {
 }
 const blank: Draft = {
   name: "", email: "", phone: "", alt_phone: "", emp_code: "", designation: "", avatar: "",
-  role_id: "", reports_to: "", lead_type_id: "", reference_id: "", staff_type: "staff", office_location_id: "", department_id: "",
+  role_id: "", reports_to: "", lead_type_id: "", reference_id: "", staff_type: "staff", office_location_id: "", shift_id: "", department_id: "",
   facebook: "", linkedin: "", skype: "", email_signature: "", password: "", status: "active",
   permissions: {}, custom: {},
 };
@@ -105,7 +107,7 @@ function toDraft(s: Staff): Draft {
     emp_code: s.emp_code ?? "", designation: s.designation ?? "", avatar: s.avatar ?? "", role_id: s.role_id ? String(s.role_id) : "",
     reports_to: s.reports_to ? String(s.reports_to) : "", lead_type_id: s.lead_type_id ? String(s.lead_type_id) : "", reference_id: s.reference_id ? String(s.reference_id) : "",
     staff_type: s.reference_id ? "agent" : "staff",
-    office_location_id: s.office_location_id ? String(s.office_location_id) : "", department_id: s.department_id ? String(s.department_id) : "",
+    office_location_id: s.office_location_id ? String(s.office_location_id) : "", shift_id: s.shift_id ? String(s.shift_id) : "", department_id: s.department_id ? String(s.department_id) : "",
     facebook: s.facebook ?? "", linkedin: s.linkedin ?? "", skype: s.skype ?? "", email_signature: s.email_signature ?? "",
     password: "", status: s.status, permissions: s.extra_permissions ?? {}, custom: { ...(s.custom_fields ?? {}) },
   };
@@ -118,6 +120,7 @@ export default function TeamPage() {
   const staffLimit = limitFor("team"); // null = unlimited
   const [staff, setStaff] = useState<Staff[] | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [shifts, setShifts] = useState<Shift[]>([]);
   const [lookups, setLookups] = useState<Record<string, LookupItem[]>>({});
   const [draft, setDraft] = useState<Draft | null>(null);
   const [errors, setErrors] = useState<Partial<Record<keyof Draft, string>>>({});
@@ -161,6 +164,7 @@ export default function TeamPage() {
   function load() {
     getStaff().then((d) => { setStaff(d.staff); if (d.modules?.length) setModules(d.modules); }).catch(() => setStaff([]));
     getRoles().then((d) => setRoles(d.roles)).catch(() => {});
+    getShifts().then((d) => setShifts(d.shifts ?? [])).catch(() => {});
     getLookups().then((d) => setLookups(d.lookups)).catch(() => {});
   }
   useEffect(load, []);
@@ -233,7 +237,7 @@ export default function TeamPage() {
         reports_to: num(draft.reports_to), lead_type_id: num(draft.lead_type_id),
         // Only agents carry a reference; staff never do (it gates lead visibility).
         reference_id: draft.staff_type === "agent" ? num(draft.reference_id) : 0,
-        office_location_id: num(draft.office_location_id), department_id: num(draft.department_id),
+        office_location_id: num(draft.office_location_id), shift_id: num(draft.shift_id), department_id: num(draft.department_id),
         facebook: draft.facebook, linkedin: draft.linkedin, skype: draft.skype,
         email_signature: draft.email_signature, password: draft.password, status: draft.status,
         permissions: permsToSave, custom_fields: draft.custom,
@@ -684,6 +688,10 @@ export default function TeamPage() {
                 <FieldRow label="Office location">
                   <SearchSelect ariaLabel="Office location" value={draft.office_location_id} onChange={set("office_location_id")} placeholder="— Select —" searchPlaceholder="Search offices…"
                     options={[{ value: "", label: "— None —" }, ...(lookups.office_location ?? []).map((o) => ({ value: String(o.id), label: o.name }))]} />
+                </FieldRow>
+                <FieldRow label="Shift" hint="Weekly hours used for this member's first-response time (falls back to their office).">
+                  <SearchSelect ariaLabel="Shift" value={draft.shift_id} onChange={set("shift_id")} placeholder="— Select —" searchPlaceholder="Search shifts…"
+                    options={[{ value: "", label: "— None (use office hours) —" }, ...shifts.map((s) => ({ value: String(s.id), label: s.name }))]} />
                 </FieldRow>
                 <FieldRow label="Department">
                   <SearchSelect ariaLabel="Department" value={draft.department_id} onChange={set("department_id")} placeholder="— Select —" searchPlaceholder="Search departments…"

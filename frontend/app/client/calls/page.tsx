@@ -12,7 +12,7 @@ import { Card, PageHeader, Spinner, EmptyState, SkeletonStats, SkeletonBlock, fm
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
 import { DataTable, Pagination, Avatar, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
-import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
+import { DateRangeFilter, inDateRange, rangeActive, resolveDateRange, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { CallActivityList } from "../../admin/CallActivity";
 import { CALL_TYPE_LABEL, CALL_SOURCE_LABEL, CALL_STATUSES, callTypeChip, statusMeta, normalizeStatusKey, formatDuration } from "../../lib/calls";
 
@@ -59,7 +59,7 @@ function Kpi({ label, value, sub, delta, tone }: { label: string; value: string;
               <svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d={up ? "M5 15l7-7 7 7" : "M19 9l-7 7-7-7"} strokeLinecap="round" strokeLinejoin="round" /></svg>
               {Math.abs(delta)}%
             </span>
-            <span className="text-slate-400">vs yesterday</span>
+            <span className="text-slate-400">vs previous period</span>
           </>
         )}
       </div>
@@ -189,6 +189,7 @@ function RepTable({ reps }: { reps: CallRep[] }) {
     { h: "#", r: (_x, i) => <span className="text-slate-400">{i + 1}</span> },
     { h: "Staff name", r: (x) => <span className="flex items-center gap-2"><Avatar name={x.name} color="from-indigo-500 to-violet-600" /><span className="font-medium text-slate-700">{x.name}</span></span> },
     { h: "Total Calls", right: true, r: (x) => <span className="font-semibold tabular-nums text-slate-800">{nf(x.total)}</span> },
+    { h: "After Assignment", right: true, r: (x) => <span className="tabular-nums text-slate-600" title="Calls made on/after the lead's assignment date (vs calls before it was assigned)">{nf(x.after_assign)}</span> },
     { h: "Unique Calls", right: true, r: (x) => <span className="tabular-nums text-slate-600">{nf(x.unique)}</span> },
     { h: "Connected", right: true, r: (x) => <span className="tabular-nums text-slate-600">{nf(x.connected)}</span> },
     { h: "Talk Time", right: true, r: (x) => <span className="tabular-nums text-slate-600">{fmtHM(x.talk_sec)}</span> },
@@ -396,10 +397,9 @@ export default function ClientCalls() {
   // ---- dashboard state ----
   const [dash, setDash] = useState<CallDashboard | null>(null);
   const [dashLoading, setDashLoading] = useState(true);
-  // Local "today" so the date picker is populated on first render; this also
-  // avoids a duplicate dashboard fetch (previously date started "" and was set
-  // from the first response, changing loadDash's identity → a second request).
-  const [date, setDate] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; });
+  // Dashboard date range (preset picker). Defaults to Today, matching the old
+  // single-date behaviour; widen to 7 days / 1 month / custom as needed.
+  const [dateRange, setDateRange] = useState<DateRange>({ preset: "today" });
   const [fStatus, setFStatus] = useState<string[]>([]);
   const [fSource, setFSource] = useState<string[]>([]);
   const [fDept, setFDept] = useState<string[]>([]);
@@ -420,8 +420,10 @@ export default function ClientCalls() {
   }, []);
 
   const loadDash = useCallback(() => {
+    const { from, to } = resolveDateRange(dateRange);
     const params: Record<string, string | undefined> = {
-      date: date || undefined,
+      from: from || undefined,
+      to: to || undefined,
       assign: fAssign.join(",") || undefined,
       lead_status: fStatus.join(",") || undefined,
       lead_source: fSource.join(",") || undefined,
@@ -429,10 +431,10 @@ export default function ClientCalls() {
       office: fOffice.join(",") || undefined,
     };
     return getCallDashboard(params)
-      .then((d) => { setDash(d); setDate((cur) => cur || d.date); })
+      .then((d) => setDash(d))
       .catch(() => toast.error("Could not load call dashboard."))
       .finally(() => setDashLoading(false));
-  }, [date, fAssign, fStatus, fSource, fDept, fOffice, toast]);
+  }, [dateRange, fAssign, fStatus, fSource, fDept, fOffice, toast]);
   useEffect(() => { loadDash(); }, [loadDash]);
 
   const statusOpts: SelectOption[] = useMemo(() => statuses.filter((s) => !isSubStatus(s)).map((s) => ({ value: String(s.id), label: s.name, prefix: <span className="h-2 w-2 rounded-full" style={{ background: toHex(s.color) }} /> })), [statuses]);
@@ -441,8 +443,10 @@ export default function ClientCalls() {
   const officeOpts: SelectOption[] = useMemo(() => offices.map((o) => ({ value: String(o.id), label: o.name })), [offices]);
   const assignOpts: SelectOption[] = useMemo(() => staff.map((s) => ({ value: String(s.id), label: s.name })), [staff]);
 
-  const filtersActive = !!(fStatus.length || fSource.length || fDept.length || fOffice.length || fAssign.length);
-  function clearDashFilters() { setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]); }
+  // The date counts as "active" only when it's not the default (Today).
+  const dateActive = dateRange.preset !== "today";
+  const filtersActive = !!(fStatus.length || fSource.length || fDept.length || fOffice.length || fAssign.length || dateActive);
+  function clearDashFilters() { setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]); setDateRange({ preset: "today" }); }
   // Slide-in Filters drawer (shared across both tabs — only one is visible at a
   // time). Counts drive the badge on each tab's Filters button.
   const [filterOpen, setFilterOpen] = useState(false);
@@ -567,7 +571,7 @@ export default function ClientCalls() {
             onApply={() => setFilterOpen(false)}
             applyLabel="Done"
           >
-            <div className="space-y-1.5"><FilterLabel>Date</FilterLabel><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={`${selCls} w-full`} /></div>
+            <div className="space-y-1.5"><FilterLabel>Date</FilterLabel><DateRangeFilter ariaLabel="Dashboard date range" value={dateRange} onChange={setDateRange} /></div>
             <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
             <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
             <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
@@ -584,7 +588,7 @@ export default function ClientCalls() {
               </div>
             </div>
           ) : !k ? (
-            <Card><EmptyState title="No call data" hint="No calls match these filters for the selected date." /></Card>
+            <Card><EmptyState title="No call data" hint="No calls match these filters for the selected period." /></Card>
           ) : (
             <>
               {/* KPI strip */}
@@ -644,7 +648,7 @@ export default function ClientCalls() {
 
               {/* Rep table */}
               <div>
-                <h3 className="mb-2 text-sm font-semibold text-slate-700">Rep performance — {dLabel(dash!.date)} <span className="font-normal text-slate-400">· {reps.length} reps</span></h3>
+                <h3 className="mb-2 text-sm font-semibold text-slate-700">Rep performance — {dash!.from && dash!.to && dash!.from !== dash!.to ? `${dLabel(dash!.from)} – ${dLabel(dash!.to)}` : dLabel(dash!.to ?? dash!.date)} <span className="font-normal text-slate-400">· {reps.length} reps</span></h3>
                 <RepTable reps={reps} />
               </div>
             </>

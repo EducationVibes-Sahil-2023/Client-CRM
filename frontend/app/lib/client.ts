@@ -86,6 +86,7 @@ export interface Staff {
   lead_type_id: number | null;
   reference_id: number | null;
   office_location_id: number | null;
+  shift_id: number | null;
   department_id: number | null;
   facebook: string | null;
   linkedin: string | null;
@@ -97,6 +98,7 @@ export interface Staff {
   lead_type: string | null;
   reference_name: string | null;
   office_name: string | null;
+  shift_name: string | null;
   department: string | null;
   has_password: boolean;
   extra_permissions?: Record<string, Perm>;
@@ -152,6 +154,20 @@ export const getHolidays = (year?: number) =>
 export const createHoliday = (b: Record<string, unknown>) => clientPost("/holidays", b);
 export const updateHoliday = (id: number, b: Record<string, unknown>) => clientPost(`/holidays/${id}`, b);
 export const deleteHoliday = (id: number) => clientPost(`/holidays/${id}/delete`);
+
+/** A named work shift = a weekly schedule, mapped to staff (feeds first-response). */
+export interface Shift {
+  id: number;
+  name: string;
+  working_hours?: WorkingHoursDay[];
+  sequence: number;
+  enabled: number | boolean;
+}
+
+export const getShifts = () => clientGet<{ shifts: Shift[] }>("/shifts");
+export const createShift = (b: Record<string, unknown>) => clientPost("/shifts", b);
+export const updateShift = (id: number, b: Record<string, unknown>) => clientPost(`/shifts/${id}`, b);
+export const deleteShift = (id: number) => clientPost(`/shifts/${id}/delete`);
 
 export interface Asset {
   id: number;
@@ -318,6 +334,8 @@ export interface CallRep {
   id: number;
   name: string;
   total: number;
+  /** Calls this rep made on/after the lead's assignment date (post-assignment follow-up). */
+  after_assign: number;
   unique: number;
   connected: number;
   talk_sec: number;
@@ -328,8 +346,12 @@ export interface CallRep {
   connect_pct: number;
 }
 export interface CallDashboard {
+  /** Selected period bounds (YYYY-MM-DD). `date` echoes `to` for back-compat. */
+  from?: string;
+  to?: string;
   date: string;
   kpis: {
+    /** KPIs for the selected period (kept named `today` for back-compat). */
     today: CallKpi;
     prev: CallKpi;
     delta: { total: number | null; unique: number | null; avg_sec: number | null; connect_rate: number | null; talk_sec: number | null };

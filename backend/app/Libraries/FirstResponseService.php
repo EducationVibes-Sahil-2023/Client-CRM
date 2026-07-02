@@ -44,15 +44,24 @@ class FirstResponseService
             return 0;
         }
 
-        // Office weekly schedules (by office id) + a fallback default.
-        $schedules = [];
+        $default = self::defaultSchedule();
+
+        // Office weekly schedules (by office id) + shift schedules (by shift id).
+        // A staff member's SHIFT hours take priority over their office hours.
+        $officeSchedules = [];
         if ($db->tableExists('office_locations')) {
             foreach ($db->table('office_locations')->where('client_id', $clientId)->get()->getResultArray() as $o) {
-                $wh                        = json_decode((string) ($o['working_hours'] ?? ''), true);
-                $schedules[(int) $o['id']] = (is_array($wh) && count($wh) === 7) ? $wh : self::defaultSchedule();
+                $wh                              = json_decode((string) ($o['working_hours'] ?? ''), true);
+                $officeSchedules[(int) $o['id']] = (is_array($wh) && count($wh) === 7) ? $wh : $default;
             }
         }
-        $default = self::defaultSchedule();
+        $shiftSchedules = [];
+        if ($db->tableExists('shifts')) {
+            foreach ($db->table('shifts')->where('client_id', $clientId)->where('deleted_at', null)->get()->getResultArray() as $sh) {
+                $wh                             = json_decode((string) ($sh['working_hours'] ?? ''), true);
+                $shiftSchedules[(int) $sh['id']] = (is_array($wh) && count($wh) === 7) ? $wh : $default;
+            }
+        }
 
         // Holidays: global (office_location_id NULL → all offices) + per office.
         $globalHol = [];
@@ -68,10 +77,13 @@ class FirstResponseService
             }
         }
 
-        // Assigned staff → their office.
+        // Assigned staff → their office + shift (shift wins for the schedule).
         $staffOffice = [];
-        foreach ($db->table('client_staff')->select('id, office_location_id')->where('client_id', $clientId)->get()->getResultArray() as $s) {
+        $staffShift  = [];
+        $hasShiftCol = $db->fieldExists('shift_id', 'client_staff');
+        foreach ($db->table('client_staff')->select('id, office_location_id' . ($hasShiftCol ? ', shift_id' : ''))->where('client_id', $clientId)->get()->getResultArray() as $s) {
             $staffOffice[(int) $s['id']] = $s['office_location_id'] !== null ? (int) $s['office_location_id'] : 0;
+            $staffShift[(int) $s['id']]  = ($hasShiftCol && $s['shift_id'] !== null) ? (int) $s['shift_id'] : 0;
         }
 
         // Connected calls indexed by staff + phone, so we can find each lead's
@@ -115,8 +127,11 @@ class FirstResponseService
                 continue;
             }
 
+            // Schedule: the staff member's shift hours if mapped, else their
+            // office hours, else the default.
+            $shiftId  = $staffShift[$sid] ?? 0;
             $officeId = $staffOffice[$sid] ?? 0;
-            $schedule = $schedules[$officeId] ?? $default;
+            $schedule = $shiftSchedules[$shiftId] ?? $officeSchedules[$officeId] ?? $default;
             $holset   = $globalHol + ($officeHol[$officeId] ?? []);
 
             $connDate = substr($first, 0, 10);

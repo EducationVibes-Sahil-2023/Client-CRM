@@ -43,6 +43,7 @@ use App\Models\OfficeLocationModel;
 use App\Models\PushSubscriptionModel;
 use App\Models\SettingsModel;
 use App\Models\StaffAccountModel;
+use App\Models\ShiftModel;
 use App\Models\StateModel;
 use App\Models\TaskCommentModel;
 use App\Models\TaskStageModel;
@@ -3602,10 +3603,26 @@ class ClientController extends ApiController
         if ($resp = $this->requirePermission('calls')) {
             return $resp;
         }
-        $cid  = $this->clientId();
-        $date = (string) ($this->request->getGet('date') ?: date('Y-m-d'));
-        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
-            $date = date('Y-m-d');
+        $cid      = $this->clientId();
+        $todayStr = date('Y-m-d');
+
+        // Date range [from, to] (default today→today). A single legacy ?date=
+        // still works — it acts as from=to=date.
+        $valid  = static fn (string $v): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $v);
+        $from   = (string) ($this->request->getGet('from') ?? '');
+        $to     = (string) ($this->request->getGet('to') ?? '');
+        $single = (string) ($this->request->getGet('date') ?? '');
+        if ($from === '' && $to === '' && $valid($single)) {
+            $from = $to = $single;
+        }
+        if (! $valid($from)) {
+            $from = $todayStr;
+        }
+        if (! $valid($to)) {
+            $to = $todayStr;
+        }
+        if ($from > $to) {
+            [$from, $to] = [$to, $from];
         }
 
         $ids = function (string $k): array {
@@ -3623,8 +3640,13 @@ class ClientController extends ApiController
         $fDept   = $ids('department');
         $fOffice = $ids('office');
 
-        $windowStart = date('Y-m-d', strtotime("{$date} -6 day"));
-        $prevDate    = date('Y-m-d', strtotime("{$date} -1 day"));
+        // Current period + the preceding equal-length period (for the delta), and
+        // a 7-day trend window ending at `to`. Load enough to cover all three.
+        $lenDays     = (int) floor((strtotime($to) - strtotime($from)) / 86400) + 1;
+        $prevTo      = date('Y-m-d', strtotime("{$from} -1 day"));
+        $prevFrom    = date('Y-m-d', strtotime("{$from} -{$lenDays} day"));
+        $trendStart  = date('Y-m-d', strtotime("{$to} -6 day"));
+        $windowStart = min($prevFrom, $trendStart);
 
         // Lookups.
         $staffMap = [];
@@ -3632,8 +3654,13 @@ class ClientController extends ApiController
             $staffMap[(int) $s['id']] = ['name' => $s['name'], 'dept' => (int) ($s['department_id'] ?? 0), 'office' => (int) ($s['office_location_id'] ?? 0)];
         }
         $leadMap = [];
-        foreach ((new LeadModel())->select('id, status_id, source_id')->where('client_id', $cid)->findAll() as $l) {
-            $leadMap[(int) $l['id']] = ['status' => (int) ($l['status_id'] ?? 0), 'source' => (int) ($l['source_id'] ?? 0)];
+        foreach ((new LeadModel())->select('id, status_id, source_id, assigned_to, assigned_date')->where('client_id', $cid)->findAll() as $l) {
+            $leadMap[(int) $l['id']] = [
+                'status'        => (int) ($l['status_id'] ?? 0),
+                'source'        => (int) ($l['source_id'] ?? 0),
+                'assigned_to'   => (int) ($l['assigned_to'] ?? 0),
+                'assigned_date' => (string) ($l['assigned_date'] ?? ''),
+            ];
         }
         $statusMeta = [];
         foreach ($this->lookupRows(LeadStatusModel::class, $cid) as $st) {
@@ -3644,16 +3671,16 @@ class ClientController extends ApiController
         $scope = $this->visibleStaffIds();
         $q     = (new CallLogModel())->where('client_id', $cid)
             ->where('call_start >=', "{$windowStart} 00:00:00")
-            ->where('call_start <=', "{$date} 23:59:59");
+            ->where('call_start <=', "{$to} 23:59:59");
         if ($scope !== null) {
             $q->whereIn('staff_id', $scope ?: [0]);
         }
         $calls = $q->findAll();
 
         // Apply filters (staff / lead status / lead source / department / office).
-        $dayCalls = [];
-        $prevCalls = [];
-        $byDay     = [];
+        $rangeCalls = [];  // calls within the selected [from, to] period
+        $prevCalls  = [];  // calls in the preceding equal-length period
+        $byDay      = [];  // per-day buckets (drives the 7-day trend)
         foreach ($calls as $c) {
             $sid  = (int) ($c['staff_id'] ?? 0);
             $lead = $leadMap[(int) ($c['lead_id'] ?? 0)] ?? null;
@@ -3673,11 +3700,11 @@ class ClientController extends ApiController
             if ($fOffice && (! $sm || ! in_array($sm['office'], $fOffice, true))) {
                 continue;
             }
-            $d            = substr((string) $c['call_start'], 0, 10);
-            $byDay[$d][]  = $c;
-            if ($d === $date) {
-                $dayCalls[] = $c;
-            } elseif ($d === $prevDate) {
+            $d           = substr((string) $c['call_start'], 0, 10);
+            $byDay[$d][] = $c;
+            if ($d >= $from && $d <= $to) {
+                $rangeCalls[] = $c;
+            } elseif ($d >= $prevFrom && $d <= $prevTo) {
                 $prevCalls[] = $c;
             }
         }
@@ -3706,7 +3733,7 @@ class ClientController extends ApiController
                 'connect_rate' => $total ? (int) round(100 * $conn / $total) : 0,
             ];
         };
-        $today = $kpi($dayCalls);
+        $today = $kpi($rangeCalls);
         $prev  = $kpi($prevCalls);
         $delta = static fn ($cur, $old) => $old ? (int) round(100 * ($cur - $old) / $old) : null;
 
@@ -3715,7 +3742,7 @@ class ClientController extends ApiController
         for ($h = 9; $h <= 20; $h++) {
             $hourly[$h] = ['hour' => $h, 'calls' => 0, 'talk_sec' => 0];
         }
-        foreach ($dayCalls as $c) {
+        foreach ($rangeCalls as $c) {
             $h = (int) substr((string) $c['call_start'], 11, 2);
             if (isset($hourly[$h])) {
                 $hourly[$h]['calls']++;
@@ -3725,7 +3752,7 @@ class ClientController extends ApiController
 
         // Calls + talk time grouped by the lead's status.
         $statusAgg = [];
-        foreach ($dayCalls as $c) {
+        foreach ($rangeCalls as $c) {
             $lead = $leadMap[(int) ($c['lead_id'] ?? 0)] ?? null;
             if (! $lead || ! $lead['status']) {
                 continue;
@@ -3744,7 +3771,7 @@ class ClientController extends ApiController
 
         // Per-rep table. "Fresh" = the first call to a given lead that day.
         $firstByLead = [];
-        foreach ($dayCalls as $i => $c) {
+        foreach ($rangeCalls as $i => $c) {
             $lid = (int) ($c['lead_id'] ?? 0);
             if (! $lid) {
                 continue;
@@ -3760,13 +3787,20 @@ class ClientController extends ApiController
         }
 
         $reps = [];
-        foreach ($dayCalls as $i => $c) {
+        foreach ($rangeCalls as $i => $c) {
             $sid = (int) ($c['staff_id'] ?? 0);
             if (! $sid) {
                 continue;
             }
-            $reps[$sid] ??= ['id' => $sid, 'name' => $staffMap[$sid]['name'] ?? "#{$sid}", 'total' => 0, 'uniq' => [], 'connected' => 0, 'talk_sec' => 0, 'fresh' => 0, 'fresh_connected' => 0, 'fresh_talk_sec' => 0];
+            $reps[$sid] ??= ['id' => $sid, 'name' => $staffMap[$sid]['name'] ?? "#{$sid}", 'total' => 0, 'after_assign' => 0, 'uniq' => [], 'connected' => 0, 'talk_sec' => 0, 'fresh' => 0, 'fresh_connected' => 0, 'fresh_talk_sec' => 0];
             $reps[$sid]['total']++;
+            // "After assignment": calls made on/after the lead's assignment date —
+            // i.e. genuine follow-up work once the lead had an owner (vs calls that
+            // happened before the lead was assigned). Counted per calling rep.
+            $lead = $leadMap[(int) ($c['lead_id'] ?? 0)] ?? null;
+            if ($lead && $lead['assigned_date'] !== '' && (string) $c['call_start'] >= $lead['assigned_date']) {
+                $reps[$sid]['after_assign']++;
+            }
             if (! empty($c['contact'])) {
                 $reps[$sid]['uniq'][(string) $c['contact']] = 1;
             }
@@ -3792,10 +3826,11 @@ class ClientController extends ApiController
         }
         usort($repList, static fn ($a, $b) => $b['total'] <=> $a['total']);
 
-        // 7-day trend ending at the selected date.
+        // 7-day trend ending at the range end (keeps the trend readable even for a
+        // single-day range; the KPIs above already reflect the full [from, to]).
         $trend = [];
         for ($d = 6; $d >= 0; $d--) {
-            $dd   = date('Y-m-d', strtotime("{$date} -{$d} day"));
+            $dd   = date('Y-m-d', strtotime("{$to} -{$d} day"));
             $set  = $byDay[$dd] ?? [];
             $talk = 0;
             foreach ($set as $c) {
@@ -3805,7 +3840,9 @@ class ClientController extends ApiController
         }
 
         return $this->respond([
-            'date'  => $date,
+            'from'  => $from,
+            'to'    => $to,
+            'date'  => $to, // back-compat
             'kpis'  => [
                 'today' => $today,
                 'prev'  => $prev,
@@ -5829,6 +5866,97 @@ class ClientController extends ApiController
         return $this->respond(['message' => 'Holiday deleted']);
     }
 
+    // --- Shifts (named weekly schedules, mapped to staff) ------------------
+
+    /** GET /client/shifts — shifts with decoded weekly hours. */
+    public function shiftsList()
+    {
+        if ($resp = $this->requirePermission('team')) {
+            return $resp;
+        }
+        $cid    = $this->clientId();
+        $shifts = (new ShiftModel())->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('name', 'ASC')->findAll();
+        foreach ($shifts as &$s) {
+            $s['working_hours'] = $this->decodeWorkingHours($s['working_hours'] ?? null);
+        }
+        unset($s);
+
+        return $this->respond(['shifts' => $shifts]);
+    }
+
+    /** Shift fields from the request body. */
+    private function shiftData(int $cid): array
+    {
+        return [
+            'client_id'     => $cid,
+            'name'          => trim((string) $this->input('name')),
+            'working_hours' => json_encode($this->normalizeWorkingHours($this->input('working_hours'))),
+        ];
+    }
+
+    /** POST /client/shifts */
+    public function createShift()
+    {
+        if ($resp = $this->requirePermission('team', 'create')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new ShiftModel();
+        $data  = $this->shiftData($cid);
+        if ($data['name'] === '') {
+            return $this->failValidationErrors(['name' => 'Enter a shift name.']);
+        }
+        $id = $model->insert($data);
+        if ($id === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('created', 'shift', (int) $id, 'Added shift ' . $data['name']);
+
+        return $this->respondCreated(['message' => 'Shift added', 'id' => $id]);
+    }
+
+    /** POST /client/shifts/{id} */
+    public function updateShift(int $id)
+    {
+        if ($resp = $this->requirePermission('team', 'update')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new ShiftModel();
+        if (! $model->where('client_id', $cid)->find($id)) {
+            return $this->failNotFound('Shift not found');
+        }
+        $data = $this->shiftData($cid);
+        if ($data['name'] === '') {
+            return $this->failValidationErrors(['name' => 'Enter a shift name.']);
+        }
+        if ($model->update($id, $data) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->logActivity('updated', 'shift', $id, 'Updated shift ' . $data['name']);
+
+        return $this->respond(['message' => 'Shift updated']);
+    }
+
+    /** POST /client/shifts/{id}/delete — soft delete; unmaps any staff on it. */
+    public function deleteShift(int $id)
+    {
+        if ($resp = $this->requirePermission('team', 'delete')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $model = new ShiftModel();
+        $row   = $model->where('client_id', $cid)->find($id);
+        if (! $row) {
+            return $this->failNotFound('Shift not found');
+        }
+        $model->delete($id);
+        (new ClientStaffModel())->builder()->where('client_id', $cid)->where('shift_id', $id)->update(['shift_id' => null]);
+        $this->logActivity('deleted', 'shift', $id, 'Deleted shift ' . ($row['name'] ?? ''));
+
+        return $this->respond(['message' => 'Shift deleted']);
+    }
+
     /** Office fields from the request body. */
     private function officeData(int $cid): array
     {
@@ -5944,6 +6072,7 @@ class ClientController extends ApiController
         $offices = $this->idNameMap($this->officeLocations($cid));
         $leadTypes = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
         $references = $this->idNameMap($this->lookupRows(LeadReferenceModel::class, $cid));
+        $shifts = $this->idNameMap((new ShiftModel())->where('client_id', $cid)->findAll());
 
         foreach ($staff as &$s) {
             $s['has_password'] = ! empty($s['password'] ?? null);
@@ -5952,6 +6081,7 @@ class ClientController extends ApiController
             $s['manager_name']      = $s['reports_to'] ? ($names[$s['reports_to']] ?? null) : null;
             $s['department']        = $s['department_id'] ? ($depts[$s['department_id']] ?? null) : null;
             $s['office_name']       = $s['office_location_id'] ? ($offices[$s['office_location_id']] ?? null) : null;
+            $s['shift_name']        = ($s['shift_id'] ?? null) ? ($shifts[$s['shift_id']] ?? null) : null;
             $s['lead_type']         = $s['lead_type_id'] ? ($leadTypes[$s['lead_type_id']] ?? null) : null;
             $s['reference_name']    = $s['reference_id'] ? ($references[$s['reference_id']] ?? null) : null;
             $extra                  = json_decode((string) ($s['extra_permissions'] ?? ''), true);
@@ -6370,6 +6500,7 @@ class ClientController extends ApiController
             'lead_type_id'       => (int) $this->input('lead_type_id') ?: null,
             'reference_id'       => (int) $this->input('reference_id') ?: null,
             'office_location_id' => (int) $this->input('office_location_id') ?: null,
+            'shift_id'           => (int) $this->input('shift_id') ?: null,
             'department_id'      => (int) $this->input('department_id') ?: null,
             'facebook'           => trim((string) ($this->input('facebook') ?? '')) ?: null,
             'linkedin'           => trim((string) ($this->input('linkedin') ?? '')) ?: null,

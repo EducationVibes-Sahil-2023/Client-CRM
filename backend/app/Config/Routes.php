@@ -392,6 +392,11 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->post('holidays', 'ClientController::createHoliday', ['filter' => 'feature:team']);
     $routes->post('holidays/(:num)', 'ClientController::updateHoliday/$1', ['filter' => 'feature:team']);
     $routes->post('holidays/(:num)/delete', 'ClientController::deleteHoliday/$1', ['filter' => 'feature:team']);
+    // Shifts (named weekly schedules) — mapped to staff, feed the first-response SLA
+    $routes->get('shifts', 'ClientController::shiftsList', ['filter' => 'feature:team']);
+    $routes->post('shifts', 'ClientController::createShift', ['filter' => 'feature:team']);
+    $routes->post('shifts/(:num)', 'ClientController::updateShift/$1', ['filter' => 'feature:team']);
+    $routes->post('shifts/(:num)/delete', 'ClientController::deleteShift/$1', ['filter' => 'feature:team']);
 
     // Asset management (gated by the 'assets' plan feature)
     $routes->group('', ['filter' => 'feature:assets'], static function (RouteCollection $routes) {
