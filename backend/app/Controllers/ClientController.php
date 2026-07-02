@@ -1863,10 +1863,22 @@ class ClientController extends ApiController
         $lastCallByPhone = [];
         $lastConnByPhone = [];
         $connTimesByPhone = [];
+        $callCountByPhone = [];      // total calls per number (any staff, any status)
+        $callCountByPhoneStaff = []; // calls per number, per calling staff id
         if ($pagePhones) {
-            foreach ((new CallLogModel())->select('contact, call_start, connected')->where('client_id', $cid)->whereIn('contact', $pagePhones)->findAll() as $row) {
+            foreach ((new CallLogModel())->select('contact, call_start, connected, staff_id')->where('client_id', $cid)->whereIn('contact', $pagePhones)->findAll() as $row) {
                 $k = (string) ($row['contact'] ?? '');
-                if ($k === '' || $row['call_start'] === null) {
+                if ($k === '') {
+                    continue;
+                }
+                // Total call count is by phone number only — independent of the
+                // lead link or who the lead is assigned to.
+                $callCountByPhone[$k] = ($callCountByPhone[$k] ?? 0) + 1;
+                $sid = (int) ($row['staff_id'] ?? 0);
+                if ($sid > 0) {
+                    $callCountByPhoneStaff[$k][$sid] = ($callCountByPhoneStaff[$k][$sid] ?? 0) + 1;
+                }
+                if ($row['call_start'] === null) {
                     continue;
                 }
                 if (! isset($lastCallByPhone[$k]) || $row['call_start'] > $lastCallByPhone[$k]) {
@@ -1907,6 +1919,18 @@ class ClientController extends ApiController
             // "Last call" = latest call of any status; "Last connected" = latest answered call.
             $r['last_call_at']      = $this->laterOf($lastCallByPhone[$ph] ?? null, $alt !== '' ? ($lastCallByPhone[$alt] ?? null) : null);
             $r['last_connected_at'] = $this->laterOf($lastConnByPhone[$ph] ?? null, $alt !== '' ? ($lastConnByPhone[$alt] ?? null) : null);
+            // Call counts on this lead's number(s): total = all calls (any staff);
+            // assigned = only calls made by the lead's assigned staff.
+            $nums       = array_values(array_unique(array_filter([$ph, $alt !== '' && $alt !== $ph ? $alt : null])));
+            $assignedTo = (int) ($r['assigned_to'] ?? 0);
+            $total = 0;
+            $assigned = 0;
+            foreach ($nums as $n) {
+                $total    += $callCountByPhone[$n] ?? 0;
+                $assigned += $assignedTo > 0 ? ($callCountByPhoneStaff[$n][$assignedTo] ?? 0) : 0;
+            }
+            $r['call_count']          = $total;
+            $r['assigned_call_count'] = $assigned;
             $r['custom_fields']    = $this->decodeCustom($r['custom_fields'] ?? null);
         }
         unset($r);

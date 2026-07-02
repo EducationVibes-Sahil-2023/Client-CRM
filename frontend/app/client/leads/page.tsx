@@ -1182,6 +1182,9 @@ export default function ClientLeads() {
     { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) ?? dash },
     // Latest connected (answered) call.
     { key: "last_connected", header: "Last connected", width: 150, sortAccessor: (l) => l.last_connected_at ?? null, render: (l) => stackedDateTime(l.last_connected_at) ?? dash },
+    // Total calls to this lead's number (any staff) vs calls by the assigned staff only.
+    { key: "call_count", header: "Total calls", width: 110, align: "right", sortAccessor: (l) => l.call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.call_count ?? 0}</span> },
+    { key: "assigned_call_count", header: "Assigned calls", width: 130, align: "right", sortAccessor: (l) => l.assigned_call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-600">{l.assigned_call_count ?? 0}</span> },
     // Follow-up status flag (orange upcoming / red overdue / green done), server-computed.
     { key: "follow_flag", header: "Follow-up status", width: 150, render: (l) => followFlagBadge(l.follow_flag) ?? dash },
     // First-response SLA: working time from assignment → first connected call by the assigned user.

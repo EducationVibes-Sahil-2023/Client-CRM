@@ -487,15 +487,20 @@ export default function ClientCalls() {
   const [logTotal, setLogTotal] = useState(0);
 
   // Filtering + pagination happen in SQL — `calls` IS the current page.
-  const callsQuery = useMemo<CallsQuery>(() => ({
-    q: search.trim() || undefined,
-    type: lType,
-    source: lSource,
-    status: lStatus,
-    connected: lConn,
-    from: lDate.from || undefined,
-    to: lDate.to || undefined,
-  }), [search, lType, lSource, lStatus, lConn, lDate]);
+  // Resolve the date preset (Today / Last 7 days / …) to concrete from–to bounds
+  // so preset ranges filter server-side too (not just the "custom" range).
+  const callsQuery = useMemo<CallsQuery>(() => {
+    const { from, to } = resolveDateRange(lDate);
+    return {
+      q: search.trim() || undefined,
+      type: lType,
+      source: lSource,
+      status: lStatus,
+      connected: lConn,
+      from: from || undefined,
+      to: to || undefined,
+    };
+  }, [search, lType, lSource, lStatus, lConn, lDate]);
 
   // Fetch one page from the server whenever the log tab is open and the query or
   // page changes (debounced so search-as-you-type doesn't spam the server).

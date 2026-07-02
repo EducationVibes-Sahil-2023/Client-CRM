@@ -269,6 +269,10 @@ export interface Lead {
   last_call_at?: string | null;
   /** Latest connected (answered) call to this lead's phone, or null if none. */
   last_connected_at?: string | null;
+  /** Total calls to this lead's number(s) — any staff, any status. */
+  call_count?: number;
+  /** Calls to this lead's number(s) made by the lead's assigned staff. */
+  assigned_call_count?: number;
   /** First-response SLA: working seconds from assignment → first connected call
    *  by the assigned user (10 = off-day credit), or null if not yet responded. */
   first_response_seconds?: number | string | null;
