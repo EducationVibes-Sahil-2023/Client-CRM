@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { login, type Role } from "../lib/api";
+import { login, getSession, type Role } from "../lib/api";
 import { isEmail } from "../lib/validation";
 import { useToast } from "../components/toast/ToastProvider";
 
@@ -30,6 +30,20 @@ export default function Login() {
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
   const [loading, setLoading] = useState(false);
+  // Already signed in? Skip the form and go straight to the right dashboard.
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    getSession()
+      .then((user) => {
+        if (!alive) return;
+        if (user) router.replace(dashboards[user.role] ?? "/dashboard");
+        else setChecking(false);
+      })
+      .catch(() => { if (alive) setChecking(false); });
+    return () => { alive = false; };
+  }, [router]);
 
   function validate(): boolean {
     const e: { email?: string; password?: string } = {};
@@ -60,6 +74,19 @@ export default function Login() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // While verifying an existing session, show a lightweight loader instead of
+  // flashing the login form (and then redirecting) for already-signed-in users.
+  if (checking) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50">
+        <svg className="h-8 w-8 animate-spin text-indigo-600" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
+        </svg>
+      </div>
+    );
   }
 
   return (

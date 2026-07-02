@@ -8,13 +8,14 @@ import {
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useClient } from "../ClientContext";
-import { Card, PageHeader, Spinner, EmptyState, SkeletonStats, SkeletonBlock, fmtDateTime } from "../../admin/ui";
+import { Card, PageHeader, Spinner, EmptyState, SkeletonStats, SkeletonBlock } from "../../admin/ui";
+import { fmtWallDateTime } from "../../lib/datetime";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
 import { DataTable, Pagination, Avatar, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, resolveDateRange, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { CallActivityList } from "../../admin/CallActivity";
-import { CALL_TYPE_LABEL, CALL_SOURCE_LABEL, CALL_STATUSES, callTypeChip, statusMeta, normalizeStatusKey, formatDuration } from "../../lib/calls";
+import { CALL_STATUSES, callTypeChip, statusMeta, normalizeStatusKey, formatDuration, typeLabel, sourceLabel } from "../../lib/calls";
 
 // ---- colour + format helpers -------------------------------------------------
 const HEX: Record<string, string> = {
@@ -295,8 +296,8 @@ function ConnectAppPanel() {
     { name: "source", req: true, desc: "ivr or phone (where the call happened)." },
     { name: "status", req: true, desc: "Free text shown as-is, e.g. ANSWERED, MISSED, Busy." },
     { name: "duration", req: true, desc: "Call length in seconds (0 or more). Connected is auto-set when duration > 0." },
-    { name: "call_start", req: true, desc: "YYYY-MM-DD HH:MM:SS or a UNIX timestamp — stored in IST (UTC+5:30)." },
-    { name: "call_end", req: true, desc: "YYYY-MM-DD HH:MM:SS or a UNIX timestamp — stored in IST (UTC+5:30)." },
+    { name: "call_start", req: true, desc: "YYYY-MM-DD HH:MM:SS or a UNIX timestamp — stored exactly as sent (no timezone shift)." },
+    { name: "call_end", req: true, desc: "YYYY-MM-DD HH:MM:SS or a UNIX timestamp — stored exactly as sent (no timezone shift)." },
   ];
 
   const fieldCls = "flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700";
@@ -520,13 +521,13 @@ export default function ClientCalls() {
   const logCols: Column<CallLog>[] = [
     { key: "lead", header: "Lead", width: 170, lockVisible: true, render: (c) => (c.lead_name ? <span className="font-medium text-slate-800">{c.lead_name}</span> : <span className="text-slate-400">Unmatched</span>) },
     { key: "contact", header: "Number", width: 130, render: (c) => <span className="tabular-nums text-slate-600">{c.contact ?? "—"}</span> },
-    { key: "type", header: "Type", width: 110, render: (c) => <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${callTypeChip(c.type)}`}>{c.type ? CALL_TYPE_LABEL[c.type] : "—"}</span> },
-    { key: "source", header: "Source", width: 100, render: (c) => (c.source ? <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">{CALL_SOURCE_LABEL[c.source]}</span> : dash2) },
+    { key: "type", header: "Type", width: 110, render: (c) => <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${callTypeChip(c.type)}`}>{typeLabel(c.type)}</span> },
+    { key: "source", header: "Source", width: 100, render: (c) => (c.source ? <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">{sourceLabel(c.source)}</span> : dash2) },
     { key: "status", header: "Status", width: 150, render: (c) => { const m = statusMeta(c.call_status); return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${m.chip}`}>{m.label}</span>; } },
     { key: "connected", header: "Connected", width: 110, render: (c) => <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${c.connected ? "text-emerald-600" : "text-slate-400"}`}><span className={`h-2 w-2 rounded-full ${c.connected ? "bg-emerald-500" : "bg-slate-300"}`} />{c.connected ? "Yes" : "No"}</span> },
     { key: "duration", header: "Duration", width: 100, render: (c) => <span className="tabular-nums text-slate-600">{formatDuration(c.duration)}</span> },
     { key: "staff", header: "Staff", width: 150, render: (c) => c.staff_name ?? dash2 },
-    { key: "call_start", header: "When", width: 170, render: (c) => <span className="text-slate-600">{fmtDateTime(c.call_start)}</span> },
+    { key: "call_start", header: "When", width: 170, render: (c) => <span className="text-slate-600">{fmtWallDateTime(c.call_start)}</span> },
     // SIM tracking (hidden by default — show via the Columns menu).
     { key: "calling_sim", header: "Calling SIM", width: 120, defaultHidden: true, render: (c) => <span className="text-slate-600">{c.calling_sim || "—"}</span> },
     { key: "sim_status", header: "SIM status", width: 120, defaultHidden: true, render: (c) => <span className="text-slate-600">{c.sim_status || "—"}</span> },

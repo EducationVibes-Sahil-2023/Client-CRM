@@ -42,6 +42,38 @@ export function fmtTime(iso?: string | null): string {
   return d.toLocaleTimeString(LOCALE, { hour: "numeric", minute: "2-digit", timeZone: APP_TZ });
 }
 
+// ---- Wall-clock timestamps (already in the intended local time) --------------
+// Call times are stored EXACTLY as the dialer sent them (IST wall-clock, no zone),
+// so they must be shown as-is — NOT parsed as UTC and shifted by +5:30 like the
+// UTC-stored columns above. These render the literal date/time digits.
+
+/** Parse "YYYY-MM-DD HH:MM(:SS)" literally into date parts (no timezone math). */
+function parseWall(s?: string | null): Date | null {
+  if (!s) return null;
+  const m = String(s).match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +(m[4] ?? 0), +(m[5] ?? 0), +(m[6] ?? 0));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** "4 Jun 2026" from a wall-clock value (no shift). */
+export function fmtWallDate(s?: string | null): string {
+  const d = parseWall(s);
+  return d ? d.toLocaleDateString(LOCALE, { day: "numeric", month: "short", year: "numeric" }) : "—";
+}
+
+/** "4 Jun 2026, 8:30 pm" from a wall-clock value (no shift). */
+export function fmtWallDateTime(s?: string | null): string {
+  const d = parseWall(s);
+  return d ? d.toLocaleString(LOCALE, { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "—";
+}
+
+/** "8:30 pm" from a wall-clock value (no shift). */
+export function fmtWallTime(s?: string | null): string {
+  const d = parseWall(s);
+  return d ? d.toLocaleTimeString(LOCALE, { hour: "numeric", minute: "2-digit" }) : "—";
+}
+
 /** Relative "just now / 5 min ago / 3h ago / 2d ago", then falls back to a date. */
 export function timeAgo(iso?: string | null): string {
   const d = parseServer(iso);

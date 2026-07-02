@@ -42,12 +42,14 @@ class CallIngestService
     private const TZ = 'Asia/Kolkata';
 
     /**
-     * Normalise a date into IST 'Y-m-d H:i:s', or null if unparseable.
+     * Normalise a call time to 'Y-m-d H:i:s', stored **exactly as the dialer sent
+     * it** — no timezone shift. The dialer's times are already IST wall-clock (they
+     * include +5:30), so we must NOT add another +5:30.
      *
-     *  - A UNIX timestamp is an absolute instant (epoch/UTC) → converted to the
-     *    IST wall-clock (i.e. +5:30 is applied).
-     *  - A 'YYYY-MM-DD HH:MM:SS' string is treated as IST as-given (no shifting),
-     *    so the time the dialer recorded is stored unchanged.
+     *  - A 'YYYY-MM-DD HH:MM:SS' (or ISO, or with a +05:30 suffix) string keeps its
+     *    literal wall-clock digits.
+     *  - A UNIX epoch (seconds, or milliseconds) is formatted as its wall-clock
+     *    with no offset applied.
      */
     private static function toDateTime($v): ?string
     {
@@ -55,15 +57,24 @@ class CallIngestService
             return null;
         }
 
-        $tz = new \DateTimeZone(self::TZ);
-        try {
-            if (is_numeric($v)) {
-                // Epoch is UTC; shift to IST for display/storage.
-                return (new \DateTime('@' . (int) $v))->setTimezone($tz)->format('Y-m-d H:i:s');
+        if (is_numeric($v)) {
+            $ts = (int) $v;
+            if ($ts > 20000000000) {
+                $ts = (int) ($ts / 1000); // milliseconds → seconds
             }
 
-            // Parse the wall-clock string in IST so it isn't shifted.
-            return (new \DateTime((string) $v, $tz))->format('Y-m-d H:i:s');
+            return gmdate('Y-m-d H:i:s', $ts); // wall-clock, no +5:30 added
+        }
+
+        // Take the literal date+time digits, ignoring any timezone marker so an
+        // already-+5:30 value isn't shifted again.
+        if (preg_match('/(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/', (string) $v, $m)) {
+            return sprintf('%04d-%02d-%02d %02d:%02d:%02d', $m[1], $m[2], $m[3], $m[4], $m[5], $m[6] ?? 0);
+        }
+
+        // Fallback: best-effort parse as an IST wall-clock (no shift).
+        try {
+            return (new \DateTime((string) $v, new \DateTimeZone(self::TZ)))->format('Y-m-d H:i:s');
         } catch (\Throwable $e) {
             return null;
         }
@@ -301,9 +312,13 @@ class CallIngestService
                 'staff_id'      => $rowStaffId ?: null,
                 'staff_contact' => $staffContact ?: null,
                 'contact'       => $contact ?: null,
-                'call_status'   => mb_substr($statusRaw, 0, 60) ?: null,
-                'source'        => in_array($srcRaw, ['ivr', 'phone'], true) ? $srcRaw : null,
-                'type'          => in_array($typeRaw, ['incoming', 'outgoing', 'missed'], true) ? $typeRaw : null,
+                // Preserve the dialer's status text; normalise type/source to
+                // lower-case. Type stays an enum (case-insensitive); source keeps
+                // whatever the dialer sends (e.g. "Mobile" → "mobile"), so it's not
+                // dropped just because it isn't "ivr"/"phone".
+                'call_status'   => mb_substr(trim($statusRaw), 0, 60) ?: null,
+                'source'        => mb_substr(strtolower(trim($srcRaw)), 0, 30) ?: null,
+                'type'          => in_array(strtolower(trim($typeRaw)), ['incoming', 'outgoing', 'missed'], true) ? strtolower(trim($typeRaw)) : null,
                 'duration'      => $duration,
                 // Answered when there's talk time, or the dialer flags the status.
                 'connected'     => ($duration > 0 || in_array(strtoupper(trim($statusRaw)), ['ANSWERED', 'ANSWER', 'CONNECTED'], true)) ? 1 : 0,

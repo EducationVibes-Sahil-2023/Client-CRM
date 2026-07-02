@@ -1,9 +1,9 @@
 "use client";
 
 import type { CallLog } from "../lib/client";
-import { CALL_TYPE_LABEL, formatDuration, statusMeta } from "../lib/calls";
+import { formatDuration, statusMeta, typeLabel, sourceLabel } from "../lib/calls";
 import { Avatar } from "./DataTable";
-import { fmtDate, fmtTime, fmtDateTime } from "../lib/datetime";
+import { fmtWallDate, fmtWallTime, fmtWallDateTime } from "../lib/datetime";
 
 /** Per-direction phone-icon colour + label. */
 const DIR = {
@@ -34,9 +34,12 @@ const SOURCE = {
  */
 export function CallActivityItem({ call }: { call: CallLog }) {
   const dir = DIR[(call.type as keyof typeof DIR)] ?? DIR.outgoing;
-  const src = SOURCE[(call.source as keyof typeof SOURCE)] ?? null;
+  // Known source → its device badge; any other (e.g. "mobile") → a generic badge
+  // with the title-cased label + first letter, so custom sources still show.
+  const src = SOURCE[(call.source as keyof typeof SOURCE)]
+    ?? (call.source ? { label: sourceLabel(call.source), badge: call.source.charAt(0).toUpperCase(), icon: SOURCE.phone.icon } : null);
   const sm = statusMeta(call.call_status);
-  const typeLabel = call.type ? CALL_TYPE_LABEL[call.type] : "Call";
+  const dirLabel = call.type ? typeLabel(call.type) : "Call";
 
   return (
     <div className="flex items-start gap-3 px-4 py-3.5">
@@ -44,7 +47,7 @@ export function CallActivityItem({ call }: { call: CallLog }) {
 
       {/* Who + what */}
       <div className="min-w-0 flex-1">
-        <div className="text-[11px] text-slate-400">{fmtDateTime(call.call_start)}</div>
+        <div className="text-[11px] text-slate-400">{fmtWallDateTime(call.call_start)}</div>
         <div className="truncate text-sm font-semibold text-indigo-600">{call.staff_name ?? "Unknown staff"}</div>
 
         <div className="mt-1 flex items-center gap-2">
@@ -52,14 +55,14 @@ export function CallActivityItem({ call }: { call: CallLog }) {
             <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={dir.arrow} strokeLinecap="round" strokeLinejoin="round" /></svg>
           </span>
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${sm.chip}`}>{sm.label}</span>
-          <span className="text-xs text-slate-400">({typeLabel})</span>
+          <span className="text-xs text-slate-400">({dirLabel})</span>
           {call.connected && (
             <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600">{formatDuration(call.duration)}</span>
           )}
         </div>
 
         <div className="mt-1 text-[11px] text-slate-400">
-          {fmtDate(call.call_start)} · {fmtTime(call.call_start)} – {fmtTime(call.call_end)}
+          {fmtWallDate(call.call_start)} · {fmtWallTime(call.call_start)} – {fmtWallTime(call.call_end)}
         </div>
       </div>
 

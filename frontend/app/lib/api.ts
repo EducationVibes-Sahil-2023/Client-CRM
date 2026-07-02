@@ -85,6 +85,22 @@ export async function login(
   return data as LoginResult;
 }
 
+/**
+ * GET /auth/me — the currently signed-in user, or null when there's no valid
+ * session. Does NOT redirect on 401 (unlike the area fetch handlers), so it's
+ * safe to call from public pages (e.g. the login page checking "am I already in?").
+ */
+export async function getSession(): Promise<SessionUser | null> {
+  try {
+    const res = await fetch(`${API_URL}/auth/me`, { credentials: "include" });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return (data?.user as SessionUser) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function postPublic(path: string, body: Record<string, unknown>) {
   const res = await fetch(`${API_URL}${path}`, {
     method: "POST",

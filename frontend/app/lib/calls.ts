@@ -11,6 +11,13 @@ export const CALL_SOURCE_LABEL: Record<string, string> = {
   phone: "Phone",
 };
 
+/** Title-case an unknown value so custom types/sources (e.g. "mobile") still read well. */
+const titleCase = (s: string) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+/** Display label for a call type — known labels win, else the raw value title-cased. */
+export const typeLabel = (t?: string | null) => (t ? (CALL_TYPE_LABEL[t] ?? titleCase(t)) : "—");
+/** Display label for a call source — known labels win, else the raw value title-cased. */
+export const sourceLabel = (s?: string | null) => (s ? (CALL_SOURCE_LABEL[s] ?? titleCase(s)) : "—");
+
 /** Tailwind classes for a call-direction pill. */
 export const callTypeChip = (type: string | null | undefined): string => {
   switch (type) {

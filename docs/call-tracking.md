@@ -189,19 +189,28 @@ field is rejected (`422`) with a message naming the call number and field
 > | `sim_status` | `simstatus` |
 > | `calling_date` | `datetime` |
 >
-> Values must still be the string forms (`source`: `ivr`/`phone`; `type`:
-> `incoming`/`outgoing`/`missed`). A call counts as **connected** when `duration > 0`
-> **or** `status` is `ANSWERED`/`CONNECTED`. `staffid` is ignored — staff is matched
-> by `staff_contact` (phone), which is what first-response attribution needs.
+> **`type`** is case-insensitive and normalised to lower-case — `Outgoing` →
+> `outgoing` (kept to `incoming`/`outgoing`/`missed`; anything else is dropped).
+> **`source`** is stored as you send it (lower-cased) — e.g. `Mobile` → `mobile` — so
+> custom sources are preserved and shown title-cased (`Mobile`), not just `ivr`/`phone`.
+> **`status`** text is kept verbatim (`Answered`, `NotPicked`, …) and shown with its
+> matching label/colour. A call is **connected** when `duration > 0` **or** `status`
+> is `ANSWERED`/`CONNECTED`. `staffid` is ignored — staff is matched by
+> `staff_contact` (phone), which is what first-response attribution needs.
 
-#### Date & time (IST)
+#### Date & time — stored exactly as sent (no shift)
 
-Call times are stored as **Indian Standard Time, UTC+5:30** wall-clock:
+Call times are stored **exactly as the dialer sends them — no timezone is added**.
+Your dialer's times are already local (IST) wall-clock, so the CRM never applies
+another `+5:30`:
 
-- A **UNIX timestamp** is an absolute instant (epoch/UTC) and is converted to IST —
-  e.g. `1751256900` (04:15 UTC) is stored as `2025-06-30 09:45:00`.
-- A **`YYYY-MM-DD HH:MM:SS` string** is taken as IST exactly as given (no shifting),
-  so the local time your dialer recorded is stored unchanged.
+- A **`YYYY-MM-DD HH:MM:SS` string** (or ISO / a `+05:30` suffix) keeps its literal
+  date-and-time digits, unchanged.
+- A **UNIX epoch** (seconds, or milliseconds) is formatted to its wall-clock with
+  **no offset applied**.
+
+> If you were relying on the old UTC→IST conversion for epoch timestamps, send the
+> already-local wall-clock (string or IST-based epoch) instead.
 
 > Already using the old app? You can post the legacy `call_data` shape to this same
 > endpoint instead — see [Legacy `call_data`](#b-legacy-call_data-drop-in-for-the-existing-app) below.
