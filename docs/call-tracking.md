@@ -177,6 +177,23 @@ field is rejected (`422`) with a message naming the call number and field
 > legacy `call_data` `formData`, plus the no-underscore aliases `callingsim` and
 > `simstatus`.
 
+> **Field-name aliases (clean payload).** For dialers that emit slightly different
+> keys, each field accepts an alias — the clean name wins when both are present:
+>
+> | Field | Also accepts |
+> |-------|--------------|
+> | `source` | `calls_source` |
+> | `type` | `calls_type` |
+> | `status` | `call_status` |
+> | `calling_sim` | `simnumber` |
+> | `sim_status` | `simstatus` |
+> | `calling_date` | `datetime` |
+>
+> Values must still be the string forms (`source`: `ivr`/`phone`; `type`:
+> `incoming`/`outgoing`/`missed`). A call counts as **connected** when `duration > 0`
+> **or** `status` is `ANSWERED`/`CONNECTED`. `staffid` is ignored — staff is matched
+> by `staff_contact` (phone), which is what first-response attribution needs.
+
 #### Date & time (IST)
 
 Call times are stored as **Indian Standard Time, UTC+5:30** wall-clock:

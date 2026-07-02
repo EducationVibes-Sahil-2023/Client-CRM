@@ -1790,7 +1790,13 @@ class ClientController extends ApiController
         return [$col, $dir];
     }
 
-    /** GET /client/leads — this client's leads, ordered per the request, name-decorated. */
+    /**
+     * GET /client/leads — one page of this client's leads (server-side paginated,
+     * filtered, sorted). Scales to lakhs of rows: SQL does WHERE/ORDER BY/LIMIT and
+     * returns the total count; only the page's rows are name-decorated. Query
+     * params: page, per_page, sort, dir, q, and the filters (status, sub, source,
+     * lead_type, reference, assigned, follow_status, created/assigned/follow ranges).
+     */
     public function leads()
     {
         if ($resp = $this->requirePermission('leads')) {
@@ -1802,18 +1808,24 @@ class ClientController extends ApiController
         // Hide leads that are mid-transfer awaiting admin approval (from everyone).
         $q->where('(pending_transfer IS NULL OR pending_transfer = 0)');
 
-        // Staff see only the leads in their visibility scope — reference "agents"
-        // see only their reference's leads; everyone else, their assigned leads.
+        // Staff visibility scope + the request's filters (all applied in SQL).
         $this->applyLeadScope($q);
+        $this->applyLeadFilters($q);
 
-        // Server-side ordering — driven by the admin's whole-team default sort
-        // and per-column asc/desc header toggles (sort=<column>&dir=asc|desc).
+        // Total matching count (before paging) — drives the page bar.
+        $total = $q->countAllResults(false);
+
+        // Ordering (admin whole-team default + column asc/desc header toggle).
         [$col, $dir] = $this->leadSortColumn($this->request->getGet('sort'), $this->request->getGet('dir'));
         $q->orderBy($col, $dir);
         if ($col !== 'id') {
-            $q->orderBy('id', 'DESC'); // stable tiebreak so equal keys keep a fixed order
+            $q->orderBy('id', 'DESC'); // stable tiebreak
         }
-        $rows = $q->findAll();
+
+        // Page window.
+        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
+        $rows    = $q->findAll($perPage, ($page - 1) * $perPage);
 
         $statusNames = $this->idNameMap($this->lookupRows(LeadStatusModel::class, $cid));
         $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
@@ -1821,36 +1833,50 @@ class ClientController extends ApiController
         $typeNames   = $this->idNameMap($this->lookupRows(LeadTypeModel::class, $cid));
         $refNames    = $this->idNameMap($this->lookupRows(LeadReferenceModel::class, $cid));
 
-        // Reminders & notes per lead — for the latest-reminder column and the
-        // follow-up status flag (orange upcoming / red overdue / green done).
+        // Only load the reminders/notes/calls for THIS page's leads/phones (keeps
+        // decoration cheap regardless of table size).
+        $pageIds    = array_values(array_filter(array_map(static fn ($r) => (int) $r['id'], $rows)));
+        $pagePhones = [];
+        foreach ($rows as $r) {
+            foreach ([(string) ($r['phone'] ?? ''), (string) ($r['alt_phone'] ?? '')] as $p) {
+                if ($p !== '') {
+                    $pagePhones[$p] = true;
+                }
+            }
+        }
+        $pagePhones = array_keys($pagePhones);
+
         $remindersByLead = [];
-        foreach ((new LeadReminderModel())->select('lead_id, remind_at')->where('client_id', $cid)->findAll() as $row) {
-            $remindersByLead[(int) $row['lead_id']][] = $row['remind_at'];
+        if ($pageIds) {
+            foreach ((new LeadReminderModel())->select('lead_id, remind_at')->where('client_id', $cid)->whereIn('lead_id', $pageIds)->findAll() as $row) {
+                $remindersByLead[(int) $row['lead_id']][] = $row['remind_at'];
+            }
         }
         $notesByLead = [];
-        foreach ((new LeadNoteModel())->select('lead_id, created_at')->where('client_id', $cid)->findAll() as $row) {
-            $notesByLead[(int) $row['lead_id']][] = $row['created_at'];
+        if ($pageIds) {
+            foreach ((new LeadNoteModel())->select('lead_id, created_at')->where('client_id', $cid)->whereIn('lead_id', $pageIds)->findAll() as $row) {
+                $notesByLead[(int) $row['lead_id']][] = $row['created_at'];
+            }
         }
-        // Calls per phone (matched by contact). We track:
-        //   - the latest call of ANY status  → "Last call" column (all calls),
-        //   - the latest CONNECTED call       → "Last connected" column,
-        //   - the connected call times list   → the follow-up flag (a connected
-        //     call at/after the follow-up marks it done).
-        $lastCallByPhone = []; // any call
-        $lastConnByPhone = []; // connected only
+        // Calls per phone (matched by contact): latest of any status → "Last call";
+        // latest connected → "Last connected"; connected times → follow-up flag.
+        $lastCallByPhone = [];
+        $lastConnByPhone = [];
         $connTimesByPhone = [];
-        foreach ((new CallLogModel())->select('contact, call_start, connected')->where('client_id', $cid)->findAll() as $row) {
-            $k = (string) ($row['contact'] ?? '');
-            if ($k === '' || $row['call_start'] === null) {
-                continue;
-            }
-            if (! isset($lastCallByPhone[$k]) || $row['call_start'] > $lastCallByPhone[$k]) {
-                $lastCallByPhone[$k] = $row['call_start'];
-            }
-            if ((int) $row['connected']) {
-                $connTimesByPhone[$k][] = $row['call_start'];
-                if (! isset($lastConnByPhone[$k]) || $row['call_start'] > $lastConnByPhone[$k]) {
-                    $lastConnByPhone[$k] = $row['call_start'];
+        if ($pagePhones) {
+            foreach ((new CallLogModel())->select('contact, call_start, connected')->where('client_id', $cid)->whereIn('contact', $pagePhones)->findAll() as $row) {
+                $k = (string) ($row['contact'] ?? '');
+                if ($k === '' || $row['call_start'] === null) {
+                    continue;
+                }
+                if (! isset($lastCallByPhone[$k]) || $row['call_start'] > $lastCallByPhone[$k]) {
+                    $lastCallByPhone[$k] = $row['call_start'];
+                }
+                if ((int) $row['connected']) {
+                    $connTimesByPhone[$k][] = $row['call_start'];
+                    if (! isset($lastConnByPhone[$k]) || $row['call_start'] > $lastConnByPhone[$k]) {
+                        $lastConnByPhone[$k] = $row['call_start'];
+                    }
                 }
             }
         }
@@ -1885,7 +1911,101 @@ class ClientController extends ApiController
         }
         unset($r);
 
-        return $this->respond(['leads' => $rows]);
+        return $this->respond([
+            'leads'    => $rows,
+            'total'    => $total,
+            'page'     => $page,
+            'per_page' => $perPage,
+        ]);
+    }
+
+    /**
+     * Apply the request's lead filters to a query/builder (used by the paged list
+     * AND the analytics summary, so both reflect the same filtered set). All
+     * comma-separated params. The follow-up-status filter is derived in SQL via
+     * EXISTS on notes/calls so it works under server-side paging.
+     */
+    private function applyLeadFilters($q): void
+    {
+        $get  = fn (string $k): string => trim((string) ($this->request->getGet($k) ?? ''));
+        $ids  = fn (string $k): array => array_values(array_filter(array_map('intval', explode(',', $get($k))), static fn ($v) => $v > 0));
+        $strs = fn (string $k): array => array_values(array_filter(array_map('trim', explode(',', $get($k))), static fn ($v) => $v !== ''));
+
+        if (($search = $get('q')) !== '') {
+            $q->groupStart()
+                ->like('name', $search)->orLike('phone', $search)->orLike('email', $search)
+                ->orLike('city', $search)->orLike('state', $search)
+                ->groupEnd();
+        }
+        if ($v = $ids('status')) {
+            $q->whereIn('status_id', $v);
+        }
+        if ($v = $ids('sub')) {
+            $q->whereIn('sub_status_id', $v);
+        }
+        if ($v = $ids('source')) {
+            $q->whereIn('source_id', $v);
+        }
+        if ($v = $ids('lead_type')) {
+            $q->whereIn('lead_type_id', $v);
+        }
+        if ($v = $strs('reference')) {
+            $q->whereIn('reference_name', $v);
+        }
+        // Assignee: staff ids plus the literal "unassigned".
+        $assigned = $strs('assigned');
+        if ($assigned) {
+            $staffIds = array_values(array_filter(array_map('intval', $assigned), static fn ($x) => $x > 0));
+            $q->groupStart();
+            if ($staffIds) {
+                $q->whereIn('assigned_to', $staffIds);
+            }
+            if (in_array('unassigned', $assigned, true)) {
+                $q->orWhere('assigned_to IS NULL', null, false);
+            }
+            $q->groupEnd();
+        }
+        // Date ranges (from/to). created_at + assigned_date are DATETIME; follow_date DATE.
+        if (($f = $get('created_from')) !== '') {
+            $q->where('created_at >=', $f . ' 00:00:00');
+        }
+        if (($f = $get('created_to')) !== '') {
+            $q->where('created_at <=', $f . ' 23:59:59');
+        }
+        if (($f = $get('assigned_from')) !== '') {
+            $q->where('assigned_date >=', $f . ' 00:00:00');
+        }
+        if (($f = $get('assigned_to_date')) !== '') {
+            $q->where('assigned_date <=', $f . ' 23:59:59');
+        }
+        if (($f = $get('follow_from')) !== '') {
+            $q->where('follow_date >=', $f);
+        }
+        if (($f = $get('follow_to')) !== '') {
+            $q->where('follow_date <=', $f);
+        }
+
+        // Follow-up status (upcoming / overdue / done) via EXISTS — a lead is
+        // "done" when a note or connected call landed on/after its follow-up date.
+        $fs = $strs('follow_status');
+        if ($fs) {
+            $today = date('Y-m-d');
+            $done  = "(EXISTS(SELECT 1 FROM lead_notes n WHERE n.lead_id = leads.id AND n.deleted_at IS NULL AND n.created_at >= leads.follow_date)"
+                . " OR EXISTS(SELECT 1 FROM calls c WHERE c.contact = leads.phone AND c.connected = 1 AND c.deleted_at IS NULL AND c.call_start >= leads.follow_date))";
+            $conds = [];
+            foreach ($fs as $f) {
+                if ($f === 'upcoming') {
+                    $conds[] = "(leads.follow_date IS NOT NULL AND leads.follow_date > '{$today}')";
+                } elseif ($f === 'done') {
+                    $conds[] = "(leads.follow_date IS NOT NULL AND leads.follow_date <= '{$today}' AND {$done})";
+                } elseif ($f === 'overdue') {
+                    $conds[] = "(leads.follow_date IS NOT NULL AND leads.follow_date <= '{$today}' AND NOT {$done})";
+                }
+            }
+            if ($conds) {
+                $q->where('(' . implode(' OR ', $conds) . ')', null, false);
+            }
+        }
     }
 
     /**
@@ -1987,6 +2107,7 @@ class ClientController extends ApiController
         $srcCounts    = $this->leadCountsBy($model, $cid, 'source_id');
         $totalQ       = (new LeadModel())->where('client_id', $cid);
         $this->applyLeadScope($totalQ);
+        $this->applyLeadFilters($totalQ);
         $total = $totalQ->countAllResults();
 
         // Parent statuses (no parent_id) vs sub-statuses (have a parent_id).
@@ -2073,6 +2194,7 @@ class ClientController extends ApiController
             ->where("{$column} >", 0)
             ->where('deleted_at', null);
         $this->applyLeadScope($b);
+        $this->applyLeadFilters($b);
         $rows = $b->groupBy($column)->get()->getResultArray();
 
         $out = [];
@@ -3574,12 +3696,22 @@ class ClientController extends ApiController
         if ($scope !== null) {
             $q->whereIn('staff_id', $scope ?: [0]);
         }
-        $rows = $q->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll();
+        $this->applyCallFilters($q, $cid);
 
-        $staffNames = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        $total   = $q->countAllResults(false);
+        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
+        $rows    = $q->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll($perPage, ($page - 1) * $perPage);
+
+        // Decorate only the page's rows (scope name lookups to their ids).
+        $staffIds = array_values(array_unique(array_filter(array_map(static fn ($r) => (int) ($r['staff_id'] ?? 0), $rows))));
+        $leadIds  = array_values(array_unique(array_filter(array_map(static fn ($r) => (int) ($r['lead_id'] ?? 0), $rows))));
+        $staffNames = $staffIds ? $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->whereIn('id', $staffIds)->findAll()) : [];
         $leadNames  = [];
-        foreach ((new LeadModel())->select('id, name, phone')->where('client_id', $cid)->findAll() as $l) {
-            $leadNames[(int) $l['id']] = ($l['name'] ?? '') !== '' ? $l['name'] : $l['phone'];
+        if ($leadIds) {
+            foreach ((new LeadModel())->select('id, name, phone')->where('client_id', $cid)->whereIn('id', $leadIds)->findAll() as $l) {
+                $leadNames[(int) $l['id']] = ($l['name'] ?? '') !== '' ? $l['name'] : $l['phone'];
+            }
         }
         foreach ($rows as &$r) {
             $r['staff_name'] = $r['staff_id'] ? ($staffNames[(int) $r['staff_id']] ?? null) : null;
@@ -3588,7 +3720,53 @@ class ClientController extends ApiController
         }
         unset($r);
 
-        return $this->respond(['calls' => $rows]);
+        return $this->respond([
+            'calls'    => $rows,
+            'total'    => $total,
+            'page'     => $page,
+            'per_page' => $perPage,
+        ]);
+    }
+
+    /** Apply the calls-log filters (search, type, source, status, connected, date). */
+    private function applyCallFilters($q, int $cid): void
+    {
+        $get  = fn (string $k): string => trim((string) ($this->request->getGet($k) ?? ''));
+        $strs = fn (string $k): array => array_values(array_filter(array_map('trim', explode(',', $get($k))), static fn ($v) => $v !== ''));
+        $db   = \Config\Database::connect();
+
+        if (($search = $get('q')) !== '') {
+            $like = '%' . $db->escapeLikeString($search) . '%';
+            $q->groupStart()
+                ->like('contact', $search)->orLike('staff_contact', $search)->orLike('call_status', $search)
+                ->orWhere("staff_id IN (SELECT id FROM client_staff WHERE client_id = {$cid} AND name LIKE '{$like}')", null, false)
+                ->orWhere("lead_id IN (SELECT id FROM leads WHERE client_id = {$cid} AND name LIKE '{$like}')", null, false)
+                ->groupEnd();
+        }
+        if ($v = $strs('type')) {
+            $q->whereIn('type', $v);
+        }
+        if ($v = $strs('source')) {
+            $q->whereIn('source', $v);
+        }
+        // Connected: yes / no (only constrains when exactly one is chosen).
+        $conn = $strs('connected');
+        if (count($conn) === 1) {
+            $q->where('connected', $conn[0] === 'yes' ? 1 : 0);
+        }
+        // Status keys — normalise call_status the same way the UI does
+        // (UPPER, spaces/dashes → underscore) and match the selected keys.
+        if ($v = $strs('status')) {
+            $vals = array_map(static fn ($s) => strtoupper(str_replace([' ', '-'], '_', $s)), $v);
+            $in   = implode(', ', array_map(static fn ($s) => $db->escape($s), $vals));
+            $q->where("UPPER(REPLACE(REPLACE(TRIM(call_status), ' ', '_'), '-', '_')) IN ({$in})", null, false);
+        }
+        if (($f = $get('from')) !== '') {
+            $q->where('call_start >=', $f . ' 00:00:00');
+        }
+        if (($f = $get('to')) !== '') {
+            $q->where('call_start <=', $f . ' 23:59:59');
+        }
     }
 
     /**

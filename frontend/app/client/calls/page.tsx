@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   getCallDashboard, getCalls, getLeadsSetup, getStaff, getLookups, getCallApiKey, rotateCallApiKey,
-  type CallDashboard, type CallRep, type CallLog, type LeadStatus, type LeadSource, type Staff, type LookupItem, type CallApiKeyInfo,
+  type CallDashboard, type CallRep, type CallLog, type LeadStatus, type LeadSource, type Staff, type LookupItem, type CallApiKeyInfo, type CallsQuery,
 } from "../../lib/client";
 import { API_URL } from "../../lib/api";
 import { useToast } from "../../components/toast/ToastProvider";
@@ -483,28 +483,34 @@ export default function ClientCalls() {
   const [lDate, setLDate] = useState<DateRange>(EMPTY_RANGE);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(defaultPageSize);
+  const [logTotal, setLogTotal] = useState(0);
 
+  // Filtering + pagination happen in SQL — `calls` IS the current page.
+  const callsQuery = useMemo<CallsQuery>(() => ({
+    q: search.trim() || undefined,
+    type: lType,
+    source: lSource,
+    status: lStatus,
+    connected: lConn,
+    from: lDate.from || undefined,
+    to: lDate.to || undefined,
+  }), [search, lType, lSource, lStatus, lConn, lDate]);
+
+  // Fetch one page from the server whenever the log tab is open and the query or
+  // page changes (debounced so search-as-you-type doesn't spam the server).
   useEffect(() => {
-    if (tab !== "log" || logLoaded) return;
-    getCalls().then((r) => { setCalls(r.calls ?? []); setLogLoaded(true); }).catch(() => toast.error("Could not load calls."));
-  }, [tab, logLoaded, toast]);
+    if (tab !== "log") return;
+    const t = setTimeout(() => {
+      getCalls({ page, per_page: perPage, ...callsQuery })
+        .then((r) => { setCalls(r.calls ?? []); setLogTotal(r.total ?? 0); setLogLoaded(true); })
+        .catch(() => toast.error("Could not load calls."));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [tab, page, perPage, callsQuery, toast]);
 
-  const logFiltered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const set = new Set(lStatus);
-    return calls.filter((c) => {
-      if (q && ![c.lead_name, c.staff_name, c.contact, c.staff_contact, c.call_status].some((v) => (v ?? "").toLowerCase().includes(q))) return false;
-      if (lType.length && !(c.type && lType.includes(c.type))) return false;
-      if (lSource.length && !(c.source && lSource.includes(c.source))) return false;
-      if (set.size && !set.has(normalizeStatusKey(c.call_status))) return false;
-      if (lConn.length && !lConn.includes(c.connected ? "yes" : "no")) return false;
-      if (!inDateRange(c.call_start, lDate)) return false;
-      return true;
-    });
-  }, [calls, search, lType, lSource, lStatus, lConn, lDate]);
-  const logPages = Math.max(1, Math.ceil(logFiltered.length / perPage));
+  const logRows = calls; // server page (already filtered + ordered)
+  const logPages = Math.max(1, Math.ceil(logTotal / perPage));
   const logSafe = Math.min(page, logPages);
-  const logRows = useMemo(() => logFiltered.slice((logSafe - 1) * perPage, logSafe * perPage), [logFiltered, logSafe, perPage]);
   const logActive = !!(search || lType.length || lSource.length || lStatus.length || lConn.length || rangeActive(lDate));
   // Active filter groups (search lives in the toolbar, so it's excluded here).
   const logCount = [lType.length, lSource.length, lStatus.length, lConn.length, rangeActive(lDate)].filter(Boolean).length;
@@ -683,7 +689,7 @@ export default function ClientCalls() {
               {logActive && <button onClick={() => { setSearch(""); clearLogFilters(); }} className="flex-shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>}
             </div>
             <div className="flex items-center gap-3">
-              <span className="hidden text-sm text-slate-400 sm:block">{logFiltered.length} call{logFiltered.length === 1 ? "" : "s"}</span>
+              <span className="hidden text-sm text-slate-400 sm:block">{logTotal.toLocaleString()} call{logTotal === 1 ? "" : "s"}</span>
               <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
                 {(["table", "feed"] as const).map((v) => (
                   <button key={v} onClick={() => setLogView(v)} className={`flex h-8 items-center rounded-md px-3 text-sm font-medium transition ${logView === v ? "bg-indigo-600 text-white shadow-sm" : "text-slate-500 hover:bg-slate-100"}`}>{v === "table" ? "Table" : "Activity"}</button>
@@ -697,7 +703,7 @@ export default function ClientCalls() {
               tableKey="calls" columns={logCols} rows={logRows} getKey={(c) => c.id} loading={!logLoaded} nowrap pageAlign="right"
               emptyTitle={logActive ? "No matching calls" : "No calls yet"}
               emptyHint={logActive ? "Try clearing or widening your filters." : "Calls appear here once your call-tracking app starts syncing."}
-              page={logSafe} totalPages={logPages} onPage={setPage} total={logFiltered.length}
+              page={logSafe} totalPages={logPages} onPage={setPage} total={logTotal}
               pageSize={perPage} onPageSize={(n) => { setPerPage(n); setPage(1); }}
             />
           ) : (
@@ -707,7 +713,7 @@ export default function ClientCalls() {
               ) : (
                 <>
                   <CallActivityList calls={logRows} />
-                  {logPages > 1 && <Pagination page={logSafe} totalPages={logPages} onPage={setPage} total={logFiltered.length} align="right" pageSize={perPage} onPageSize={(n) => { setPerPage(n); setPage(1); }} />}
+                  {logPages > 1 && <Pagination page={logSafe} totalPages={logPages} onPage={setPage} total={logTotal} align="right" pageSize={perPage} onPageSize={(n) => { setPerPage(n); setPage(1); }} />}
                 </>
               )}
             </div>

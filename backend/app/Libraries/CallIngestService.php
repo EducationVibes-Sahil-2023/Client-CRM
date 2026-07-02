@@ -267,12 +267,21 @@ class CallIngestService
         $toInsert = [];
         $skipped  = 0;
         foreach ($rows as $row) {
+            // Accept both the clean field names and the external dialer's variants
+            // (calls_source/calls_type/call_status/simnumber/simstatus/datetime).
+            $srcRaw    = (string) ($row['source'] ?? $row['calls_source'] ?? '');
+            $typeRaw   = (string) ($row['type'] ?? $row['calls_type'] ?? '');
+            $statusRaw = (string) ($row['status'] ?? $row['call_status'] ?? '');
+            $simNumRaw = (string) ($row['calling_sim'] ?? $row['simnumber'] ?? '');
+            $simStatRaw = (string) ($row['sim_status'] ?? $row['simstatus'] ?? '');
+            $callDate  = $row['calling_date'] ?? $row['datetime'] ?? null;
+
             $contact      = self::normalizePhone($row['contact'] ?? '');
             $staffContact = self::normalizePhone($row['staff_contact'] ?? '');
             $rowStaffId   = ($staffContact !== '' && isset($staffByPhone[$staffContact])) ? $staffByPhone[$staffContact] : $defaultStaffId;
             $duration     = (int) ($row['duration'] ?? 0);
             $callStart    = $row['call_start'] ?? null;
-            $callingSim   = mb_substr(trim((string) ($row['calling_sim'] ?? '')), 0, 30);
+            $callingSim   = mb_substr(trim($simNumRaw), 0, 30);
 
             // Reject duplicates — but only when we have a call_start (the stable
             // timestamp that makes a call identifiable); undated rows always insert.
@@ -292,18 +301,19 @@ class CallIngestService
                 'staff_id'      => $rowStaffId ?: null,
                 'staff_contact' => $staffContact ?: null,
                 'contact'       => $contact ?: null,
-                'call_status'   => mb_substr((string) ($row['status'] ?? ''), 0, 60) ?: null,
-                'source'        => in_array($row['source'] ?? '', ['ivr', 'phone'], true) ? $row['source'] : null,
-                'type'          => in_array($row['type'] ?? '', ['incoming', 'outgoing', 'missed'], true) ? $row['type'] : null,
+                'call_status'   => mb_substr($statusRaw, 0, 60) ?: null,
+                'source'        => in_array($srcRaw, ['ivr', 'phone'], true) ? $srcRaw : null,
+                'type'          => in_array($typeRaw, ['incoming', 'outgoing', 'missed'], true) ? $typeRaw : null,
                 'duration'      => $duration,
-                'connected'     => $duration > 0 ? 1 : 0,
+                // Answered when there's talk time, or the dialer flags the status.
+                'connected'     => ($duration > 0 || in_array(strtoupper(trim($statusRaw)), ['ANSWERED', 'ANSWER', 'CONNECTED'], true)) ? 1 : 0,
                 'call_start'    => $callStart,
                 'call_end'      => $row['call_end'] ?? null,
                 'sim1'          => mb_substr(trim((string) ($row['sim1'] ?? '')), 0, 30) ?: null,
                 'sim2'          => mb_substr(trim((string) ($row['sim2'] ?? '')), 0, 30) ?: null,
                 'calling_sim'   => $callingSim ?: null,
-                'sim_status'    => mb_substr(trim((string) ($row['sim_status'] ?? '')), 0, 60) ?: null,
-                'calling_date'  => $row['calling_date'] ?? ($callStart ? substr($callStart, 0, 10) : null),
+                'sim_status'    => mb_substr(trim($simStatRaw), 0, 60) ?: null,
+                'calling_date'  => $callDate ?: ($callStart ? substr($callStart, 0, 10) : null),
             ];
         }
 

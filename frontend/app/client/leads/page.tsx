@@ -8,7 +8,7 @@ import {
   getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS,
   type Lead, type LeadStatus, type LeadSource, type LeadType, type LeadReference, type Staff, type LeadImportResult, type LeadDetail,
   type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
-  type LeadImportColumn,
+  type LeadImportColumn, type LeadsQuery,
 } from "../../lib/client";
 import { requestNotifyPermission } from "../../lib/notify";
 import { useClient } from "../ClientContext";
@@ -28,7 +28,7 @@ import { Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../.
 import { DataTable, IconButton, type Column, type SortState } from "../../admin/DataTable";
 import { DonutSelect } from "../../admin/Charts";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
-import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
+import { DateRangeFilter, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { useHiddenPrefs, VisibilityMenu } from "../../admin/tableConfig";
 import { FieldRow, inputCls, isEmail } from "../../admin/clients/formKit";
 import { INDIA_STATES, INDIA_CITIES } from "../../lib/india";
@@ -411,46 +411,63 @@ export default function ClientLeads() {
   const [iAssignees, setIAssignees] = useState<string[]>([]);
   const [iNotify, setINotify] = useState(true);
 
-  // Plain function (not memoised) so it always reads the current sort/tableSort
-  // when called from a mutation handler; the mount effect calls it once.
-  const load = () => {
-    // The summary counts load in parallel and refresh after any change.
-    getLeadAnalytics().then(setAnalytics).catch(() => {});
-    // Reference data (setup) and the staff directory are best-effort: a user who
-    // can view leads but lacks leads_setup / team still gets their leads — just
-    // with fewer filter/assignee options — instead of the whole page failing.
-    const setupP = getLeadsSetup().catch(() => null);
-    const staffP = getStaff().catch(() => null);
-    return getLeads(tableSort?.key, tableSort?.dir)
-      .then(async (l) => {
-        setLeads(l.leads ?? []);
-        const setup = await setupP;
-        if (setup) {
-          setStatuses(setup.lead_statuses ?? []);
-          setSources(setup.lead_sources ?? []);
-          setLeadTypes(setup.lead_types ?? []);
-          setReferences(setup.references ?? []);
-          setStates(setup.states ?? []);
-          setCities(setup.cities ?? []);
-          setRequiredFields(new Set(setup.required_fields ?? []));
-        }
-        const s = await staffP;
-        if (s) setStaff(s.staff ?? []);
-      })
-      .catch(() => toast.error("Could not load leads."))
-      .finally(() => setLoading(false));
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(); }, []);
-  // Re-fetch leads (only) whenever the active sort changes — the ORDER BY runs in
-  // SQL. Skips the very first run since load() already did the initial fetch.
-  const firstLeadFetch = useRef(true);
+  // Total matching leads (from SQL) — drives the page bar.
+  const [total, setTotal] = useState(0);
+  // Bumped to force a page + summary refetch (after create/edit/delete/bulk/etc.).
+  const [fetchTick, setFetchTick] = useState(0);
+  const refresh = () => setFetchTick((t) => t + 1);
+
+  // The shared filter query (applied filters + instant search) sent to BOTH the
+  // paged list and the analytics summary, so both reflect the same set.
+  const filterQuery = useMemo<LeadsQuery>(() => ({
+    q: search.trim() || undefined,
+    status: appliedFilters.status,
+    sub: appliedFilters.sub,
+    source: appliedFilters.source,
+    lead_type: appliedFilters.leadType,
+    reference: appliedFilters.reference,
+    assigned: appliedFilters.assigned,
+    follow_status: appliedFilters.followStatus,
+    created_from: appliedFilters.created.from || undefined,
+    created_to: appliedFilters.created.to || undefined,
+    assigned_from: appliedFilters.assignedDate.from || undefined,
+    assigned_to_date: appliedFilters.assignedDate.to || undefined,
+    follow_from: appliedFilters.follow.from || undefined,
+    follow_to: appliedFilters.follow.to || undefined,
+  }), [search, appliedFilters]);
+
+  // Static reference data + staff directory (once). Best-effort — a user who can
+  // view leads but lacks leads_setup/team still gets their leads.
   useEffect(() => {
-    if (firstLeadFetch.current) { firstLeadFetch.current = false; return; }
-    getLeads(tableSort?.key, tableSort?.dir)
-      .then((l) => setLeads(l.leads ?? []))
-      .catch(() => toast.error("Could not load leads."));
-  }, [tableSort, toast]);
+    getLeadsSetup().then((setup) => {
+      setStatuses(setup.lead_statuses ?? []);
+      setSources(setup.lead_sources ?? []);
+      setLeadTypes(setup.lead_types ?? []);
+      setReferences(setup.references ?? []);
+      setStates(setup.states ?? []);
+      setCities(setup.cities ?? []);
+      setRequiredFields(new Set(setup.required_fields ?? []));
+    }).catch(() => {});
+    getStaff().then((s) => setStaff(s.staff ?? [])).catch(() => {});
+  }, []);
+
+  // Fetch ONE page from SQL whenever the page/size/sort/filters change (debounced
+  // so search-as-you-type doesn't spam the server). This is the real AJAX paging.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setApplying(true);
+      getLeads({ page, per_page: perPage, sort: tableSort?.key ?? null, dir: tableSort?.dir ?? null, ...filterQuery })
+        .then((l) => { setLeads(l.leads ?? []); setTotal(l.total ?? 0); })
+        .catch(() => toast.error("Could not load leads."))
+        .finally(() => { setApplying(false); setLoading(false); });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [page, perPage, tableSort, filterQuery, fetchTick, toast]);
+
+  // Summary reflects the whole filtered set (server analytics with the same filters).
+  useEffect(() => {
+    getLeadAnalytics(filterQuery).then(setAnalytics).catch(() => {});
+  }, [filterQuery, fetchTick]);
   useEffect(() => { getMe().then((m) => setIsAdmin(!!m.is_admin)).catch(() => {}); }, []);
   // Admin-defined custom fields for the lead form (Form Setup).
   useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
@@ -640,33 +657,8 @@ export default function ClientLeads() {
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [draft?.state, cities, leadCitiesByState]);
 
-  // Apply search (instant) + the applied filter set, then paginate.
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const f = appliedFilters;
-    return leads.filter((l) => {
-      if (q && ![l.name, l.phone, l.email, l.city, l.state, l.status, l.sub_status, l.assigned_to_name]
-        .some((v) => (v ?? "").toLowerCase().includes(q))) return false;
-      if (f.status.length && !f.status.includes(String(l.status_id ?? ""))) return false;
-      if (f.sub.length && !f.sub.includes(String(l.sub_status_id ?? ""))) return false;
-      if (f.source.length && !f.source.includes(String(l.source_id ?? ""))) return false;
-      if (f.leadType.length && !f.leadType.includes(String(l.lead_type_id ?? ""))) return false;
-      if (f.followStatus.length && !f.followStatus.includes(l.follow_flag ?? "")) return false;
-      if (f.assigned.length) {
-        const byId = l.assigned_to ? f.assigned.includes(String(l.assigned_to)) : false;
-        const byUnassigned = !l.assigned_to && f.assigned.includes("unassigned");
-        if (!byId && !byUnassigned) return false;
-      }
-      if (f.reference.length && !f.reference.includes(l.reference_name ?? "")) return false;
-      if (!inDateRange(l.created_date ?? l.created_at, f.created)) return false;
-      if (!inDateRange(l.assigned_date, f.assignedDate)) return false;
-      if (!inDateRange(l.follow_date, f.follow)) return false;
-      return true;
-    });
-  }, [leads, search, appliedFilters]);
-
-  // Pagination is computed after the column list (see below) so the whole
-  // filtered set can be sorted by the active column before it's sliced.
+  // Filtering, sorting and paging all happen in SQL now — `leads` IS the current
+  // page of matching rows, and `total` is the full matching count.
 
   // Keep the selection in step with the data — drop ids that no longer exist.
   const selectedLeads = useMemo(() => leads.filter((l) => selectedIds.has(l.id)), [leads, selectedIds]);
@@ -675,16 +667,12 @@ export default function ClientLeads() {
   const activeFilters = !!search || filtersActive(appliedFilters);
   const appliedFilterCount = useMemo(() => countActiveFilters(appliedFilters), [appliedFilters]);
 
-  // Commit the staged filters with a brief loader so the change reads as work.
-  // The rail stays open so the table updates beside it.
+  // Commit the staged filters — the fetch effect refetches page 1 (and shows the
+  // `applying` loader). The rail stays open so the table updates beside it.
   function applyFilters() {
-    setApplying(true);
-    setTimeout(() => {
-      setAppliedFilters(filters);
-      setPage(1);
-      setSelectedIds(new Set());
-      setApplying(false);
-    }, 250);
+    setAppliedFilters(filters);
+    setPage(1);
+    setSelectedIds(new Set());
   }
   function clearFilters() {
     setSearch("");
@@ -757,7 +745,7 @@ export default function ClientLeads() {
       setRemindAt(followReminderDefault(viewing)); setReminderNote(""); setComposerKey((k) => k + 1);
       toast.success("Reminder set.");
       await loadDetail(viewing.id);
-      await load(); // follow-up date is reminder-driven — refresh the table too
+      refresh(); // follow-up date is reminder-driven — refresh the table too
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not set reminder.");
     } finally {
@@ -775,7 +763,7 @@ export default function ClientLeads() {
     try {
       await deleteLeadReminder(rid);
       if (viewing) await loadDetail(viewing.id);
-      await load(); // keep the reminder-driven follow-up date in sync in the table
+      refresh(); // keep the reminder-driven follow-up date in sync in the table
       toast.success("Reminder removed.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not remove reminder.");
@@ -802,7 +790,7 @@ export default function ClientLeads() {
       await updateLeadReminder(rid, { remind_at: editRemindAt, note: stripHtml(editReminderNote) ? editReminderNote : undefined });
       cancelEditReminder();
       if (viewing) await loadDetail(viewing.id);
-      await load();
+      refresh();
       toast.success("Reminder updated.");
     } catch (e) {
       setEditReminderErr(e instanceof Error ? e.message : "Could not update reminder.");
@@ -914,7 +902,7 @@ export default function ClientLeads() {
       else await createLead(body);
       toast.success(draft.id ? "Lead updated." : "Lead added.");
       setDraft(null);
-      await load();
+      refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save lead.");
     } finally {
@@ -935,7 +923,7 @@ export default function ClientLeads() {
     try {
       await deleteLead(l.id);
       toast.success("Lead deleted.");
-      await load();
+      refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not delete lead.");
     }
@@ -961,7 +949,7 @@ export default function ClientLeads() {
       if (ok2) toast.success(`Deleted ${ok2} lead${ok2 === 1 ? "" : "s"}.`);
       if (failed) toast.error(`Could not delete ${failed} lead${failed === 1 ? "" : "s"}.`);
       setSelectedIds(new Set());
-      await load();
+      refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not delete leads.");
     } finally {
@@ -998,7 +986,7 @@ export default function ClientLeads() {
       toast.success(res.message);
       setBulkOpen(false);
       setSelectedIds(new Set());
-      await load();
+      refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Bulk update failed.");
     } finally {
@@ -1102,7 +1090,7 @@ export default function ClientLeads() {
       setImportResult(r);
       if (r.inserted) {
         toast.success(`Imported ${r.inserted} lead${r.inserted === 1 ? "" : "s"}.`);
-        await load();
+        refresh();
       } else {
         toast.warning("No leads were imported.");
       }
@@ -1217,13 +1205,11 @@ export default function ClientLeads() {
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
 
-  // `filtered` already arrives in the SQL ORDER BY order (Array.filter keeps
-  // order), so we just paginate it. Clamp the page so a shrinking set never
-  // strands it.
-  const sortedFiltered = filtered;
-  const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / perPage));
+  // Server paginates: `leads` is already the current page (filtered + sorted in
+  // SQL); `total` is the full matching count. Clamp the page defensively.
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
   const safePage = Math.min(page, totalPages);
-  const pageRows = useMemo(() => sortedFiltered.slice((safePage - 1) * perPage, safePage * perPage), [sortedFiltered, safePage, perPage]);
+  const pageRows = leads;
 
   const selCls = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
 
@@ -1290,7 +1276,7 @@ export default function ClientLeads() {
         <FilterToggle open={filterDrawerOpen} count={appliedFilterCount} onClick={() => { if (!filterDrawerOpen) setFilters(appliedFilters); setFilterDrawerOpen((o) => !o); }} />
         <div className="flex items-center gap-3">
           <p className="text-xs text-slate-400">
-            {filtered.length} of {leads.length} lead{leads.length === 1 ? "" : "s"}{activeFilters ? " match your filters" : ""}.
+            {total.toLocaleString()} lead{total === 1 ? "" : "s"}{activeFilters ? " match your filters" : ""}.
           </p>
           {activeFilters && (
             <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>
@@ -1487,7 +1473,7 @@ export default function ClientLeads() {
         page={safePage}
         totalPages={totalPages}
         onPage={setPage}
-        total={filtered.length}
+        total={total}
         pageSize={perPage}
         onPageSize={(n) => { setPerPage(n); setPage(1); }}
         pageAlign="right"
@@ -2023,7 +2009,7 @@ export default function ClientLeads() {
         staff={staff}
         mode={transferMode}
         onClose={() => setTransferLead(null)}
-        onDone={() => { setTransferLead(null); load(); }}
+        onDone={() => { setTransferLead(null); refresh(); }}
       />
 
       {/* Log a visitor pre-filled from a lead (shared with the Visitors tab) */}

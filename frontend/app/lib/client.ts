@@ -308,7 +308,37 @@ export interface CallLog {
   created_at: string;
 }
 
-export const getCalls = () => clientGet<{ calls: CallLog[] }>("/calls");
+/** Server-side calls-log query: pagination + filters. */
+export interface CallsQuery {
+  page?: number;
+  per_page?: number;
+  q?: string;
+  type?: string[];
+  source?: string[];
+  status?: string[];
+  connected?: string[]; // "yes" / "no"
+  from?: string;
+  to?: string;
+}
+export const getCalls = (query: CallsQuery = {}) => {
+  const qs = new URLSearchParams();
+  if (query.page) qs.set("page", String(query.page));
+  if (query.per_page) qs.set("per_page", String(query.per_page));
+  const put = (k: string, v: string | string[] | undefined) => {
+    if (v == null) return;
+    const s = Array.isArray(v) ? v.join(",") : v;
+    if (s !== "") qs.set(k, s);
+  };
+  put("q", query.q);
+  put("type", query.type);
+  put("source", query.source);
+  put("status", query.status);
+  put("connected", query.connected);
+  put("from", query.from);
+  put("to", query.to);
+  const s = qs.toString();
+  return clientGet<{ calls: CallLog[]; total: number; page: number; per_page: number }>(`/calls${s ? `?${s}` : ""}`);
+};
 
 // ---- call-ingest API key (for the external dialer/IVR app; admin only) ----
 export interface CallApiKeyInfo {
@@ -570,14 +600,68 @@ export interface LeadAnalytics {
   by_conversion: LeadCount[];
 }
 
-export const getLeads = (sort?: string | null, dir?: "asc" | "desc" | null) => {
-  const q = new URLSearchParams();
-  if (sort) q.set("sort", sort);
-  if (dir) q.set("dir", dir);
-  const qs = q.toString();
-  return clientGet<{ leads: Lead[] }>(`/leads${qs ? `?${qs}` : ""}`);
+/** Server-side leads query: pagination + sort + all filters (arrays are CSV). */
+export interface LeadsQuery {
+  page?: number;
+  per_page?: number;
+  sort?: string | null;
+  dir?: "asc" | "desc" | null;
+  q?: string;
+  status?: string[];
+  sub?: string[];
+  source?: string[];
+  lead_type?: string[];
+  reference?: string[];
+  assigned?: string[];
+  follow_status?: string[];
+  created_from?: string;
+  created_to?: string;
+  assigned_from?: string;
+  assigned_to_date?: string;
+  follow_from?: string;
+  follow_to?: string;
+}
+
+/** Append the shared lead filter params (used by the list AND the analytics summary). */
+function leadFilterParams(qs: URLSearchParams, f: LeadsQuery): void {
+  const put = (k: string, v: string | string[] | undefined) => {
+    if (v == null) return;
+    const s = Array.isArray(v) ? v.join(",") : v;
+    if (s !== "") qs.set(k, s);
+  };
+  put("q", f.q);
+  put("status", f.status);
+  put("sub", f.sub);
+  put("source", f.source);
+  put("lead_type", f.lead_type);
+  put("reference", f.reference);
+  put("assigned", f.assigned);
+  put("follow_status", f.follow_status);
+  put("created_from", f.created_from);
+  put("created_to", f.created_to);
+  put("assigned_from", f.assigned_from);
+  put("assigned_to_date", f.assigned_to_date);
+  put("follow_from", f.follow_from);
+  put("follow_to", f.follow_to);
+}
+
+export const getLeads = (query: LeadsQuery = {}) => {
+  const qs = new URLSearchParams();
+  if (query.page) qs.set("page", String(query.page));
+  if (query.per_page) qs.set("per_page", String(query.per_page));
+  if (query.sort) qs.set("sort", query.sort);
+  if (query.dir) qs.set("dir", query.dir);
+  leadFilterParams(qs, query);
+  const s = qs.toString();
+  return clientGet<{ leads: Lead[]; total: number; page: number; per_page: number }>(`/leads${s ? `?${s}` : ""}`);
 };
-export const getLeadAnalytics = () => clientGet<LeadAnalytics>("/lead-analytics");
+
+export const getLeadAnalytics = (filters: LeadsQuery = {}) => {
+  const qs = new URLSearchParams();
+  leadFilterParams(qs, filters);
+  const s = qs.toString();
+  return clientGet<LeadAnalytics>(`/lead-analytics${s ? `?${s}` : ""}`);
+};
 export const createLead = (b: Record<string, unknown>) => clientPost("/leads", b);
 export const updateLead = (id: number, b: Record<string, unknown>) => clientPost(`/leads/${id}`, b);
 export const deleteLead = (id: number) => clientPost(`/leads/${id}/delete`);
