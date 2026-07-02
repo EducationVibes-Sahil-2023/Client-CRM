@@ -5669,10 +5669,6 @@ class ClientController extends ApiController
         $model = new OfficeLocationModel();
 
         $offices = $model->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('name', 'ASC')->findAll();
-        foreach ($offices as &$o) {
-            $o['working_hours'] = $this->decodeWorkingHours($o['working_hours'] ?? null);
-        }
-        unset($o);
 
         return $this->respond([
             'office_locations' => $offices,
@@ -5974,11 +5970,6 @@ class ClientController extends ApiController
             'longitude' => is_numeric($lng) ? (float) $lng : null,
             'map_url'   => trim((string) ($this->input('map_url') ?? '')) ?: null,
         ];
-        // Only touch the weekly schedule when the form sends it (the office
-        // details form doesn't, so it won't wipe the hours).
-        if ($this->input('working_hours') !== null) {
-            $data['working_hours'] = json_encode($this->normalizeWorkingHours($this->input('working_hours')));
-        }
 
         return $data;
     }

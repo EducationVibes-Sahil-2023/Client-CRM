@@ -135,8 +135,6 @@ export interface OfficeLocation {
   latitude: string | null;
   longitude: string | null;
   map_url: string | null;
-  /** Weekly schedule (7 entries, Sun→Sat) driving the first-response SLA. */
-  working_hours?: WorkingHoursDay[];
   sequence: number;
   enabled: number | boolean;
 }

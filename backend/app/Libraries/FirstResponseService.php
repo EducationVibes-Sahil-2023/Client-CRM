@@ -9,10 +9,10 @@ use DateTime;
  * First-response SLA: the working-hours time from a lead's assignment to the
  * first connected call by the **assigned user** after assignment.
  *
- * "Working hours" = the assigned staff's office weekly schedule
- * ({@see office_locations.working_hours}); weekends (off days) and holidays are
- * excluded. When the connect itself lands on a weekend/holiday the response is
- * credited a flat 10 seconds (rewarding off-hours effort).
+ * "Working hours" = the assigned staff's shift schedule (or a sensible default
+ * when they have no shift); weekends (off days) and holidays are excluded. When
+ * the connect itself lands on a weekend/holiday the response is credited a flat
+ * 10 seconds (rewarding off-hours effort).
  *
  * Stamped once per lead (only when currently null) into
  * `leads.first_response_seconds` + `leads.first_response_at`. Reusable from the
@@ -46,15 +46,8 @@ class FirstResponseService
 
         $default = self::defaultSchedule();
 
-        // Office weekly schedules (by office id) + shift schedules (by shift id).
-        // A staff member's SHIFT hours take priority over their office hours.
-        $officeSchedules = [];
-        if ($db->tableExists('office_locations')) {
-            foreach ($db->table('office_locations')->where('client_id', $clientId)->get()->getResultArray() as $o) {
-                $wh                              = json_decode((string) ($o['working_hours'] ?? ''), true);
-                $officeSchedules[(int) $o['id']] = (is_array($wh) && count($wh) === 7) ? $wh : $default;
-            }
-        }
+        // Weekly schedules come from a staff member's SHIFT (offices no longer
+        // carry working hours); staff with no shift fall back to the default.
         $shiftSchedules = [];
         if ($db->tableExists('shifts')) {
             foreach ($db->table('shifts')->where('client_id', $clientId)->where('deleted_at', null)->get()->getResultArray() as $sh) {
@@ -127,11 +120,11 @@ class FirstResponseService
                 continue;
             }
 
-            // Schedule: the staff member's shift hours if mapped, else their
-            // office hours, else the default.
+            // Schedule: the staff member's shift hours if mapped, else the default.
+            // Holidays still apply per the staff member's office (global + office).
             $shiftId  = $staffShift[$sid] ?? 0;
             $officeId = $staffOffice[$sid] ?? 0;
-            $schedule = $shiftSchedules[$shiftId] ?? $officeSchedules[$officeId] ?? $default;
+            $schedule = $shiftSchedules[$shiftId] ?? $default;
             $holset   = $globalHol + ($officeHol[$officeId] ?? []);
 
             $connDate = substr($first, 0, 10);
