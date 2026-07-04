@@ -415,10 +415,14 @@ function Shell({ children }: { children: React.ReactNode }) {
         {impersonation && (
           <div className="flex flex-wrap items-center justify-center gap-3 bg-amber-500 px-4 py-2 text-center text-sm font-medium text-white">
             <span>
-              You&apos;re viewing <b>{impersonation.client ?? "this client"}</b> as admin{impersonation.name ? ` (${impersonation.name})` : ""}.
+              {impersonation.kind === "staff" ? (
+                <>You&apos;re viewing the dashboard as team member <b>{impersonation.viewing ?? "this user"}</b>.</>
+              ) : (
+                <>You&apos;re viewing <b>{impersonation.client ?? "this client"}</b> as admin{impersonation.name ? ` (${impersonation.name})` : ""}.</>
+              )}
             </span>
             <button onClick={exitImpersonation} className="rounded-md bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30">
-              Exit to admin panel
+              {impersonation.kind === "staff" ? "Exit to my account" : "Exit to admin panel"}
             </button>
           </div>
         )}

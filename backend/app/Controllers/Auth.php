@@ -17,6 +17,11 @@ class Auth extends ApiController
      */
     public function login()
     {
+        // Brute-force guard: cap login attempts per IP+email (configurable in .env).
+        if ($resp = $this->rateLimitLogin()) {
+            return $resp;
+        }
+
         $email    = trim((string) $this->input('email'));
         $password = (string) $this->input('password');
 
@@ -98,6 +103,42 @@ class Auth extends ApiController
         }
 
         return $this->fail('Invalid credentials', 401);
+    }
+
+    /**
+     * Rate-limit login attempts (default: 3 per 60s per IP+email). Returns a 429
+     * response when the limit is exceeded, or null to proceed. Tunable in .env:
+     *   ratelimit.enabled          = 1        (set 0 to disable entirely)
+     *   ratelimit.login.attempts   = 3
+     *   ratelimit.login.seconds    = 60
+     */
+    private function rateLimitLogin()
+    {
+        if ((string) (env('ratelimit.enabled') ?? '1') === '0') {
+            return null;
+        }
+        $attempts = (int) (env('ratelimit.login.attempts') ?: 3);
+        $seconds  = (int) (env('ratelimit.login.seconds') ?: 60);
+        if ($attempts <= 0 || $seconds <= 0) {
+            return null;
+        }
+
+        $ip    = $this->request->getIPAddress();
+        $email = strtolower(trim((string) $this->input('email')));
+        // Hash into an alphanumeric key — cache keys can't contain reserved
+        // characters like ':' (IPv6 addresses such as ::1 would otherwise break it).
+        $key   = 'login_' . md5($ip . '|' . $email);
+
+        $throttler = \Config\Services::throttler();
+        if ($throttler->check($key, $attempts, $seconds) === false) {
+            $wait = $throttler->getTokentime();
+
+            return $this->response->setStatusCode(429)->setJSON([
+                'messages' => ['error' => "Too many login attempts. Please wait {$wait} second" . ($wait === 1 ? '' : 's') . ' and try again.'],
+            ]);
+        }
+
+        return null;
     }
 
     /**

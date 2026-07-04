@@ -225,6 +225,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('call-logs', 'ClientController::createCallLogs');
         $routes->get('calls', 'ClientController::calls');
         $routes->get('call-dashboard', 'ClientController::callDashboard');
+        $routes->get('call-sync-status', 'ClientController::callSyncStatus');
         // The API key the external calling app uses for /calls/ingest (admin-only).
         $routes->get('call-api-key', 'ClientController::callApiKey');
         $routes->post('call-api-key/rotate', 'ClientController::rotateCallApiKey');
@@ -263,6 +264,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->post('staff', 'ClientController::createStaff');
     $routes->post('staff/(:num)', 'ClientController::updateStaff/$1');
     $routes->post('staff/(:num)/reassign-leads', 'ClientController::reassignStaffLeads/$1');
+    $routes->post('staff/(:num)/login-as', 'ClientController::loginAsStaff/$1');
     $routes->post('staff/(:num)/delete', 'ClientController::deleteStaff/$1');
 
     // Lead setup (statuses, marketing types, sources, lead/conversion types).
@@ -271,6 +273,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         // Leads (the records themselves)
         $routes->get('leads', 'ClientController::leads');
         $routes->get('lead-analytics', 'ClientController::leadAnalytics');
+        $routes->get('lead-call-summary', 'ClientController::leadCallSummary');
         $routes->post('leads', 'ClientController::createLead');
         $routes->post('leads/import', 'ClientController::importLeads');
         $routes->post('leads/bulk', 'ClientController::bulkUpdateLeads');

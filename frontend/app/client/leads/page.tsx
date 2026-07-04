@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getLeads, createLead, updateLead, deleteLead, importLeads, bulkUpdateLeads, getLeadImportSetup,
-  getLeadsSetup, getStaff, getMe, getLeadAnalytics,
+  getLeadsSetup, getStaff, getMe, getLeadAnalytics, getCallSyncStatus, getLeadCallSummary,
   getLeadDetail, createLeadReminder, updateLeadReminder, deleteLeadReminder, createLeadNote, updateLeadNote, deleteLeadNote,
   getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS,
   type Lead, type LeadStatus, type LeadSource, type LeadType, type LeadReference, type Staff, type LeadImportResult, type LeadDetail,
   type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
-  type LeadImportColumn, type LeadsQuery,
+  type LeadImportColumn, type LeadsQuery, type CallSyncStatus, type LeadCallSummary,
 } from "../../lib/client";
 import { requestNotifyPermission } from "../../lib/notify";
 import { useClient } from "../ClientContext";
@@ -28,7 +28,7 @@ import { Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../.
 import { DataTable, IconButton, type Column, type SortState } from "../../admin/DataTable";
 import { DonutSelect } from "../../admin/Charts";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
-import { DateRangeFilter, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
+import { DateRangeFilter, rangeActive, resolveDateRange, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { useHiddenPrefs, VisibilityMenu } from "../../admin/tableConfig";
 import { FieldRow, inputCls, isEmail } from "../../admin/clients/formKit";
 import { INDIA_STATES, INDIA_CITIES } from "../../lib/india";
@@ -47,11 +47,15 @@ interface LeadFilters {
   created: DateRange;
   assignedDate: DateRange;
   follow: DateRange;
+  updated: DateRange;     // "Updated date" = filter by call date (call_start)
 }
 const BLANK_FILTERS: LeadFilters = {
   status: [], sub: [], source: [], assigned: [], leadType: [], followStatus: [], reference: [],
-  created: EMPTY_RANGE, assignedDate: EMPTY_RANGE, follow: EMPTY_RANGE,
+  created: EMPTY_RANGE, assignedDate: EMPTY_RANGE, follow: EMPTY_RANGE, updated: EMPTY_RANGE,
 };
+// Initial filters on first load: no date filter is pre-applied — the page opens
+// on all leads (Any time). The user can pick an Updated-date (call date) range.
+const INITIAL_FILTERS: LeadFilters = { ...BLANK_FILTERS };
 
 // Toggleable filter controls, in display order, for the per-user "Filters" menu.
 const FILTER_DEFS: { id: string; label: string }[] = [
@@ -65,6 +69,7 @@ const FILTER_DEFS: { id: string; label: string }[] = [
   { id: "created", label: "Date created" },
   { id: "assignedDate", label: "Assigned date" },
   { id: "follow", label: "Follow-up date" },
+  { id: "updated", label: "Updated date" },
 ];
 
 // Field key → label, for messages on admin-configured mandatory fields.
@@ -91,12 +96,12 @@ const SUMMARY_DIMS: { key: SummaryDimKey; label: string; filterKey: "status" | "
 
 const filtersActive = (f: LeadFilters): boolean =>
   !!(f.status.length || f.sub.length || f.source.length || f.assigned.length || f.leadType.length ||
-    f.followStatus.length || f.reference.length || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow));
+    f.followStatus.length || f.reference.length || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow) || rangeActive(f.updated));
 
 // How many filter groups are active — drives the count badge on the Filters button.
 const countActiveFilters = (f: LeadFilters): number =>
   [f.status.length, f.sub.length, f.source.length, f.assigned.length, f.leadType.length,
-    f.followStatus.length, f.reference.length, rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow)]
+    f.followStatus.length, f.reference.length, rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow), rangeActive(f.updated)]
     .filter(Boolean).length;
 
 interface Draft {
@@ -225,6 +230,87 @@ function fmtDateTime(s: string | null | undefined): string {
   return d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+/** Seconds → "HH:MM:SS". */
+function fmtHMS(sec: number): string {
+  const s = Math.max(0, Math.floor(sec || 0));
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
+}
+
+/**
+ * Header strip: the all-time call total + duration and the last-synced time
+ * (not scoped to today, so a quiet day doesn't read as 0). Loads on mount and
+ * auto-refreshes every minute (also a manual refresh button). Shown regardless
+ * of whether any leads exist.
+ */
+function CallSyncHeader() {
+  const [data, setData] = useState<CallSyncStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(() => {
+    setLoading(true);
+    getCallSyncStatus().then(setData).catch(() => {}).finally(() => setLoading(false));
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60_000); // auto-refresh every 1 minute
+    return () => clearInterval(t);
+  }, [load]);
+
+  const cell = (label: string, value: React.ReactNode) => (
+    <div className="min-w-[110px] flex-1 text-center">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="mt-0.5 text-base font-bold text-slate-800">{value}</div>
+    </div>
+  );
+
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-4 rounded-2xl border border-slate-200 bg-white px-6 py-4 shadow-sm">
+      {cell("Total Calls", data ? (data.total_calls > 0 ? data.total_calls.toLocaleString("en-IN") : "No calls") : "—")}
+      {cell("Total Duration", data ? fmtHMS(data.total_duration) : "—")}
+      {cell("Last Call Sync", data?.last_sync ? fmtDateTime(data.last_sync) : "Not Sync")}
+      <button
+        type="button"
+        onClick={load}
+        disabled={loading}
+        title="Refresh"
+        aria-label="Refresh call sync"
+        className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-sky-500 text-white transition hover:bg-sky-600 disabled:opacity-60"
+      >
+        <svg className={`h-5 w-5 ${loading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 2v6h-6M3 12a9 9 0 0115-6.7L21 8M3 22v-6h6M21 12a9 9 0 01-15 6.7L3 16" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      </button>
+    </div>
+  );
+}
+
+/** Seconds → "12 Hrs : 25 Mins : 51 Sec". */
+function fmtTalk(sec: number): string {
+  const s = Math.max(0, Math.floor(sec || 0));
+  return `${Math.floor(s / 3600)} Hrs : ${Math.floor((s % 3600) / 60)} Mins : ${s % 60} Sec`;
+}
+/** Seconds → short "1m" / "45s". */
+function fmtDurShort(sec: number): string {
+  const s = Math.max(0, Math.floor(sec || 0));
+  return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
+}
+const hourLabelOf = (h: number) => (h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`);
+
+/** Compact vertical bar chart (hourly / by-status). `sub` overrides the top label. */
+function MiniBars({ items, valueFmt }: { items: { label: string; value: number; sub?: string; color?: string }[]; valueFmt?: (n: number) => string }) {
+  const max = Math.max(1, ...items.map((i) => i.value));
+  if (!items.length) return <p className="py-8 text-center text-sm text-slate-400">No calls in this filter.</p>;
+  return (
+    <div className="flex items-end gap-2 overflow-x-auto pb-1" style={{ height: 200 }}>
+      {items.map((it, i) => (
+        <div key={i} className="flex min-w-[34px] flex-1 flex-col items-center justify-end gap-1">
+          <span className="text-[10px] font-semibold text-slate-600">{it.sub ?? (valueFmt ? valueFmt(it.value) : it.value)}</span>
+          <div className="w-full max-w-[28px] rounded-t" style={{ height: `${Math.max(it.value > 0 ? 3 : 0, (it.value / max) * 150)}px`, background: it.color ?? "#6366f1" }} title={`${it.label}: ${valueFmt ? valueFmt(it.value) : it.value}`} />
+          <span className="w-full truncate text-center text-[9px] text-slate-400" title={it.label}>{it.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Render a date with its time stacked underneath (date<br>time). The time line
  * only shows when the value actually carries one — DATE-only fields (stored at
@@ -327,8 +413,15 @@ export default function ClientLeads() {
   const [leadCustomFields, setLeadCustomFields] = useState<CustomField[]>([]);
 
   // Lead-volume summary (counts by dimension) shown between filters and table.
+  // Lazy: the analytics query only runs while the summary is open, so the table
+  // isn't slowed by an extra fetch on every load / filter change.
   const [analytics, setAnalytics] = useState<LeadAnalytics | null>(null);
+  const [callSummary, setCallSummary] = useState<LeadCallSummary | null>(null);
   const [summaryDim, setSummaryDim] = useState<SummaryDimKey>("status");
+  // The Lead and Call summaries toggle independently, so both can show at once.
+  // Both reflect the main leads filter (the FilterRail); no separate summary filter.
+  const [showLead, setShowLead] = useState(false);
+  const [showCall, setShowCall] = useState(false);
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -360,8 +453,8 @@ export default function ClientLeads() {
   // only takes effect (→ `appliedFilters`) when the user clicks Apply.
   // Seed from a global-search deep link (?q=...) when present.
   const [search, setSearch] = useState(() => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("q") ?? "" : ""));
-  const [filters, setFilters] = useState<LeadFilters>(BLANK_FILTERS);
-  const [appliedFilters, setAppliedFilters] = useState<LeadFilters>(BLANK_FILTERS);
+  const [filters, setFilters] = useState<LeadFilters>(INITIAL_FILTERS);
+  const [appliedFilters, setAppliedFilters] = useState<LeadFilters>(INITIAL_FILTERS);
   const [applying, setApplying] = useState(false);
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [page, setPage] = useState(1);
@@ -419,22 +512,44 @@ export default function ClientLeads() {
 
   // The shared filter query (applied filters + instant search) sent to BOTH the
   // paged list and the analytics summary, so both reflect the same set.
-  const filterQuery = useMemo<LeadsQuery>(() => ({
-    q: search.trim() || undefined,
-    status: appliedFilters.status,
-    sub: appliedFilters.sub,
-    source: appliedFilters.source,
-    lead_type: appliedFilters.leadType,
-    reference: appliedFilters.reference,
-    assigned: appliedFilters.assigned,
-    follow_status: appliedFilters.followStatus,
-    created_from: appliedFilters.created.from || undefined,
-    created_to: appliedFilters.created.to || undefined,
-    assigned_from: appliedFilters.assignedDate.from || undefined,
-    assigned_to_date: appliedFilters.assignedDate.to || undefined,
-    follow_from: appliedFilters.follow.from || undefined,
-    follow_to: appliedFilters.follow.to || undefined,
-  }), [search, appliedFilters]);
+  const filterQuery = useMemo<LeadsQuery>(() => {
+    // Resolve each date range (preset OR custom) to concrete from/to bounds so
+    // presets like "Today"/"Last 7 days" filter server-side too — not just custom.
+    const created = resolveDateRange(appliedFilters.created);
+    const assignedD = resolveDateRange(appliedFilters.assignedDate);
+    const follow = resolveDateRange(appliedFilters.follow);
+    const updated = resolveDateRange(appliedFilters.updated);
+    return {
+      q: search.trim() || undefined,
+      status: appliedFilters.status,
+      sub: appliedFilters.sub,
+      source: appliedFilters.source,
+      lead_type: appliedFilters.leadType,
+      reference: appliedFilters.reference,
+      assigned: appliedFilters.assigned,
+      follow_status: appliedFilters.followStatus,
+      created_from: created.from,
+      created_to: created.to,
+      assigned_from: assignedD.from,
+      assigned_to_date: assignedD.to,
+      follow_from: follow.from,
+      follow_to: follow.to,
+      updated_from: updated.from,
+      updated_to: updated.to,
+    };
+  }, [search, appliedFilters]);
+
+  // The call summary scans calls across the filtered leads, so it only runs when
+  // a bounded date window ≤ 1 month is selected — the Updated date (call date) is
+  // preferred, else the Created date. Wider / no range → "No data" (too heavy).
+  const summaryDateOk = useMemo(() => {
+    const u = resolveDateRange(appliedFilters.updated);
+    const c = resolveDateRange(appliedFilters.created);
+    const r = (u.from && u.to) ? u : ((c.from && c.to) ? c : null);
+    if (!r || !r.from || !r.to) return true; // no range → the summary defaults to today
+    const span = new Date(`${r.to}T00:00:00`).getTime() - new Date(`${r.from}T00:00:00`).getTime();
+    return span >= 0 && span <= 31 * 86_400_000; // a selected window must be ≤ ~1 month
+  }, [appliedFilters.updated, appliedFilters.created]);
 
   // Static reference data + staff directory (once). Best-effort — a user who can
   // view leads but lacks leads_setup/team still gets their leads.
@@ -464,10 +579,24 @@ export default function ClientLeads() {
     return () => clearTimeout(t);
   }, [page, perPage, tableSort, filterQuery, fetchTick, toast]);
 
-  // Summary reflects the whole filtered set (server analytics with the same filters).
+  // Keep the page in range with the (possibly shrunken) result set. After a
+  // delete, a bigger page size, or a filter that trims the matches, `page` can
+  // point past the last page — the server then returns an empty window while
+  // `total` still reports rows, so the table looks empty though data exists.
+  // Snap back to the last real page; the fetch effect above re-runs on it.
   useEffect(() => {
-    getLeadAnalytics(filterQuery).then(setAnalytics).catch(() => {});
-  }, [filterQuery, fetchTick]);
+    const lastPage = Math.max(1, Math.ceil(total / perPage));
+    if (page > lastPage) setPage(lastPage);
+  }, [total, perPage, page]);
+
+  // Summary reflects the whole filtered set (server analytics with the same
+  // filters) — but ONLY fetched while the summary panel is open (on demand).
+  useEffect(() => {
+    if (showLead) getLeadAnalytics(filterQuery).then(setAnalytics).catch(() => {});
+    // Only compute the (heavier) call summary within a ≤1-month window.
+    if (showCall && summaryDateOk) getLeadCallSummary(filterQuery).then(setCallSummary).catch(() => {});
+    else if (!showCall || !summaryDateOk) setCallSummary(null);
+  }, [showLead, showCall, filterQuery, fetchTick, summaryDateOk]);
   useEffect(() => { getMe().then((m) => setIsAdmin(!!m.is_admin)).catch(() => {}); }, []);
   // Admin-defined custom fields for the lead form (Form Setup).
   useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
@@ -1276,7 +1405,22 @@ export default function ClientLeads() {
       {/* Filters open a full-height right rail (shared FilterRail); this slim bar
           toggles it and shows what's applied. The table search stays instant. */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <FilterToggle open={filterDrawerOpen} count={appliedFilterCount} onClick={() => { if (!filterDrawerOpen) setFilters(appliedFilters); setFilterDrawerOpen((o) => !o); }} />
+        <div className="flex items-center gap-2">
+          <FilterToggle open={filterDrawerOpen} count={appliedFilterCount} onClick={() => { if (!filterDrawerOpen) setFilters(appliedFilters); setFilterDrawerOpen((o) => !o); }} />
+          {/* Two independent summary toggles — Lead and Call can show together. */}
+          {([["Lead Summary", showLead, setShowLead], ["Call Summary", showCall, setShowCall]] as [string, boolean, (u: (s: boolean) => boolean) => void][]).map(([label, on, set]) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => set((s) => !s)}
+              aria-pressed={on}
+              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition ${on ? "border-indigo-300 bg-indigo-50 text-indigo-700" : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"}`}
+            >
+              <svg className="h-4 w-4 text-indigo-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 19V5m0 14h16M8 17v-5m4 5V8m4 9v-7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="flex items-center gap-3">
           <p className="text-xs text-slate-400">
             {total.toLocaleString()} lead{total === 1 ? "" : "s"}{activeFilters ? " match your filters" : ""}.
@@ -1371,16 +1515,77 @@ export default function ClientLeads() {
             <DateRangeFilter ariaLabel="Follow-up date" value={filters.follow} onChange={(v) => setFilter("follow", v)} />
           </label>
         )}
+
+        {!filterPrefs.isHidden("updated") && (
+          <label className="flex flex-col gap-1">
+            <FilterLabel>Updated date <span className="font-normal normal-case text-slate-400">· by call date</span></FilterLabel>
+            <DateRangeFilter ariaLabel="Updated date" value={filters.updated} onChange={(v) => setFilter("updated", v)} />
+          </label>
+        )}
       </FilterRail>
 
       <div className={filterRailPad(filterDrawerOpen)}>
-      {/* Lead summary — counts by dimension; click a bar to filter the table */}
-      <Card className="mb-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold text-slate-700">Lead summary</h3>
-            {analytics && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{analytics.total} leads</span>}
-          </div>
+      {/* Today's call totals + last sync — auto-refreshes every minute. */}
+      {can("calls", "view") && <CallSyncHeader />}
+
+      {/* Lead/Call summary panel — toggled by the Summary button on the filter bar.
+          Lazy: analytics only fetch while it's open (keeps the table fast). */}
+      <div className="mb-4">
+        {/* The Call and Lead summaries render independently — the two buttons on
+            the filter bar toggle each, so both can be open at the same time. */}
+        {showCall && (
+        <Card className="mt-3">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-slate-700">Call Summary</h3>
+        </div>
+
+        {(
+          /* ---- Call Summary — KPIs + charts for the filtered lead set. Only
+             calls to leads in the set (matched by contact); unique = distinct.
+             Guarded to a ≤1-month date window (Updated/Created) to avoid heavy scans. */
+          !summaryDateOk ? (
+            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 py-10 text-center text-sm text-slate-500">
+              The selected date range is more than <b>1 month</b> — narrow the <b>Updated date</b> or <b>Created</b> filter to ≤ 1 month to see the call summary. (No filter shows <b>today</b>.)
+            </div>
+          ) : !callSummary ? (
+            <div className="py-8 text-center text-sm text-slate-400">Loading call summary…</div>
+          ) : (
+            <div>
+              <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                {([
+                  ["Total Calls", callSummary.kpis.total_calls.toLocaleString("en-IN"), "border-l-indigo-400"],
+                  ["Total Unique Calls", callSummary.kpis.unique_calls.toLocaleString("en-IN"), "border-l-sky-400"],
+                  ["Avg Call Duration", fmtDurShort(callSummary.kpis.avg_sec), "border-l-emerald-400"],
+                  ["Connect Rate", `${callSummary.kpis.connected} (${callSummary.kpis.connect_rate}%)`, "border-l-amber-400"],
+                  ["Total Talk Time", fmtTalk(callSummary.kpis.talk_sec), "border-l-violet-400"],
+                ] as [string, string, string][]).map(([label, value, br]) => (
+                  <div key={label} className={`rounded-xl border border-l-4 ${br} border-slate-200 bg-white px-4 py-3`}>
+                    <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+                    <div className="mt-0.5 text-lg font-bold text-slate-800">{value}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Hourly Call Distribution</h4>
+                  <MiniBars items={callSummary.hourly.map((h) => ({ label: hourLabelOf(h.hour), value: h.calls }))} />
+                </div>
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Call Duration by Lead Status <span className="font-normal normal-case text-slate-400">· bar = talk time, number = leads</span></h4>
+                  <MiniBars items={callSummary.by_status.map((s) => ({ label: s.label, value: s.talk_sec, sub: String(s.leads), color: toHex(s.color) }))} valueFmt={fmtDurShort} />
+                </div>
+              </div>
+            </div>
+          )
+        )}
+        </Card>
+        )}
+
+        {showLead && (
+        <Card className="mt-3">
+        {/* ---- Lead Summary — counts by the chosen dimension; click to filter. */}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-slate-700">Lead Summary</h3>
           <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs font-medium">
             {SUMMARY_DIMS.map((d) => (
               <button key={d.key} onClick={() => setSummaryDim(d.key)} className={`rounded-md px-3 py-1.5 transition ${summaryDim === d.key ? "bg-white text-indigo-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
@@ -1389,32 +1594,40 @@ export default function ClientLeads() {
             ))}
           </div>
         </div>
+          <div>
+            <div className="mb-3 flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-slate-700">Lead count</h3>
+              {analytics && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{analytics.total} leads</span>}
+            </div>
 
-        {!analytics ? (
-          <div className="py-8 text-center text-sm text-slate-400">Loading summary…</div>
-        ) : summaryDonut.length === 0 ? (
-          <div className="py-8 text-center text-sm text-slate-400">No {activeDim.label.toLowerCase()} data yet.</div>
-        ) : (
-          <DonutSelect
-            data={summaryDonut}
-            total={analytics.total}
-            activeId={summaryActiveId != null ? Number(summaryActiveId) : null}
-            onSelect={pickSummaryId}
-          />
+            {!analytics ? (
+              <div className="py-8 text-center text-sm text-slate-400">Loading summary…</div>
+            ) : summaryDonut.length === 0 ? (
+              <div className="py-8 text-center text-sm text-slate-400">No {activeDim.label.toLowerCase()} data yet.</div>
+            ) : (
+              <DonutSelect
+                data={summaryDonut}
+                total={analytics.total}
+                activeId={summaryActiveId != null ? Number(summaryActiveId) : null}
+                onSelect={pickSummaryId}
+              />
+            )}
+
+            <p className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+              {summaryActiveId ? (
+                <>
+                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                  Table filtered by {activeDim.label.toLowerCase()}.
+                  <button onClick={clearSummary} className="font-medium text-indigo-600 hover:text-indigo-700">Clear</button>
+                </>
+              ) : (
+                <span className="text-slate-400">Click a slice or legend row to filter the table by {activeDim.label.toLowerCase()}.</span>
+              )}
+            </p>
+          </div>
+        </Card>
         )}
-
-        <p className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-          {summaryActiveId ? (
-            <>
-              <span className="inline-flex h-1.5 w-1.5 rounded-full bg-indigo-500" />
-              Table filtered by {activeDim.label.toLowerCase()}.
-              <button onClick={clearSummary} className="font-medium text-indigo-600 hover:text-indigo-700">Clear</button>
-            </>
-          ) : (
-            <span className="text-slate-400">Click a slice or legend row to filter the table by {activeDim.label.toLowerCase()}.</span>
-          )}
-        </p>
-      </Card>
+      </div>
 
       {selectedLeads.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5">
@@ -1459,9 +1672,21 @@ export default function ClientLeads() {
         getKey={(l) => l.id}
         loading={loading || applying}
         toolbar={
-          <div className="relative w-full max-w-sm">
-            <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
-            <input value={search} onChange={(e) => onSearchChange(e.target.value)} placeholder="Search name, phone, email, city…" className={`${selCls} w-full pl-9`} />
+          <div className="flex w-full max-w-md items-center gap-2">
+            <div className="relative flex-1">
+              <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
+              <input value={search} onChange={(e) => onSearchChange(e.target.value)} placeholder="Search name, phone, email, city…" className={`${selCls} w-full pl-9`} />
+            </div>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={loading || applying}
+              title="Refresh"
+              aria-label="Refresh leads"
+              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-500 transition hover:bg-slate-50 disabled:opacity-60"
+            >
+              <svg className={`h-4 w-4 ${loading || applying ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 2v6h-6M3 12a9 9 0 0115-6.7L21 8M3 22v-6h6M21 12a9 9 0 01-15 6.7L3 16" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </button>
           </div>
         }
         nowrap

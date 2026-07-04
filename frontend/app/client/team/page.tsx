@@ -10,6 +10,7 @@ import {
   getShifts,
   getStaff,
   getStaffLeadLoad,
+  loginAsStaff,
   reassignStaffLeads,
   updateStaff,
   getFormSetup,
@@ -282,6 +283,24 @@ export default function TeamPage() {
     catch (e) { toast.error(e instanceof Error ? e.message : "Could not remove"); }
   }
 
+  // Admin "view as" — step into a team member's session to see the dashboard
+  // exactly as they do. A full reload picks up the swapped session everywhere.
+  async function viewAs(s: Staff) {
+    const ok = await confirm({
+      title: `View as ${s.name}?`,
+      message: <>You&apos;ll browse the dashboard with <b>{s.name}</b>&apos;s permissions and data. An amber banner stays on screen — use &ldquo;Exit to my account&rdquo; to return.</>,
+      confirmLabel: "View as user",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    try {
+      await loginAsStaff(s.id);
+      window.location.href = "/client";
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not switch to this user.");
+    }
+  }
+
   // Phase 1 — transfer the departing member's leads (single or round-robin),
   // optionally changing the assigned date / status / type / source.
   async function doTransfer() {
@@ -329,6 +348,7 @@ export default function TeamPage() {
 
   const actions = (s: Staff): RowAction<Staff>[] => [
     { label: "View", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>, onClick: () => setSelected(s) },
+    ...(isAdmin && s.status === "active" ? [{ label: "Log in as", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" strokeLinecap="round" strokeLinejoin="round" /></svg>, onClick: () => viewAs(s) }] : []),
     ...(can("team", "update") ? [{ label: "Edit", icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>, onClick: () => openDraft(toDraft(s)) }] : []),
     ...(can("team", "delete") ? [{ label: "Remove", danger: true, icon: <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>, onClick: () => remove(s) }] : []),
   ];
@@ -553,6 +573,11 @@ export default function TeamPage() {
             <IconButton title="View details" onClick={() => setSelected(s)}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
             </IconButton>
+            {isAdmin && s.status === "active" && (
+              <IconButton title="Log in as" onClick={() => viewAs(s)}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            )}
             {can("team", "update") && (
               <IconButton title="Edit" onClick={() => openDraft(toDraft(s))}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>

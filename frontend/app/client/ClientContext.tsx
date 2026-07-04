@@ -59,8 +59,9 @@ interface Ctx {
   isAgent: boolean;
   permissionsLoaded: boolean;
   can: (module: string, action?: keyof Perm) => boolean;
-  // super-admin "login as client" impersonation (null when not impersonating)
-  impersonation: { name: string | null; client: string | null } | null;
+  // Impersonation state (null when not impersonating): a super-admin "login as
+  // client" (kind "client") or an admin "view as team member" (kind "staff").
+  impersonation: { name: string | null; client: string | null; kind: "client" | "staff"; viewing: string | null } | null;
   exitImpersonation: () => void;
   // branding / appearance
   branding: Branding;
@@ -139,11 +140,14 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
   const [isAdmin, setIsAdmin] = useState(true); // assume admin until /me resolves
   const [isAgent, setIsAgent] = useState(false);
   const [permissionsLoaded, setPermissionsLoaded] = useState(false);
-  const [impersonation, setImpersonation] = useState<{ name: string | null; client: string | null } | null>(null);
+  const [impersonation, setImpersonation] = useState<{ name: string | null; client: string | null; kind: "client" | "staff"; viewing: string | null } | null>(null);
 
   const exitImpersonation = useCallback(() => {
-    stopImpersonation().catch(() => {}).finally(() => { window.location.href = "/admin"; });
-  }, []);
+    // A super-admin returns to the admin panel; a client admin who was "viewing
+    // as" a team member returns to their own team page.
+    const back = impersonation?.kind === "staff" ? "/client/team" : "/admin";
+    stopImpersonation().catch(() => {}).finally(() => { window.location.href = back; });
+  }, [impersonation]);
 
   // Resolve the current user + role + effective permissions in one call
   // (drives the greeting, avatar and nav gating). /client/me is auth-guarded,
@@ -156,7 +160,7 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
         setIsAgent(!!d.is_agent);
         setPermissions(d.permissions ?? {});
         setMustChangePassword(!!d.user.must_change_password);
-        setImpersonation(d.impersonating ? { name: d.impersonator_name ?? null, client: d.client_name ?? null } : null);
+        setImpersonation(d.impersonating ? { name: d.impersonator_name ?? null, client: d.client_name ?? null, kind: d.impersonation_kind === "staff" ? "staff" : "client", viewing: d.user.name ?? null } : null);
       })
       .catch(() => {
         toast.error("Please sign in to continue.", { title: "Session expired" });

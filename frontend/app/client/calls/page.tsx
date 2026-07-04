@@ -24,6 +24,10 @@ const HEX: Record<string, string> = {
   orange: "#f97316", lime: "#84cc16", cyan: "#06b6d4", slate: "#94a3b8",
 };
 const toHex = (c?: string) => (!c ? HEX.slate : c.startsWith("#") ? c : HEX[c] ?? HEX.slate);
+/** Order-insensitive equality for filter value arrays (draft vs applied). */
+const arrEq = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join("|") === [...b].sort().join("|");
+/** Equality for a date-range filter (preset + custom bounds). */
+const rangeEq = (a: DateRange, b: DateRange) => a.preset === b.preset && a.from === b.from && a.to === b.to;
 const nf = (n: number) => n.toLocaleString("en-IN");
 /** Seconds → "44h 24m" / "16m" / "0m". */
 const fmtHM = (sec: number) => {
@@ -400,12 +404,20 @@ export default function ClientCalls() {
   const [dashLoading, setDashLoading] = useState(true);
   // Dashboard date range (preset picker). Defaults to Today, matching the old
   // single-date behaviour; widen to 7 days / 1 month / custom as needed.
+  // Applied dashboard filters (drive loadDash) vs the draft the user edits in the
+  // rail — nothing reloads until "Apply".
   const [dateRange, setDateRange] = useState<DateRange>({ preset: "today" });
   const [fStatus, setFStatus] = useState<string[]>([]);
   const [fSource, setFSource] = useState<string[]>([]);
   const [fDept, setFDept] = useState<string[]>([]);
   const [fOffice, setFOffice] = useState<string[]>([]);
   const [fAssign, setFAssign] = useState<string[]>([]);
+  const [dfDate, setDfDate] = useState<DateRange>({ preset: "today" });
+  const [dfStatus, setDfStatus] = useState<string[]>([]);
+  const [dfSource, setDfSource] = useState<string[]>([]);
+  const [dfDept, setDfDept] = useState<string[]>([]);
+  const [dfOffice, setDfOffice] = useState<string[]>([]);
+  const [dfAssign, setDfAssign] = useState<string[]>([]);
 
   // ---- filter option sources ----
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
@@ -447,7 +459,25 @@ export default function ClientCalls() {
   // The date counts as "active" only when it's not the default (Today).
   const dateActive = dateRange.preset !== "today";
   const filtersActive = !!(fStatus.length || fSource.length || fDept.length || fOffice.length || fAssign.length || dateActive);
-  function clearDashFilters() { setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]); setDateRange({ preset: "today" }); }
+  function clearDashFilters() {
+    setFStatus([]); setFSource([]); setFDept([]); setFOffice([]); setFAssign([]); setDateRange({ preset: "today" });
+    setDfStatus([]); setDfSource([]); setDfDept([]); setDfOffice([]); setDfAssign([]); setDfDate({ preset: "today" });
+  }
+  // Copy the applied filters into the draft (used when opening the rail so it
+  // reflects what's currently applied) and vice-versa on Apply.
+  function syncDashDraft() {
+    setDfStatus(fStatus); setDfSource(fSource); setDfDept(fDept); setDfOffice(fOffice); setDfAssign(fAssign); setDfDate(dateRange);
+  }
+  function applyDashFilters() {
+    setFStatus(dfStatus); setFSource(dfSource); setFDept(dfDept); setFOffice(dfOffice); setFAssign(dfAssign); setDateRange(dfDate);
+    setFilterOpen(false);
+  }
+  const dashDirty =
+    !arrEq(dfStatus, fStatus) || !arrEq(dfSource, fSource) || !arrEq(dfDept, fDept) ||
+    !arrEq(dfOffice, fOffice) || !arrEq(dfAssign, fAssign) || !rangeEq(dfDate, dateRange);
+  const dashDraftActive = !!(
+    dfStatus.length || dfSource.length || dfDept.length || dfOffice.length || dfAssign.length || dfDate.preset !== "today"
+  );
   // Slide-in Filters drawer (shared across both tabs — only one is visible at a
   // time). Counts drive the badge on each tab's Filters button.
   const [filterOpen, setFilterOpen] = useState(false);
@@ -482,6 +512,12 @@ export default function ClientCalls() {
   const [lStatus, setLStatus] = useState<string[]>([]);
   const [lConn, setLConn] = useState<string[]>([]);
   const [lDate, setLDate] = useState<DateRange>(EMPTY_RANGE);
+  // Draft the user edits in the rail; nothing fetches until "Apply".
+  const [dlType, setDlType] = useState<string[]>([]);
+  const [dlSource, setDlSource] = useState<string[]>([]);
+  const [dlStatus, setDlStatus] = useState<string[]>([]);
+  const [dlConn, setDlConn] = useState<string[]>([]);
+  const [dlDate, setDlDate] = useState<DateRange>(EMPTY_RANGE);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(defaultPageSize);
   const [logTotal, setLogTotal] = useState(0);
@@ -514,13 +550,35 @@ export default function ClientCalls() {
     return () => clearTimeout(t);
   }, [tab, page, perPage, callsQuery, toast]);
 
+  // Snap the page back in range when the result set shrinks (bigger page size or
+  // a filter that trims the matches) — otherwise the server returns an empty
+  // window while `logTotal` still reports rows, so the table looks empty.
+  useEffect(() => {
+    const last = Math.max(1, Math.ceil(logTotal / perPage));
+    if (page > last) setPage(last);
+  }, [logTotal, perPage, page]);
+
   const logRows = calls; // server page (already filtered + ordered)
   const logPages = Math.max(1, Math.ceil(logTotal / perPage));
   const logSafe = Math.min(page, logPages);
   const logActive = !!(search || lType.length || lSource.length || lStatus.length || lConn.length || rangeActive(lDate));
   // Active filter groups (search lives in the toolbar, so it's excluded here).
   const logCount = [lType.length, lSource.length, lStatus.length, lConn.length, rangeActive(lDate)].filter(Boolean).length;
-  function clearLogFilters() { setLType([]); setLSource([]); setLStatus([]); setLConn([]); setLDate(EMPTY_RANGE); setPage(1); }
+  function clearLogFilters() {
+    setLType([]); setLSource([]); setLStatus([]); setLConn([]); setLDate(EMPTY_RANGE); setPage(1);
+    setDlType([]); setDlSource([]); setDlStatus([]); setDlConn([]); setDlDate(EMPTY_RANGE);
+  }
+  function syncLogDraft() {
+    setDlType(lType); setDlSource(lSource); setDlStatus(lStatus); setDlConn(lConn); setDlDate(lDate);
+  }
+  function applyLogFilters() {
+    setLType(dlType); setLSource(dlSource); setLStatus(dlStatus); setLConn(dlConn); setLDate(dlDate);
+    setPage(1); setFilterOpen(false);
+  }
+  const logDirty =
+    !arrEq(dlType, lType) || !arrEq(dlSource, lSource) || !arrEq(dlStatus, lStatus) ||
+    !arrEq(dlConn, lConn) || !rangeEq(dlDate, lDate);
+  const logDraftActive = !!(dlType.length || dlSource.length || dlStatus.length || dlConn.length || rangeActive(dlDate));
 
   const dash2 = <span className="text-slate-400">—</span>;
   const logCols: Column<CallLog>[] = [
@@ -565,7 +623,7 @@ export default function ClientCalls() {
           {/* Filters — Date + Refresh stay in the bar; the rest live in the right-side rail. */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <FilterToggle open={filterOpen} count={dashCount} onClick={() => setFilterOpen((o) => !o)} />
+              <FilterToggle open={filterOpen} count={dashCount} onClick={() => { if (!filterOpen) syncDashDraft(); setFilterOpen((o) => !o); }} />
             </div>
             <div className="flex items-center gap-2">
               {filtersActive && <button onClick={clearDashFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>}
@@ -578,17 +636,19 @@ export default function ClientCalls() {
           <FilterRail
             open={tab === "dashboard" && filterOpen}
             onClose={() => setFilterOpen(false)}
-            onReset={clearDashFilters}
-            resetDisabled={!filtersActive}
-            onApply={() => setFilterOpen(false)}
-            applyLabel="Done"
+            dirty={dashDirty}
+            onReset={() => { setDfStatus([]); setDfSource([]); setDfDept([]); setDfOffice([]); setDfAssign([]); setDfDate({ preset: "today" }); }}
+            resetDisabled={!dashDraftActive}
+            onApply={applyDashFilters}
+            applyDisabled={!dashDirty}
+            applyLabel="Apply"
           >
-            <div className="space-y-1.5"><FilterLabel>Date</FilterLabel><DateRangeFilter ariaLabel="Dashboard date range" value={dateRange} onChange={setDateRange} /></div>
-            <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Date</FilterLabel><DateRangeFilter ariaLabel="Dashboard date range" value={dfDate} onChange={setDfDate} /></div>
+            <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={dfSource} onChange={setDfSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={dfStatus} onChange={setDfStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={dfDept} onChange={setDfDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={dfOffice} onChange={setDfOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={dfAssign} onChange={setDfAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>
           </FilterRail>
 
           {dashLoading && !dash ? (
@@ -673,21 +733,23 @@ export default function ClientCalls() {
           <FilterRail
             open={filterOpen}
             onClose={() => setFilterOpen(false)}
-            onReset={clearLogFilters}
-            resetDisabled={!(lType.length || lSource.length || lStatus.length || lConn.length || rangeActive(lDate))}
-            onApply={() => setFilterOpen(false)}
-            applyLabel="Done"
+            dirty={logDirty}
+            onReset={() => { setDlType([]); setDlSource([]); setDlStatus([]); setDlConn([]); setDlDate(EMPTY_RANGE); }}
+            resetDisabled={!logDraftActive}
+            onApply={applyLogFilters}
+            applyDisabled={!logDirty}
+            applyLabel="Apply"
           >
-            <div className="space-y-1.5"><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={lStatus} onChange={(v) => { setLStatus(v); setPage(1); }} options={CSTATUS_OPTS} placeholder="All statuses" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={lType} onChange={(v) => { setLType(v); setPage(1); }} options={TYPE_OPTS} placeholder="All types" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Source</FilterLabel><MultiSelect ariaLabel="Source" value={lSource} onChange={(v) => { setLSource(v); setPage(1); }} options={SRC_OPTS} placeholder="All sources" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Connected</FilterLabel><MultiSelect ariaLabel="Connected" value={lConn} onChange={(v) => { setLConn(v); setPage(1); }} options={CONN_OPTS} placeholder="Any" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Call date</FilterLabel><DateRangeFilter ariaLabel="Call date" value={lDate} onChange={(v) => { setLDate(v); setPage(1); }} /></div>
+            <div className="space-y-1.5"><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={dlStatus} onChange={setDlStatus} options={CSTATUS_OPTS} placeholder="All statuses" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={dlType} onChange={setDlType} options={TYPE_OPTS} placeholder="All types" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Source</FilterLabel><MultiSelect ariaLabel="Source" value={dlSource} onChange={setDlSource} options={SRC_OPTS} placeholder="All sources" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Connected</FilterLabel><MultiSelect ariaLabel="Connected" value={dlConn} onChange={setDlConn} options={CONN_OPTS} placeholder="Any" searchPlaceholder="Search…" /></div>
+            <div className="space-y-1.5"><FilterLabel>Call date</FilterLabel><DateRangeFilter ariaLabel="Call date" value={dlDate} onChange={setDlDate} /></div>
           </FilterRail>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-1 items-center gap-2">
-              <div className="flex-shrink-0"><FilterToggle open={filterOpen} count={logCount} onClick={() => setFilterOpen((o) => !o)} /></div>
+              <div className="flex-shrink-0"><FilterToggle open={filterOpen} count={logCount} onClick={() => { if (!filterOpen) syncLogDraft(); setFilterOpen((o) => !o); }} /></div>
               <div className="relative w-full max-w-sm">
                 <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
                 <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search lead, number, staff…" className={`${selCls} w-full pl-9`} />

@@ -398,6 +398,14 @@ export const getCallDashboard = (params: Record<string, string | undefined> = {}
   return clientGet<CallDashboard>(`/call-dashboard${q ? `?${q}` : ""}`);
 };
 
+// ---- call sync header (all-time totals + last sync); cheap to poll ----
+export interface CallSyncStatus {
+  total_calls: number;
+  total_duration: number;   // seconds
+  last_sync: string | null; // latest call datetime, or null when never synced
+}
+export const getCallSyncStatus = () => clientGet<CallSyncStatus>("/call-sync-status");
+
 // ---- follow-up tracker dashboard ----
 export interface FollowupRep {
   id: number;
@@ -624,6 +632,9 @@ export interface LeadsQuery {
   assigned_to_date?: string;
   follow_from?: string;
   follow_to?: string;
+  /** "Updated date" = filter by call date (leads with a call in range). */
+  updated_from?: string;
+  updated_to?: string;
 }
 
 /** Append the shared lead filter params (used by the list AND the analytics summary). */
@@ -647,6 +658,8 @@ function leadFilterParams(qs: URLSearchParams, f: LeadsQuery): void {
   put("assigned_to_date", f.assigned_to_date);
   put("follow_from", f.follow_from);
   put("follow_to", f.follow_to);
+  put("updated_from", f.updated_from);
+  put("updated_to", f.updated_to);
 }
 
 export const getLeads = (query: LeadsQuery = {}) => {
@@ -665,6 +678,20 @@ export const getLeadAnalytics = (filters: LeadsQuery = {}) => {
   leadFilterParams(qs, filters);
   const s = qs.toString();
   return clientGet<LeadAnalytics>(`/lead-analytics${s ? `?${s}` : ""}`);
+};
+
+// Call KPIs + charts for the current lead filter (calls matched to filtered
+// leads by contact number). "unique_calls" = distinct contact numbers.
+export interface LeadCallSummary {
+  kpis: { total_calls: number; unique_calls: number; avg_sec: number; connected: number; connect_rate: number; talk_sec: number };
+  hourly: { hour: number; calls: number }[];
+  by_status: { label: string; color: string; leads: number; calls: number; talk_sec: number }[];
+}
+export const getLeadCallSummary = (filters: LeadsQuery = {}) => {
+  const qs = new URLSearchParams();
+  leadFilterParams(qs, filters);
+  const s = qs.toString();
+  return clientGet<LeadCallSummary>(`/lead-call-summary${s ? `?${s}` : ""}`);
 };
 export const createLead = (b: Record<string, unknown>) => clientPost("/leads", b);
 export const updateLead = (id: number, b: Record<string, unknown>) => clientPost(`/leads/${id}`, b);
@@ -979,10 +1006,12 @@ export interface MeInfo {
   role: string;
   permissions: Record<string, Perm>;
   modules: string[];
-  /** Super-admin "login as client" state (drives the impersonation banner). */
+  /** Impersonation banner state (super-admin "login as client" or admin "view as staff"). */
   impersonating?: boolean;
   impersonator_name?: string | null;
   client_name?: string | null;
+  /** "client" = super-admin viewing a client; "staff" = admin viewing a team member. */
+  impersonation_kind?: "client" | "staff" | null;
 }
 export const getMe = () => clientGet<MeInfo>("/me");
 
@@ -1150,6 +1179,8 @@ export const getStaffLeads = (id: number) => clientGet<StaffLeads>(`/staff/${id}
 export const createStaff = (b: Record<string, unknown>) => clientPost("/staff", b);
 export const updateStaff = (id: number, b: Record<string, unknown>) => clientPost(`/staff/${id}`, b);
 export const deleteStaff = (id: number, body?: Record<string, unknown>) => clientPost(`/staff/${id}/delete`, body);
+/** Admin steps into a team member's session to view the dashboard as them. */
+export const loginAsStaff = (id: number) => clientPost(`/staff/${id}/login-as`, {});
 /** How many active leads are assigned to a member (delete guard). */
 export const getStaffLeadLoad = (id: number) => clientGet<{ assigned_leads: number }>(`/staff/${id}/lead-load`);
 /** Transfer a member's leads to one or more members (round-robin) before deleting them. */

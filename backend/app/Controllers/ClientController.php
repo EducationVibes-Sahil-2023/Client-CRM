@@ -338,11 +338,65 @@ class ClientController extends ApiController
             'role'        => $this->role(),
             'permissions' => $this->effectivePermissions(),
             'modules'     => self::MODULES,
-            // Super-admin "login as client" banner: surface the impersonation state.
-            'impersonating'    => ! empty($u['impersonated_by']),
+            // Impersonation banner: surface both the super-admin "login as client"
+            // state and a client admin "view as team member" state. The kind lets
+            // the frontend show the right message and exit to the right place.
+            'impersonating'     => ! empty($u['impersonated_by']),
             'impersonator_name' => $u['impersonated_by'] ?? null,
-            'client_name'      => $u['client_name'] ?? null,
+            'client_name'       => $u['client_name'] ?? null,
+            'impersonation_kind' => ! empty($u['impersonated_by']) ? ($this->role() === 'staff' ? 'staff' : 'client') : null,
         ]);
+    }
+
+    /**
+     * POST /client/staff/{id}/login-as — a client admin steps into one of their
+     * team member's shoes to see the dashboard exactly as that staff user does
+     * (their permissions, their scoped data). The admin's own session is stashed
+     * under `impersonator` and restored via POST /auth/stop-impersonation.
+     *
+     * Guards: only a real client admin may do this (not staff, not agents), only
+     * for a staff member of their own workspace, and never while already
+     * impersonating — nesting would strand the outer session.
+     */
+    public function loginAsStaff(int $staffId)
+    {
+        if ($this->role() !== 'client_admin') {
+            return $this->failForbidden('Only an administrator can view a team member\'s profile.');
+        }
+        if ($this->session->get('impersonator')) {
+            return $this->fail('You are already viewing as another user. Exit first.', 409);
+        }
+
+        $clientId = $this->clientId();
+        $staff    = (new ClientStaffModel())->where('client_id', $clientId)->find($staffId);
+        if (! $staff) {
+            return $this->failNotFound('Team member not found.');
+        }
+        if (($staff['status'] ?? 'active') !== 'active') {
+            return $this->fail('This team member is inactive and cannot be viewed.', 422);
+        }
+
+        // Resolve their login email from the main-DB account index (a member may
+        // exist without a login), falling back to the profile email.
+        $account = (new StaffAccountModel())->where('client_id', $clientId)->where('staff_id', $staffId)->first();
+        $email   = $account['email'] ?? ($staff['email'] ?? null);
+
+        $admin = $this->currentUser();
+        $this->session->set('impersonator', $admin);
+        $this->session->set('user', [
+            'id'              => $staffId,
+            'email'           => $email,
+            'role'            => 'staff',
+            'client_id'       => $clientId,
+            'staff_id'        => $staffId,
+            'role_id'         => isset($staff['role_id']) && $staff['role_id'] !== null ? (int) $staff['role_id'] : null,
+            'name'            => $staff['name'] ?? $email,
+            'impersonated_by' => $admin['name'] ?? 'Administrator',
+            'client_name'     => $admin['client_name'] ?? null,
+        ]);
+        $this->logActivity('login', 'session', $staffId, 'Admin viewed team member "' . ($staff['name'] ?? $staffId) . '" profile', $clientId);
+
+        return $this->respond(['ok' => true]);
     }
 
     /** Allowed backup frequencies for the client schedule. */
@@ -1923,14 +1977,16 @@ class ClientController extends ApiController
             // assigned = only calls made by the lead's assigned staff.
             $nums       = array_values(array_unique(array_filter([$ph, $alt !== '' && $alt !== $ph ? $alt : null])));
             $assignedTo = (int) ($r['assigned_to'] ?? 0);
-            $total = 0;
-            $assigned = 0;
+            // Local call-count accumulators — must NOT reuse $total, which holds the
+            // page-bar lead count set above and is returned in the response.
+            $callTotal    = 0;
+            $callAssigned = 0;
             foreach ($nums as $n) {
-                $total    += $callCountByPhone[$n] ?? 0;
-                $assigned += $assignedTo > 0 ? ($callCountByPhoneStaff[$n][$assignedTo] ?? 0) : 0;
+                $callTotal    += $callCountByPhone[$n] ?? 0;
+                $callAssigned += $assignedTo > 0 ? ($callCountByPhoneStaff[$n][$assignedTo] ?? 0) : 0;
             }
-            $r['call_count']          = $total;
-            $r['assigned_call_count'] = $assigned;
+            $r['call_count']          = $callTotal;
+            $r['assigned_call_count'] = $callAssigned;
             $r['custom_fields']    = $this->decodeCustom($r['custom_fields'] ?? null);
         }
         unset($r);
@@ -2007,6 +2063,21 @@ class ClientController extends ApiController
         }
         if (($f = $get('follow_to')) !== '') {
             $q->where('follow_date <=', $f);
+        }
+        // "Updated date" = by CALL date: keep leads that have at least one call
+        // (matched by contact = phone/alt_phone) whose call_start is in range.
+        $isDate = static fn (string $s): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $s);
+        $uFrom  = $get('updated_from');
+        $uTo    = $get('updated_to');
+        if (($uFrom !== '' && $isDate($uFrom)) || ($uTo !== '' && $isDate($uTo))) {
+            $cw = 'c.deleted_at IS NULL AND (c.contact = leads.phone OR c.contact = leads.alt_phone)';
+            if ($uFrom !== '' && $isDate($uFrom)) {
+                $cw .= " AND c.call_start >= '{$uFrom} 00:00:00'";
+            }
+            if ($uTo !== '' && $isDate($uTo)) {
+                $cw .= " AND c.call_start <= '{$uTo} 23:59:59'";
+            }
+            $q->where("EXISTS(SELECT 1 FROM calls c WHERE {$cw})", null, false);
         }
 
         // Follow-up status (upcoming / overdue / done) via EXISTS — a lead is
@@ -2096,6 +2167,141 @@ class ClientController extends ApiController
      * marketing channel (the source's marketing type) and conversion stage.
      * Each series is a list of { label, value, color }, sorted high→low.
      */
+    /**
+     * GET /client/lead-call-summary — call KPIs + charts for the CURRENT lead
+     * filter. Only counts calls whose contact number belongs to a lead in the
+     * filtered set (matched by contact, so unmatched-lead_id calls still count).
+     * "Unique calls" = distinct contact numbers. Same filter params as the leads
+     * list. Returns KPIs, hourly distribution, and duration/leads by lead status.
+     */
+    public function leadCallSummary()
+    {
+        if ($resp = $this->requirePermission('leads')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        // The filtered lead set (same scope + filters as the leads table).
+        $lq = (new LeadModel())->select('phone, alt_phone, status_id')->where('client_id', $cid);
+        $this->applyLeadScope($lq);
+        $this->applyLeadFilters($lq);
+
+        // Map each filtered lead's number(s) → its lead status, and collect the
+        // phone set used to match calls by contact.
+        $statusByPhone = [];
+        foreach ($lq->findAll() as $l) {
+            $sid = (int) ($l['status_id'] ?? 0);
+            foreach ([$l['phone'] ?? '', $l['alt_phone'] ?? ''] as $p) {
+                $k = CallIngestService::normalizePhone($p);
+                if ($k !== '') {
+                    $statusByPhone[$k] = $sid;
+                }
+            }
+        }
+        $phoneList = array_keys($statusByPhone);
+
+        $statusMeta = [];
+        foreach ($this->lookupRows(LeadStatusModel::class, $cid) as $i => $st) {
+            $statusMeta[(int) $st['id']] = ['name' => $st['name'], 'color' => $st['color'], 'seq' => $i];
+        }
+
+        // Call-date window: only count calls whose call_start is in range. Uses the
+        // "Updated date" (call date) filter, else the Created-date filter, else
+        // defaults to TODAY — so the summary opens on today's call activity.
+        $isDate = static fn (string $s): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $s);
+        $today  = date('Y-m-d');
+        $uFrom  = trim((string) ($this->request->getGet('updated_from') ?? ''));
+        $uTo    = trim((string) ($this->request->getGet('updated_to') ?? ''));
+        if (! $isDate($uFrom)) {
+            $uFrom = trim((string) ($this->request->getGet('created_from') ?? ''));
+        }
+        if (! $isDate($uTo)) {
+            $uTo = trim((string) ($this->request->getGet('created_to') ?? ''));
+        }
+        if (! $isDate($uFrom)) {
+            $uFrom = $today;
+        }
+        if (! $isDate($uTo)) {
+            $uTo = $today;
+        }
+
+        $scope = $this->visibleStaffIds();
+        $total = 0;
+        $connected = 0;
+        $talk = 0;
+        $uniq = [];
+        $hourly = [];        // hour => calls
+        $stAgg  = [];        // status_id => ['talk'=>, 'calls'=>, 'leads'=>[contact=>1]]
+        foreach (array_chunk($phoneList, 500) as $chunk) {
+            $cq = (new CallLogModel())->select('contact, call_start, connected, duration')
+                ->where('client_id', $cid)->whereIn('contact', $chunk);
+            if ($scope !== null) {
+                $cq->whereIn('staff_id', $scope ?: [0]);
+            }
+            $cq->where('call_start >=', $uFrom . ' 00:00:00')
+                ->where('call_start <=', $uTo . ' 23:59:59');
+            foreach ($cq->findAll() as $c) {
+                $ct = (string) ($c['contact'] ?? '');
+                $dur = (int) ($c['duration'] ?? 0);
+                $total++;
+                $uniq[$ct] = 1;
+                if ((int) $c['connected']) {
+                    $connected++;
+                }
+                $talk += $dur;
+                $st = (string) ($c['call_start'] ?? '');
+                if ($st !== '') {
+                    $h = (int) substr($st, 11, 2);
+                    $hourly[$h] = ($hourly[$h] ?? 0) + 1;
+                }
+                $sid = $statusByPhone[$ct] ?? 0;
+                if ($sid > 0) {
+                    $stAgg[$sid]['talk']         = ($stAgg[$sid]['talk'] ?? 0) + $dur;
+                    $stAgg[$sid]['calls']        = ($stAgg[$sid]['calls'] ?? 0) + 1;
+                    $stAgg[$sid]['leads'][$ct]   = 1;
+                }
+            }
+        }
+
+        ksort($hourly);
+        $hourlyOut = [];
+        foreach ($hourly as $h => $n) {
+            $hourlyOut[] = ['hour' => $h, 'calls' => $n];
+        }
+
+        $byStatus = [];
+        foreach ($stAgg as $sid => $a) {
+            $m          = $statusMeta[$sid] ?? ['name' => "#{$sid}", 'color' => 'slate', 'seq' => 999];
+            $byStatus[] = [
+                'label'    => $m['name'],
+                'color'    => $m['color'],
+                'leads'    => count($a['leads'] ?? []),
+                'calls'    => $a['calls'] ?? 0,
+                'talk_sec' => $a['talk'] ?? 0,
+                'seq'      => $m['seq'],
+            ];
+        }
+        usort($byStatus, static fn ($x, $y) => $x['seq'] <=> $y['seq']);
+        $byStatus = array_map(static function ($r) {
+            unset($r['seq']);
+
+            return $r;
+        }, $byStatus);
+
+        return $this->respond([
+            'kpis' => [
+                'total_calls'  => $total,
+                'unique_calls' => count($uniq),
+                'avg_sec'      => $total ? (int) round($talk / $total) : 0,
+                'connected'    => $connected,
+                'connect_rate' => $total ? (int) round(100 * $connected / $total) : 0,
+                'talk_sec'     => $talk,
+            ],
+            'hourly'    => $hourlyOut,
+            'by_status' => $byStatus,
+        ]);
+    }
+
     public function leadAnalytics()
     {
         $cid   = $this->clientId();
@@ -2130,6 +2336,7 @@ class ClientController extends ApiController
         $typeCounts   = $this->leadCountsBy($model, $cid, 'lead_type_id');
         $srcCounts    = $this->leadCountsBy($model, $cid, 'source_id');
         $totalQ       = (new LeadModel())->where('client_id', $cid);
+        $totalQ->where('(pending_transfer IS NULL OR pending_transfer = 0)'); // match the table (hides mid-transfer leads)
         $this->applyLeadScope($totalQ);
         $this->applyLeadFilters($totalQ);
         $total = $totalQ->countAllResults();
@@ -2216,7 +2423,8 @@ class ClientController extends ApiController
             ->where('client_id', $cid)
             ->where("{$column} IS NOT NULL")
             ->where("{$column} >", 0)
-            ->where('deleted_at', null);
+            ->where('deleted_at', null)
+            ->where('(pending_transfer IS NULL OR pending_transfer = 0)'); // match the table
         $this->applyLeadScope($b);
         $this->applyLeadFilters($b);
         $rows = $b->groupBy($column)->get()->getResultArray();
@@ -3707,6 +3915,45 @@ class ClientController extends ApiController
      * GET /client/calls — all active calls for the client (most recent first),
      * enriched with lead and staff names for the Calls activity page.
      */
+    /**
+     * GET /client/call-sync-status — small header widget data: the overall call
+     * count + total duration (all-time, NOT scoped to today), and the last-synced
+     * time (latest call recorded). Scoped to what the user can see. Cheap + safe
+     * to poll (auto-refresh every minute).
+     */
+    public function callSyncStatus()
+    {
+        if ($resp = $this->requirePermission('calls')) {
+            return $resp;
+        }
+        $cid   = $this->clientId();
+        $scope = $this->visibleStaffIds();
+        $today = date('Y-m-d');
+
+        // TODAY's totals only — independent of any table filter. A day with no
+        // calls reads as 0 (the UI then shows "No calls").
+        $totalQ = (new CallLogModel())->select('COUNT(*) AS cnt, COALESCE(SUM(duration), 0) AS dur')
+            ->where('client_id', $cid)
+            ->where('call_start >=', "{$today} 00:00:00")
+            ->where('call_start <=', "{$today} 23:59:59");
+        if ($scope !== null) {
+            $totalQ->whereIn('staff_id', $scope ?: [0]);
+        }
+        $agg = $totalQ->first();
+
+        $lastQ = (new CallLogModel())->select('MAX(call_start) AS last')->where('client_id', $cid);
+        if ($scope !== null) {
+            $lastQ->whereIn('staff_id', $scope ?: [0]);
+        }
+        $last = $lastQ->first()['last'] ?? null;
+
+        return $this->respond([
+            'total_calls'    => (int) ($agg['cnt'] ?? 0),
+            'total_duration' => (int) ($agg['dur'] ?? 0), // seconds
+            'last_sync'      => $last ?: null,            // latest call datetime, or null
+        ]);
+    }
+
     public function calls()
     {
         if ($resp = $this->requirePermission('calls')) {
