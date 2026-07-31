@@ -1144,7 +1144,9 @@ export default function ClientLeads() {
   }
   async function saveConvSetup() {
     if (!convDraft) return;
-    if (convDraft.enabled && !(convDraft.api_url ?? "").trim()) { toast.error("Enter the API endpoint URL."); return; }
+    // The API endpoint is only needed in 'shared' mode; 'own' mode writes to the applicant table.
+    const ownMode = convertCfg?.applicant_mode === "own";
+    if (convDraft.enabled && !ownMode && !(convDraft.api_url ?? "").trim()) { toast.error("Enter the API endpoint URL."); return; }
     setConvSaving(true);
     try {
       const saved = await saveConvertConfig(convDraft);
@@ -2749,6 +2751,11 @@ export default function ClientLeads() {
                 <span className="mb-1 block text-sm font-medium text-slate-700">{f.label}{f.required && <span className="text-rose-500"> *</span>}</span>
                 {f.type === "textarea" ? (
                   <textarea value={convertValues[f.key] ?? ""} onChange={(e) => setConvertValues((v) => ({ ...v, [f.key]: e.target.value }))} rows={3} className={`${selCls} w-full`} />
+                ) : f.type === "select" ? (
+                  <select value={convertValues[f.key] ?? ""} onChange={(e) => setConvertValues((v) => ({ ...v, [f.key]: e.target.value }))} className={`${selCls} w-full`}>
+                    <option value="">— Select —</option>
+                    {(f.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
                 ) : (
                   <input type={f.type === "number" ? "number" : f.type === "date" ? "date" : f.type === "email" ? "email" : f.type === "tel" ? "tel" : "text"} value={convertValues[f.key] ?? ""} onChange={(e) => setConvertValues((v) => ({ ...v, [f.key]: e.target.value }))} className={`${selCls} w-full`} />
                 )}
@@ -2772,6 +2779,11 @@ export default function ClientLeads() {
             <input type="checkbox" checked={convDraft.enabled} onChange={(e) => setConvDraft({ ...convDraft, enabled: e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
             <span className="text-sm font-medium text-slate-700">Enable the button on leads</span>
           </label>
+          {convertCfg?.applicant_mode === "own" ? (
+            <p className="rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-700">Applicant section is in <b>My own table</b> mode — converting a lead adds a record to your applicant table using <b>your applicant columns</b> (pre-filled from the lead). No API or form fields to set up here. Manage columns in the Applicant section settings.</p>
+          ) : (
+            <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">Applicant section is in <b>Shared tracker</b> mode — converting posts the form below to your external API.</p>
+          )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label>
               <span className="mb-1 block text-sm font-medium text-slate-700">Button text</span>
@@ -2784,6 +2796,7 @@ export default function ClientLeads() {
                 {statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </label>
+            {convertCfg?.applicant_mode !== "own" && <>
             <label className="sm:col-span-2">
               <span className="mb-1 block text-sm font-medium text-slate-700">API endpoint URL</span>
               <input value={convDraft.api_url ?? ""} onChange={(e) => setConvDraft({ ...convDraft, api_url: e.target.value })} placeholder="https://your-system.com/api/applicants" className={`${selCls} w-full`} />
@@ -2800,9 +2813,10 @@ export default function ClientLeads() {
                 <option value="json">JSON</option><option value="form">Form data</option>
               </select>
             </label>
+            </>}
           </div>
 
-          <div>
+          {convertCfg?.applicant_mode !== "own" && <div>
             <span className="mb-1 block text-sm font-medium text-slate-700">Form fields</span>
             <p className="mb-2 text-xs text-slate-400">These fields appear in the convert form and are sent to the API using their key.</p>
             <div className="space-y-1.5">
@@ -2821,7 +2835,7 @@ export default function ClientLeads() {
               ))}
             </div>
             <button type="button" onClick={() => setConvDraft({ ...convDraft, fields: [...convDraft.fields, { key: "", label: "", type: "text", required: false } as ConvertField] })} className="mt-2 text-sm font-medium text-indigo-600 hover:text-indigo-700">+ Add field</button>
-          </div>
+          </div>}
 
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={() => setConvSetupOpen(false)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>

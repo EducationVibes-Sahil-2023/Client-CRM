@@ -183,6 +183,7 @@ export function FieldSetupDrawer({
     >
       <div className="space-y-6">
         {headerExtra}
+        {requirableFields.length > 0 && (
         <div>
           <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Mandatory fields</h4>
           <p className="mt-0.5 text-xs text-slate-400">Toggle a field to make it required on the form.</p>
@@ -195,6 +196,7 @@ export function FieldSetupDrawer({
             ))}
           </div>
         </div>
+        )}
 
         {hintFields && hintFields.length > 0 && (
           <div>

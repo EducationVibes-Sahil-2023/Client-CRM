@@ -4,15 +4,21 @@ import { useEffect, useMemo, useState } from "react";
 import { notFound, useParams, useRouter } from "next/navigation";
 import {
   getApplicantTracker, getApplicantTrackerFilters, saveApplicantConfig,
+  getApplicantSource, saveApplicantSource, saveApplicantColumns, testApplicantSource,
+  getApplicantRecords, createApplicantRecord, updateApplicantRecord, deleteApplicantRecord,
+  type ApplicantColumn, type ApplicantRecord, type ApplicantDbConfig,
   APPLICANT_MULTI_KEYS,
   type ApplicantTrackerColumn, type ApplicantTrackerFilterOptions, type ApplicantTrackerFilters,
 } from "../../lib/client";
 import { useClient } from "../ClientContext";
 import { useToast } from "../../components/toast/ToastProvider";
-import { Card, Modal, PageHeader, Spinner } from "../../admin/ui";
-import { DataTable, type Column } from "../../admin/DataTable";
+import { useConfirm } from "../../components/confirm/ConfirmProvider";
+import { Card, Modal, PageHeader, Spinner, EmptyState } from "../../admin/ui";
+import { DataTable, IconButton, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { CustomFieldInputs, customFieldErrors } from "../CustomFields";
+import { FieldSetupDrawer } from "../FieldSetupDrawer";
 import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
 import { DateRangeFilter, resolveDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 
@@ -104,7 +110,8 @@ const EMPTY_FILTERS: Filters = {
   minor: "", tf_status: "", academic_year: "",
   courier_date: "", apostille_received: "", visa_payment_date: "", fly_date: "",
   applicantRange: EMPTY_RANGE, lastUpdateRange: EMPTY_RANGE,
-  onlyMyLeads: true,
+  // Show ALL applicants by default; tick "Only my leads" to narrow to phone matches.
+  onlyMyLeads: false,
 };
 
 // Single-value (exact-equals / Yes-No / year) params. The two BETWEEN ranges are
@@ -155,7 +162,8 @@ function filtersToParams(f: Filters): ApplicantTrackerFilters {
   if (ar.from && ar.to) { p.from = ar.from; p.to = ar.to; }
   const lr = resolveDateRange(f.lastUpdateRange);
   if (lr.from && lr.to) { p.last_from = lr.from; p.last_to = lr.to; }
-  if (!f.onlyMyLeads) p.all = "1";
+  // Default shows all applicants; scope to phone-matched leads only when ticked.
+  if (f.onlyMyLeads) p.mine = "1";
   return p;
 }
 function countActive(f: Filters): number {
@@ -210,6 +218,20 @@ export default function ApplicantSectionPage() {
   const [draftColors, setDraftColors] = useState<{ value: string; color: string }[]>([]);
   const [draftFrozen, setDraftFrozen] = useState(1);
   const [saving, setSaving] = useState(false);
+  // Section source: 'shared' = read-only tracker; 'own' = the client's own table.
+  const BLANK_DB: ApplicantDbConfig = { host: "", port: 3306, database: "", username: "", has_password: false };
+  const [srcMode, setSrcMode] = useState<"shared" | "own">("shared");
+  const [ownColumns, setOwnColumns] = useState<ApplicantColumn[]>([]);   // live client-defined columns
+  const [dbCfg, setDbCfg] = useState<ApplicantDbConfig>(BLANK_DB);       // shared-tracker DB creds
+  const [draftMode, setDraftMode] = useState<"shared" | "own">("shared"); // editing in the modal
+  const [fieldsOpen, setFieldsOpen] = useState(false); // the applicant Field Setup drawer
+  const [draftDb, setDraftDb] = useState<ApplicantDbConfig>(BLANK_DB);
+  const [dbPass, setDbPass] = useState("");                              // new password (blank = keep)
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [globalConfigured, setGlobalConfigured] = useState(true);
+  const [srcLoaded, setSrcLoaded] = useState(false);
+  const setDraftDbField = (patch: Partial<ApplicantDbConfig>) => setDraftDb((d) => ({ ...d, ...patch }));
 
   // Admin colour map (value → hex), lower-cased for case-insensitive matching.
   const colorMap = useMemo(() => {
@@ -234,8 +256,18 @@ export default function ApplicantSectionPage() {
   const canView = isThisSection && (!permissionsLoaded || isAdmin);
   const appliedParams = useMemo(() => filtersToParams(filters), [filters]);
 
+  // Which source this section uses (shared tracker vs the client's own table).
   useEffect(() => {
     if (!canView) return;
+    getApplicantSource()
+      .then((s) => { setSrcMode(s.mode); setOwnColumns(s.columns ?? []); setDbCfg({ ...BLANK_DB, ...s.db }); setGlobalConfigured(s.global_configured ?? true); })
+      .catch(() => {})
+      .finally(() => setSrcLoaded(true));
+  }, [canView]);
+
+  // Shared (tracker) data — only fetched in 'shared' mode.
+  useEffect(() => {
+    if (!canView || !srcLoaded || srcMode === "own") return;
     setLoading(true);
     const t = setTimeout(() => {
       getApplicantTracker({ page, per_page: perPage, q: search.trim() || undefined, ...appliedParams })
@@ -244,9 +276,9 @@ export default function ApplicantSectionPage() {
         .finally(() => setLoading(false));
     }, 250);
     return () => clearTimeout(t);
-  }, [canView, page, perPage, search, tick, appliedParams, toast]);
+  }, [canView, srcLoaded, srcMode, page, perPage, search, tick, appliedParams, toast]);
 
-  useEffect(() => { if (canView) getApplicantTrackerFilters().then(setOpts).catch(() => {}); }, [canView]);
+  useEffect(() => { if (canView && srcMode !== "own") getApplicantTrackerFilters().then(setOpts).catch(() => {}); }, [canView, srcMode]);
 
   useEffect(() => {
     const last = Math.max(1, Math.ceil(total / perPage));
@@ -303,8 +335,24 @@ export default function ApplicantSectionPage() {
     const entries = Object.entries(applicant.colors ?? {}).map(([value, color]) => ({ value, color }));
     setDraftColors(entries.length ? entries : COLOR_PRESETS.map(([value, color]) => ({ value, color })));
     setDraftFrozen(applicant.frozen ?? 1);
+    setDraftMode(srcMode);
+    setDraftDb({ ...dbCfg });
+    setDbPass("");
+    setTestMsg(null);
     setEditOpen(true);
   };
+  async function testDb() {
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      const r = await testApplicantSource({ ...draftDb, password: dbPass || undefined });
+      setTestMsg({ ok: r.ok, text: r.message });
+    } catch (e) {
+      setTestMsg({ ok: false, text: (e as Error)?.message || "Test failed." });
+    } finally {
+      setTesting(false);
+    }
+  }
   const save = async () => {
     const label = draftLabel.trim();
     const slug = draftSlug.trim().toLowerCase();
@@ -317,11 +365,15 @@ export default function ApplicantSectionPage() {
     }
     setSaving(true);
     try {
+      await saveApplicantSource({ mode: draftMode, db: { ...draftDb, password: dbPass || undefined } });
       const c = await saveApplicantConfig({ label, slug, colors, frozen: draftFrozen });
       setApplicant(c);
+      setSrcMode(draftMode);
+      setDbCfg({ ...draftDb, has_password: draftDb.has_password || !!dbPass });
       setEditOpen(false);
       toast.success("Section updated.");
       if (c.slug !== section) router.replace(`/client/${c.slug}`);
+      else { setPage(1); setTick((t) => t + 1); }
     } catch (e) {
       toast.error((e as Error)?.message || "Could not save.");
     } finally {
@@ -378,11 +430,23 @@ export default function ApplicantSectionPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageHeader
           title={applicant.label}
-          subtitle={`Applicant tracker from the external database (read-only). URL: /client/${applicant.slug}`}
+          subtitle={srcMode === "own"
+            ? `Your applicant table — add, edit and manage records. URL: /client/${applicant.slug}`
+            : `Applicant tracker from the external database (read-only). URL: /client/${applicant.slug}`}
         />
         <div className="mt-1 flex items-center gap-2">
-          <FilterToggle open={filterOpen} count={activeCount} onClick={() => { setDraft(filters); setFilterOpen((o) => !o); }} />
-          {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
+          {srcMode !== "own" && <FilterToggle open={filterOpen} count={activeCount} onClick={() => { setDraft(filters); setFilterOpen((o) => !o); }} />}
+          {isAdmin && srcMode !== "own" && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
+          {isAdmin && srcMode === "own" && (
+            <button
+              type="button"
+              onClick={() => setFieldsOpen(true)}
+              className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              Fields
+            </button>
+          )}
           {isAdmin && (
             <button
               type="button"
@@ -396,7 +460,9 @@ export default function ApplicantSectionPage() {
         </div>
       </div>
 
-      <DataTable
+      {srcMode === "own" && <OwnApplicants columns={ownColumns} canManage={isAdmin} frozen={applicant.frozen ?? 1} />}
+
+      {srcMode !== "own" && <DataTable
         tableKey="applicant-tracker"
         canRenameColumns={isAdmin}
         sharedConfig
@@ -444,9 +510,9 @@ export default function ApplicantSectionPage() {
         pageSize={perPage}
         onPageSize={(n) => { setPerPage(n); setPage(1); }}
         pageAlign="right"
-      />
+      />}
 
-      <FilterRail
+      {srcMode !== "own" && <FilterRail
         open={filterOpen}
         onClose={() => setFilterOpen(false)}
         dirty={dirty}
@@ -519,7 +585,7 @@ export default function ApplicantSectionPage() {
             <input type="date" value={draft[f.key]} onChange={(e) => setD({ [f.key]: e.target.value } as Partial<Filters>)} className={`${selCls} mt-1 w-full`} />
           </div>
         ))}
-      </FilterRail>
+      </FilterRail>}
 
       <Modal open={editOpen} title="Section settings" onClose={() => setEditOpen(false)}>
         <div className="space-y-4">
@@ -535,6 +601,55 @@ export default function ApplicantSectionPage() {
               <input value={draftSlug} onChange={(e) => setDraftSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))} maxLength={31} placeholder="applicant" className={`${selCls} flex-1`} />
             </div>
             <p className="mt-1 text-xs text-slate-400">Lowercase letters, numbers and hyphens. Changing this moves the page to the new address.</p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <label className="mb-1 block text-sm font-medium text-slate-700">Applicant data</label>
+            <p className="mb-2 text-xs text-slate-400">Use the shared read-only tracker, or build your own applicant table with your own columns.</p>
+            <div className="flex flex-col gap-1.5">
+              <label className={`flex items-start gap-2 rounded-lg border p-2.5 ${draftMode === "shared" ? "border-indigo-300 bg-white" : "border-slate-200"}`}>
+                <input type="radio" name="src-mode" checked={draftMode === "shared"} onChange={() => setDraftMode("shared")} className="mt-0.5" />
+                <span className="text-sm">
+                  <span className="font-medium text-slate-700">Shared tracker</span>
+                  <span className="block text-xs text-slate-400">The read-only applicant tracker from a secondary (Perfex) database.</span>
+                </span>
+              </label>
+              <label className={`flex items-start gap-2 rounded-lg border p-2.5 ${draftMode === "own" ? "border-indigo-300 bg-white" : "border-slate-200"}`}>
+                <input type="radio" name="src-mode" checked={draftMode === "own"} onChange={() => setDraftMode("own")} className="mt-0.5" />
+                <span className="text-sm">
+                  <span className="font-medium text-slate-700">My own table</span>
+                  <span className="block text-xs text-slate-400">Define your own columns and add / edit / delete applicant records here.</span>
+                </span>
+              </label>
+            </div>
+
+            {draftMode === "shared" && (
+              <div className="mt-3 space-y-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Secondary database</div>
+                <p className="text-[11px] text-slate-400">Point the tracker at your own applicant (Perfex) database. Leave blank to use the platform default{globalConfigured ? " (configured)" : " (not configured on this server)"}.</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <input value={draftDb.host} onChange={(e) => setDraftDbField({ host: e.target.value })} placeholder="Host / IP" className={`${selCls} col-span-2`} />
+                  <input value={String(draftDb.port || "")} onChange={(e) => setDraftDbField({ port: Number(e.target.value) || 3306 })} placeholder="Port" inputMode="numeric" className={selCls} />
+                </div>
+                <input value={draftDb.database} onChange={(e) => setDraftDbField({ database: e.target.value })} placeholder="Database name" className={`${selCls} w-full`} />
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={draftDb.username} onChange={(e) => setDraftDbField({ username: e.target.value })} placeholder="Username" className={selCls} autoComplete="off" />
+                  <input value={dbPass} onChange={(e) => setDbPass(e.target.value)} type="password" placeholder={draftDb.has_password ? "•••••• (unchanged)" : "Password"} className={selCls} autoComplete="new-password" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={testDb} disabled={testing} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-60">{testing ? "Testing…" : "Test connection"}</button>
+                  {testMsg && <span className={`text-xs font-medium ${testMsg.ok ? "text-emerald-600" : "text-rose-600"}`}>{testMsg.ok ? "✓ " : "✗ "}{testMsg.text}</span>}
+                </div>
+                <p className="text-[11px] text-slate-400">Read-only — only SELECT queries run. Grant the account SELECT-only and allow this app&apos;s IP. Adjust which columns show &amp; their order with the <b>Columns</b> button on the table.</p>
+              </div>
+            )}
+
+            {draftMode === "own" && (
+              <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2">
+                <span className="text-xs text-slate-500">{ownColumns.length} field{ownColumns.length === 1 ? "" : "s"} defined. Add, arrange &amp; preview them like a form.</span>
+                <button type="button" onClick={() => { setEditOpen(false); setFieldsOpen(true); }} className="flex-shrink-0 rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">Manage fields →</button>
+              </div>
+            )}
           </div>
 
           <div>
@@ -600,6 +715,155 @@ export default function ApplicantSectionPage() {
           </div>
         </div>
       </Modal>
+
+      {/* Applicant fields — same builder (types, required, arrange, live preview) as the Leads form setup. */}
+      <FieldSetupDrawer
+        open={fieldsOpen}
+        onClose={() => setFieldsOpen(false)}
+        title="Applicant fields"
+        subtitle="Create your applicant columns — set types, mark required, arrange the order and preview the form."
+        requirableFields={[]}
+        required={new Set()}
+        customFields={ownColumns}
+        orderFields={[]}
+        order={ownColumns.map((c) => c.key)}
+        onSave={async (body) => {
+          // Apply the arranged order to the columns, then persist.
+          const ordered = [
+            ...body.order.map((k) => body.custom_fields.find((f) => f.key === k)).filter(Boolean),
+            ...body.custom_fields.filter((f) => !body.order.includes(f.key)),
+          ] as ApplicantColumn[];
+          const r = await saveApplicantColumns(ordered);
+          return { required_fields: [], custom_fields: r.columns };
+        }}
+        onSaved={(_req, cf) => { setOwnColumns(cf); }}
+      />
     </div>
+  );
+}
+
+const OWN_INPUT = "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15";
+
+/** The client's OWN applicant table: records with their defined columns + full CRUD. */
+function OwnApplicants({ columns, canManage, frozen }: { columns: ApplicantColumn[]; canManage: boolean; frozen: number }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [rows, setRows] = useState<ApplicantRecord[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(25);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [tick, setTick] = useState(0);
+  const [editing, setEditing] = useState<ApplicantRecord | "new" | null>(null);
+  const [draftData, setDraftData] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState<number | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    const t = setTimeout(() => {
+      getApplicantRecords({ page, per_page: perPage, q: search.trim() || undefined })
+        .then((r) => { setRows(r.rows ?? []); setTotal(r.total ?? 0); })
+        .catch((e) => toast.error((e as Error)?.message || "Could not load applicants."))
+        .finally(() => setLoading(false));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [page, perPage, search, tick, toast]);
+
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const safePage = Math.min(page, totalPages);
+
+  const openNew = () => { setDraftData({}); setErrors({}); setEditing("new"); };
+  const openEditRow = (r: ApplicantRecord) => { setDraftData({ ...r.data }); setErrors({}); setEditing(r); };
+
+  async function saveRecord() {
+    const errs = customFieldErrors(columns, draftData);
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    setSaving(true);
+    try {
+      if (editing === "new") await createApplicantRecord(draftData);
+      else if (editing) await updateApplicantRecord(editing.id, draftData);
+      toast.success("Saved.");
+      setEditing(null);
+      setTick((t) => t + 1);
+    } catch (e) { toast.error((e as Error)?.message || "Could not save."); }
+    finally { setSaving(false); }
+  }
+  async function removeRow(r: ApplicantRecord) {
+    if (!(await confirm({ title: "Delete applicant?", message: "This applicant record will be removed.", confirmLabel: "Delete", danger: true }))) return;
+    setBusy(r.id);
+    try { await deleteApplicantRecord(r.id); toast.success("Deleted."); setTick((t) => t + 1); }
+    catch (e) { toast.error((e as Error)?.message || "Could not delete."); }
+    finally { setBusy(null); }
+  }
+
+  const tableColumns: Column<ApplicantRecord>[] = columns.map((c, i) => ({
+    key: c.key, header: c.label, lockVisible: i === 0,
+    render: (r) => (r.data[c.key] ? <span className="text-slate-700">{r.data[c.key]}</span> : <span className="text-slate-300">—</span>),
+  }));
+
+  if (!columns.length) {
+    return <EmptyState title="No columns yet" hint={canManage ? "Open “Rename / URL” → My own table to define your columns." : "This section has no columns configured yet."} />;
+  }
+
+  return (
+    <>
+      <DataTable
+        tableKey="applicant-own"
+        frozenCols={frozen}
+        columns={tableColumns}
+        rows={rows}
+        getKey={(r) => r.id}
+        loading={loading}
+        nowrap
+        emptyTitle={search ? "No matching applicants" : "No applicants yet"}
+        emptyHint={search ? "Try a different search." : canManage ? "Click “Add applicant” to create the first record." : ""}
+        quickActions={canManage ? (r) => (
+          <>
+            <IconButton title="Edit" onClick={() => openEditRow(r)}>
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </IconButton>
+            <IconButton title="Delete" danger onClick={() => busy === null && removeRow(r)}>
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5h6v2m-1 0 .8 13H8.2L9 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </IconButton>
+          </>
+        ) : undefined}
+        toolbar={
+          <div className="flex w-full items-center gap-2">
+            <div className="relative min-w-48 flex-1 sm:max-w-xs">
+              <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
+              <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search applicants…" className={`${OWN_INPUT} w-full pl-9`} />
+            </div>
+            {canManage && (
+              <button type="button" onClick={openNew} className="flex h-[38px] flex-shrink-0 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-sm font-semibold text-white transition hover:bg-indigo-700">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
+                Add applicant
+              </button>
+            )}
+          </div>
+        }
+        page={safePage}
+        totalPages={totalPages}
+        onPage={setPage}
+        total={total}
+        pageSize={perPage}
+        onPageSize={(n) => { setPerPage(n); setPage(1); }}
+        pageAlign="right"
+      />
+
+      <Modal open={editing !== null} title={editing === "new" ? "Add applicant" : "Edit applicant"} onClose={() => setEditing(null)}>
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <CustomFieldInputs fields={columns} values={draftData} onChange={(k, v) => setDraftData((d) => ({ ...d, [k]: v }))} errors={errors} />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setEditing(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button type="button" onClick={saveRecord} disabled={saving} className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60">{saving ? "Saving…" : "Save"}</button>
+          </div>
+        </div>
+      </Modal>
+    </>
   );
 }

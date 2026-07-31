@@ -13,6 +13,7 @@ use App\Libraries\SecondaryDb;
 use App\Libraries\TenantManager;
 use App\Models\ActivityLogModel;
 use App\Models\AnnouncementModel;
+use App\Models\ApplicantModel;
 use App\Models\AnnouncementReadModel;
 use App\Models\AppNotificationModel;
 use App\Models\AssetAllocationModel;
@@ -2546,9 +2547,9 @@ class ClientController extends ApiController
             return $this->fail('Only the client admin can view external clients.', 403);
         }
 
-        $sdb = new SecondaryDb();
+        $sdb = $this->resolvedSecondaryDb();
         if (! $sdb->isConfigured()) {
-            return $this->fail('The secondary database is not configured.', 503);
+            return $this->fail('No applicant database is configured. Add your secondary DB credentials in the Applicant section settings.', 503);
         }
 
         $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
@@ -2863,7 +2864,7 @@ class ClientController extends ApiController
         // fail to parse) and cache it — the admin column config is near-static.
         // Probe under the SAME session mode as the real query so validation is
         // deterministic and doesn't drop otherwise-valid columns.
-        $cacheKey = 'appl_tracker_cols_v4_' . md5(json_encode(array_column($cands, 'sql')));
+        $cacheKey = 'appl_tracker_cols_v5_' . md5(json_encode(array_column($cands, 'sql')));
         $good     = cache($cacheKey);
         if (! is_array($good)) {
             // The read session (sql_mode='' for GROUP BY) is configured by
@@ -3025,9 +3026,9 @@ class ClientController extends ApiController
         if (! $this->isAdmin()) {
             return $this->fail('Only the client admin can view the applicant tracker.', 403);
         }
-        $sdb = new SecondaryDb();
+        $sdb = $this->resolvedSecondaryDb();
         if (! $sdb->isConfigured()) {
-            return $this->fail('The secondary database is not configured.', 503);
+            return $this->fail('No applicant database is configured. Add your secondary DB credentials in the Applicant section settings.', 503);
         }
 
         $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
@@ -3166,7 +3167,12 @@ class ClientController extends ApiController
         // Only applicants whose phone matches a lead in THIS tenant's leads table
         // (on by default; pass all=1 to see every applicant). Cross-DB, so the
         // match is resolved to a bounded userid list in PHP.
-        if (trim((string) ($this->request->getGet('all') ?? '')) !== '1') {
+        // Show ALL applicants by default (the original tracker behaviour). Only scope
+        // to applicants linked to this client's leads when explicitly asked (mine=1).
+        // `all=1` (legacy param) is also honoured as "show everything".
+        $wantMine = trim((string) ($this->request->getGet('mine') ?? '')) === '1'
+            && trim((string) ($this->request->getGet('all') ?? '')) !== '1';
+        if ($wantMine) {
             $ids     = $this->localLeadApplicantIds($sdb);
             $conds[] = 'tblclients.userid IN (' . ($ids ? implode(',', $ids) : '0') . ')';
         }
@@ -3230,9 +3236,9 @@ class ClientController extends ApiController
         if (! $this->isAdmin()) {
             return $this->fail('Only the client admin can view this.', 403);
         }
-        $sdb = new SecondaryDb();
+        $sdb = $this->resolvedSecondaryDb();
         if (! $sdb->isConfigured()) {
-            return $this->fail('The secondary database is not configured.', 503);
+            return $this->fail('No applicant database is configured. Add your secondary DB credentials in the Applicant section settings.', 503);
         }
 
         $cached = cache('applicant_tracker_filters_v2');
@@ -3297,6 +3303,326 @@ class ClientController extends ApiController
         'form-setup', 'email-config', 'appearance', 'settings', 'profile',
         'external-clients', 'visitors', 'transfers', 'dashboard',
     ];
+
+    /**
+     * The Applicant section's MODE + the tracker's DB credentials:
+     *   'shared' — the read-only Perfex tracker. Reads the client's OWN secondary DB
+     *              (`applicant_db` = host/port/db/user/pass) when set, else the global
+     *              .env `database.secondary.*` server.
+     *   'own'    — the client's OWN applicant table, whose columns THEY define.
+     */
+    private function applicantSourceMap(): array
+    {
+        $map  = $this->settingsMap();
+        $mode = in_array($map['applicant_source'] ?? '', ['shared', 'own'], true) ? $map['applicant_source'] : 'shared';
+        $db   = json_decode((string) ($map['applicant_db'] ?? ''), true);
+
+        return ['mode' => $mode, 'db' => is_array($db) ? $db : []];
+    }
+
+    /** A SELECT-only connection config from the client's tracker-DB credentials. */
+    private function ownSecondaryConfig(array $db): array
+    {
+        return [
+            'hostname' => trim((string) ($db['host'] ?? '')),
+            'port'     => (int) ($db['port'] ?? 3306) ?: 3306,
+            'database' => trim((string) ($db['database'] ?? '')),
+            'username' => trim((string) ($db['username'] ?? '')),
+            'password' => (string) ($db['password'] ?? ''),
+            'DBDriver' => 'MySQLi',
+        ];
+    }
+
+    /** The DB the tracker reads: the client's own creds when set, else the global .env server. */
+    private function resolvedSecondaryDb(): SecondaryDb
+    {
+        $db = $this->applicantSourceMap()['db'];
+        if (trim((string) ($db['host'] ?? '')) !== '' && trim((string) ($db['database'] ?? '')) !== '') {
+            return new SecondaryDb($this->ownSecondaryConfig($db));
+        }
+
+        return new SecondaryDb(); // global .env `database.secondary.*`
+    }
+
+    /** The client-defined applicant table columns (sanitized): key,label,type,required,options. */
+    private function applicantColumnDefs(): array
+    {
+        $defs = json_decode((string) ($this->settingsMap()['applicant_columns'] ?? '[]'), true);
+        if (! is_array($defs)) {
+            return [];
+        }
+        $out = [];
+        foreach ($defs as $d) {
+            if (! is_array($d) || trim((string) ($d['label'] ?? '')) === '') {
+                continue;
+            }
+            $type = in_array($d['type'] ?? 'text', self::CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $key  = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($d['key'] ?? '')));
+            if ($key === '') {
+                continue;
+            }
+            $out[] = [
+                'key'      => $key,
+                'label'    => (string) $d['label'],
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+
+        return $out;
+    }
+
+    /** GET /client/applicant-source — mode + tracker DB creds (no password) + own column defs. */
+    public function applicantSource()
+    {
+        $src = $this->applicantSourceMap();
+        $db  = $src['db'];
+
+        return $this->respond([
+            'mode'              => $src['mode'],
+            'global_configured' => (new SecondaryDb())->isConfigured(),
+            'db'                => [
+                'host'         => (string) ($db['host'] ?? ''),
+                'port'         => (int) ($db['port'] ?? 3306) ?: 3306,
+                'database'     => (string) ($db['database'] ?? ''),
+                'username'     => (string) ($db['username'] ?? ''),
+                'has_password' => ($db['password'] ?? '') !== '',
+            ],
+            'columns'           => $this->applicantColumnDefs(),
+            'can_manage'        => $this->isAdmin(),
+        ]);
+    }
+
+    /** POST /client/applicant-source — set mode ('shared'|'own') + the tracker DB creds (admin). */
+    public function saveApplicantSource()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can edit this.', 403);
+        }
+        $mode = in_array($this->input('mode'), ['shared', 'own'], true) ? $this->input('mode') : 'shared';
+        $prev = $this->applicantSourceMap()['db'];
+        $in   = (array) ($this->input('db') ?? []);
+        $pass = (string) ($in['password'] ?? '');
+        $db   = [
+            'host'     => trim((string) ($in['host'] ?? '')),
+            'port'     => (int) ($in['port'] ?? 3306) ?: 3306,
+            'database' => trim((string) ($in['database'] ?? '')),
+            'username' => trim((string) ($in['username'] ?? '')),
+            // A blank password field keeps the stored one (so it isn't wiped on edit).
+            'password' => $pass !== '' ? $pass : (string) ($prev['password'] ?? ''),
+        ];
+        $this->setSetting('applicant_source', $mode);
+        $this->setSetting('applicant_db', json_encode($db));
+        $this->logActivity('updated', 'settings', null, 'Set applicant section source: ' . $mode);
+
+        return $this->respond(['message' => 'Saved', 'mode' => $mode]);
+    }
+
+    /** POST /client/applicant-source/test — try connecting to posted tracker DB creds (admin). */
+    public function testApplicantSource()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can test this.', 403);
+        }
+        $in   = (array) ($this->input('db') ?? []);
+        $pass = (string) ($in['password'] ?? '');
+        if ($pass === '') {
+            $pass = (string) ($this->applicantSourceMap()['db']['password'] ?? ''); // reuse saved on blank
+        }
+        $db = new SecondaryDb($this->ownSecondaryConfig([
+            'host' => $in['host'] ?? '', 'port' => $in['port'] ?? 3306,
+            'database' => $in['database'] ?? '', 'username' => $in['username'] ?? '', 'password' => $pass,
+        ]));
+        if (! $db->isConfigured()) {
+            return $this->respond(['ok' => false, 'message' => 'Enter at least a host and database name.']);
+        }
+        try {
+            $db->selectRow('SELECT 1 AS ok');
+            $has = false;
+            try {
+                $db->selectRow('SELECT COUNT(*) AS n FROM tblclients');
+                $has = true;
+            } catch (\Throwable $e) {
+                // connected, but not a matching applicant (Perfex) schema
+            }
+
+            return $this->respond([
+                'ok'      => true,
+                'message' => $has ? 'Connected — applicant tables found.' : 'Connected, but no "tblclients" table — the tracker needs a Perfex-style applicant DB.',
+                'schema'  => $has,
+            ]);
+        } catch (\Throwable $e) {
+            return $this->respond(['ok' => false, 'message' => $e->getMessage()]);
+        }
+    }
+
+    /** POST /client/applicant-columns — save the client's own applicant table columns (admin). */
+    public function saveApplicantColumns()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can edit columns.', 403);
+        }
+        $cols = [];
+        $seen = [];
+        foreach ((array) ($this->input('columns') ?? []) as $d) {
+            if (! is_array($d)) {
+                continue;
+            }
+            $label = trim((string) ($d['label'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $base = preg_replace('/[^a-z0-9_]/', '', strtolower(str_replace([' ', '-'], '_', (string) (($d['key'] ?? '') ?: $label))));
+            $key  = $base !== '' ? $base : 'col';
+            while (isset($seen[$key])) {
+                $key .= '_';
+            }
+            $seen[$key] = true;
+            $type       = in_array($d['type'] ?? 'text', self::CUSTOM_FIELD_TYPES, true) ? $d['type'] : 'text';
+            $cols[]     = [
+                'key'      => $key,
+                'label'    => $label,
+                'type'     => $type,
+                'required' => ! empty($d['required']),
+                'options'  => ($type === 'select' && is_array($d['options'] ?? null))
+                    ? array_values(array_filter(array_map(static fn ($o) => trim((string) $o), $d['options']), static fn ($o) => $o !== ''))
+                    : [],
+            ];
+        }
+        $this->setSetting('applicant_columns', json_encode($cols));
+        $this->logActivity('updated', 'settings', null, 'Updated applicant table columns');
+
+        return $this->respond(['message' => 'Saved', 'columns' => $cols]);
+    }
+
+    /** A short, searchable text blob from a record's values (for LIKE search). */
+    private function applicantSearchBlob(array $data): string
+    {
+        return mb_substr(trim(implode(' ', array_map('strval', array_values($data)))), 0, 2000);
+    }
+
+    /** Pull + type-coerce a record's values from input, keyed by the defined columns. */
+    private function applicantRecordData(array $cols): array
+    {
+        $in   = (array) ($this->input('data') ?? []);
+        $data = [];
+        foreach ($cols as $c) {
+            if (! array_key_exists($c['key'], $in)) {
+                continue;
+            }
+            $v                = $in[$c['key']];
+            $data[$c['key']]  = $c['type'] === 'number'
+                ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                : trim((string) $v);
+        }
+
+        return $data;
+    }
+
+    /** Required-column validation for an applicant record. */
+    private function applicantRecordErrors(array $cols, array $data): array
+    {
+        $e = [];
+        foreach ($cols as $c) {
+            if (! empty($c['required']) && trim((string) ($data[$c['key']] ?? '')) === '') {
+                $e[$c['key']] = $c['label'] . ' is required.';
+            }
+        }
+
+        return $e;
+    }
+
+    /** GET /client/applicant-records — the client's own applicant rows (paginated + searchable). */
+    public function applicantRecords()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can view applicants.', 403);
+        }
+        $cols    = $this->applicantColumnDefs();
+        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
+        $q       = trim((string) ($this->request->getGet('q') ?? ''));
+
+        $b = (new ApplicantModel())->where('client_id', $this->clientId());
+        if ($q !== '') {
+            $b->like('search_blob', $q);
+        }
+        $total = $b->countAllResults(false);
+        $rows  = $b->orderBy('id', 'DESC')->findAll($perPage, ($page - 1) * $perPage);
+
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id'         => (int) $r['id'],
+                'data'       => (object) (json_decode((string) ($r['data'] ?? '{}'), true) ?: []),
+                'created_at' => $r['created_at'] ?? null,
+                'updated_at' => $r['updated_at'] ?? null,
+            ];
+        }
+
+        return $this->respond(['rows' => $out, 'total' => $total, 'page' => $page, 'per_page' => $perPage, 'columns' => $cols]);
+    }
+
+    /** POST /client/applicant-records — add an applicant to the client's own table (admin). */
+    public function createApplicantRecord()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can add applicants.', 403);
+        }
+        $cols = $this->applicantColumnDefs();
+        $data = $this->applicantRecordData($cols);
+        if ($errs = $this->applicantRecordErrors($cols, $data)) {
+            return $this->failValidationErrors($errs);
+        }
+        $id = (new ApplicantModel())->insert([
+            'client_id'   => $this->clientId(),
+            'data'        => json_encode((object) $data),
+            'search_blob' => $this->applicantSearchBlob($data),
+        ]);
+        $this->logActivity('created', 'applicant', (int) $id, 'Added applicant');
+
+        return $this->respondCreated(['message' => 'Added', 'id' => (int) $id]);
+    }
+
+    /** POST /client/applicant-records/{id} — edit one applicant record (admin). */
+    public function updateApplicantRecord(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can edit applicants.', 403);
+        }
+        $model = new ApplicantModel();
+        if (! $model->where('client_id', $this->clientId())->find($id)) {
+            return $this->failNotFound('Applicant not found');
+        }
+        $cols = $this->applicantColumnDefs();
+        $data = $this->applicantRecordData($cols);
+        if ($errs = $this->applicantRecordErrors($cols, $data)) {
+            return $this->failValidationErrors($errs);
+        }
+        $model->update($id, ['data' => json_encode((object) $data), 'search_blob' => $this->applicantSearchBlob($data)]);
+        $this->logActivity('updated', 'applicant', $id, 'Updated applicant');
+
+        return $this->respond(['message' => 'Saved']);
+    }
+
+    /** POST /client/applicant-records/{id}/delete — soft-delete one applicant record (admin). */
+    public function deleteApplicantRecord(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can delete applicants.', 403);
+        }
+        $model = new ApplicantModel();
+        if (! $model->where('client_id', $this->clientId())->find($id)) {
+            return $this->failNotFound('Applicant not found');
+        }
+        $model->delete($id); // soft delete
+        $this->logActivity('deleted', 'applicant', $id, 'Deleted applicant');
+
+        return $this->respond(['message' => 'Deleted']);
+    }
 
     /** The Applicant section's configured label + slug (with defaults applied). */
     private function applicantConfigMap(): array
@@ -3396,11 +3722,20 @@ class ClientController extends ApiController
         $fields = json_decode((string) ($map['convert_fields'] ?? ''), true);
         $fields = is_array($fields) ? array_values($fields) : [];
 
+        // The convert form follows the applicant mode: in 'own' mode it uses the
+        // client's applicant table columns (and creates a record there); in 'shared'
+        // mode it uses the admin-configured fields (and posts to the external API).
+        $mode = $this->applicantSourceMap()['mode'];
+        if ($mode === 'own') {
+            $fields = $this->applicantColumnDefs();
+        }
+
         $out = [
-            'enabled'   => (string) ($map['convert_enabled'] ?? '0') === '1',
-            'label'     => trim((string) ($map['convert_label'] ?? '')) ?: 'Convert to Applicant',
-            'status_id' => (int) ($map['convert_status_id'] ?? 0),
-            'fields'    => $fields,
+            'enabled'        => (string) ($map['convert_enabled'] ?? '0') === '1',
+            'label'          => trim((string) ($map['convert_label'] ?? '')) ?: 'Convert to Applicant',
+            'status_id'      => (int) ($map['convert_status_id'] ?? 0),
+            'applicant_mode' => $mode,
+            'fields'         => $fields,
         ];
         if ($full) {
             $headers = json_decode((string) ($map['convert_api_headers'] ?? ''), true);
@@ -3506,14 +3841,11 @@ class ClientController extends ApiController
         if (! $cfg['enabled']) {
             return $this->fail('Lead conversion is not enabled.', 400);
         }
-        if ($cfg['api_url'] === '') {
-            return $this->fail('No conversion API endpoint is configured.', 400);
-        }
 
         $valuesIn = $this->input('values');
         $values   = is_array($valuesIn) ? $valuesIn : [];
 
-        // Validate the admin-defined required fields.
+        // Validate the required fields (own columns or admin fields, per mode).
         $missing = [];
         foreach ($cfg['fields'] as $f) {
             if (! empty($f['required']) && trim((string) ($values[$f['key']] ?? '')) === '') {
@@ -3522,6 +3854,34 @@ class ClientController extends ApiController
         }
         if ($missing) {
             return $this->failValidationErrors('Please fill: ' . implode(', ', $missing) . '.');
+        }
+
+        // 'own' mode → create a record in the client's own applicant table.
+        if (($cfg['applicant_mode'] ?? 'shared') === 'own') {
+            $cols = $this->applicantColumnDefs();
+            $data = [];
+            foreach ($cols as $c) {
+                $v               = $values[$c['key']] ?? '';
+                $data[$c['key']] = $c['type'] === 'number'
+                    ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                    : trim((string) $v);
+            }
+            (new ApplicantModel())->insert([
+                'client_id'   => $cid,
+                'data'        => json_encode((object) $data),
+                'search_blob' => $this->applicantSearchBlob($data),
+            ]);
+            if ($cfg['status_id'] > 0) {
+                (new LeadModel())->update($id, ['status_id' => $cfg['status_id']]);
+            }
+            $this->logActivity('converted', 'lead', $id, 'Converted lead to applicant (own table)');
+
+            return $this->respond(['ok' => true, 'message' => 'Lead converted — applicant added to your table.']);
+        }
+
+        // 'shared' mode → forward the values to the configured external API.
+        if ($cfg['api_url'] === '') {
+            return $this->fail('No conversion API endpoint is configured.', 400);
         }
 
         // Only forward the configured fields (+ the lead id for reference).

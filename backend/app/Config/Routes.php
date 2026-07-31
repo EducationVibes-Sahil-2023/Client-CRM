@@ -195,6 +195,14 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->get('applicant-tracker-filters', 'ClientController::applicantTrackerFilters');
     $routes->get('applicant-config', 'ClientController::applicantConfig');
     $routes->post('applicant-config', 'ClientController::saveApplicantConfig');
+    $routes->get('applicant-source', 'ClientController::applicantSource');
+    $routes->post('applicant-source', 'ClientController::saveApplicantSource');
+    $routes->post('applicant-source/test', 'ClientController::testApplicantSource');
+    $routes->post('applicant-columns', 'ClientController::saveApplicantColumns');
+    $routes->get('applicant-records', 'ClientController::applicantRecords');
+    $routes->post('applicant-records', 'ClientController::createApplicantRecord');
+    $routes->post('applicant-records/(:num)', 'ClientController::updateApplicantRecord/$1');
+    $routes->post('applicant-records/(:num)/delete', 'ClientController::deleteApplicantRecord/$1');
     // Lead → Applicant conversion (admin-configurable button + form + API).
     $routes->get('convert-config', 'ClientController::convertConfig');
     $routes->post('convert-config', 'ClientController::saveConvertConfig');

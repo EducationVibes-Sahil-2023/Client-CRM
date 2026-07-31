@@ -32,6 +32,7 @@ class TenantSchema
         'lead_references',
         'leads',
         'web_forms',
+        'applicants',
         'fb_pages',
         'fb_forms',
         'sheet_syncs',

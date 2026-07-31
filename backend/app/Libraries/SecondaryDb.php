@@ -30,43 +30,90 @@ use Config\Database;
  */
 class SecondaryDb
 {
-    /** Cached connection for the request (keyed by the single secondary group). */
-    private static ?BaseConnection $conn = null;
+    /** Open connections for the request, keyed by a hash of their config. */
+    private static array $pool = [];
 
-    /** Whether a secondary server has actually been configured in .env. */
+    /** Per-instance connection config (a full CI4 DB config array), or null for the
+     *  global .env `secondary` group. Lets each CLIENT point at its OWN database. */
+    private ?array $cfg;
+
+    /**
+     * @param array<string,mixed>|null $config A partial DB config (hostname, port,
+     *   database, username, password, DBDriver). Null uses the global .env
+     *   `database.secondary.*` group (the shared server).
+     */
+    public function __construct(?array $config = null)
+    {
+        $this->cfg = ($config && ! empty($config['hostname']) && ! empty($config['database']))
+            ? self::normalizeConfig($config)
+            : null;
+    }
+
+    /** Fill a partial connection config with CI4's required keys (SELECT-only use). */
+    public static function normalizeConfig(array $c): array
+    {
+        return array_merge([
+            // DBDebug MUST be true: the applicant-tracker column probe drops bad
+            // columns by catching the query error they raise — with DBDebug off,
+            // MySQLi returns false silently, the probe keeps the bad column, and
+            // the whole tracker query then fails silently (0 rows). Matches the
+            // global `secondary` group. Real read errors still surface (caught by callers).
+            'DSN' => '', 'username' => '', 'password' => '', 'DBDriver' => 'MySQLi',
+            'DBPrefix' => '', 'pConnect' => false, 'DBDebug' => true, 'charset' => 'utf8mb4',
+            'DBCollat' => 'utf8mb4_general_ci', 'swapPre' => '', 'encrypt' => false,
+            'compress' => false, 'strictOn' => false, 'failover' => [], 'port' => 3306,
+            'numberNative' => false,
+        ], array_filter($c, static fn ($v) => $v !== null && $v !== ''));
+    }
+
+    /** The effective config: this instance's own config, else the global secondary group. */
+    private function resolved(): array
+    {
+        if ($this->cfg !== null) {
+            return $this->cfg;
+        }
+        $g = config(Database::class)->secondary ?? [];
+
+        return is_array($g) ? $g : [];
+    }
+
+    /** Whether a secondary server has actually been configured (own or global). */
     public function isConfigured(): bool
     {
-        $cfg = config(Database::class)->secondary ?? [];
+        $cfg = $this->resolved();
 
         return ! empty($cfg['hostname']) && ! empty($cfg['database']);
     }
 
     /**
-     * The shared secondary connection (lazily opened, cached per request). Kept
-     * public for internal reuse, but callers should go through select() so the
+     * The secondary connection (lazily opened, cached per request by config hash).
+     * Kept public for internal reuse, but callers should go through select() so the
      * read-only guard always runs — never issue writes on this handle.
      */
     public function db(): BaseConnection
     {
-        if (self::$conn === null) {
-            if (! $this->isConfigured()) {
-                throw new \RuntimeException('Secondary database is not configured (set database.secondary.* in .env).');
-            }
+        $cfg = $this->resolved();
+        if (empty($cfg['hostname']) || empty($cfg['database'])) {
+            throw new \RuntimeException('Secondary database is not configured.');
+        }
+        $key = md5(($cfg['hostname'] ?? '') . '|' . ($cfg['port'] ?? 3306) . '|' . ($cfg['database'] ?? '') . '|' . ($cfg['username'] ?? ''));
+        if (! isset(self::$pool[$key])) {
             // sharedInstance = false: keep this pool separate from the tenant pool.
-            self::$conn = Database::connect('secondary', false);
+            $conn = Database::connect($cfg, false);
 
             // Configure the read session ONCE: relax ONLY_FULL_GROUP_BY so grouped
             // read queries with non-aggregated columns are allowed. This is a
             // session pragma (no data change) and the ONLY non-SELECT this class
             // ever runs — a fixed literal, never built from input.
             try {
-                self::$conn->query("SET SESSION sql_mode = ''");
+                $conn->query("SET SESSION sql_mode = ''");
             } catch (\Throwable $e) {
                 // Non-fatal: the query still runs, just under the server default.
             }
+            self::$pool[$key] = $conn;
         }
 
-        return self::$conn;
+        return self::$pool[$key];
     }
 
     /**

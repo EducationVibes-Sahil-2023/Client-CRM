@@ -105,7 +105,8 @@ export type ApplicantTrackerFilters = Partial<Record<(typeof APPLICANT_MULTI_KEY
   to?: string;
   last_from?: string;
   last_to?: string;
-  all?: string; // "1" → show every applicant (not just those matching local leads)
+  all?: string;  // "1" → show every applicant (legacy)
+  mine?: string; // "1" → scope to applicants matching this client's leads
 };
 export const getApplicantTracker = (
   params: { page: number; per_page: number; q?: string } & ApplicantTrackerFilters,
@@ -119,7 +120,7 @@ export const getApplicantTracker = (
     if (v && v.length) sp.set(k, v.join(","));
   });
   (["minor", "tf_status", "academic_year", "courier_date", "apostille_received",
-    "visa_payment_date", "fly_date", "from", "to", "last_from", "last_to", "all"] as const)
+    "visa_payment_date", "fly_date", "from", "to", "last_from", "last_to", "all", "mine"] as const)
     .forEach((k) => { if (params[k]) sp.set(k, params[k] as string); });
   return clientGet<ApplicantTrackerResult>(`/applicant-tracker?${sp.toString()}`);
 };
@@ -150,11 +151,13 @@ export const getApplicantTrackerFilters = () =>
   clientGet<ApplicantTrackerFilterOptions>("/applicant-tracker-filters");
 
 // ---- Lead → Applicant conversion (admin-configurable button + form + API) ----
-export interface ConvertField { key: string; label: string; type: string; required: boolean }
+export interface ConvertField { key: string; label: string; type: string; required: boolean; options?: string[] }
 export interface ConvertConfig {
   enabled: boolean;
   label: string;
   status_id: number;
+  /** 'own' = create a record in the client's applicant table (form = its columns); 'shared' = POST to the API. */
+  applicant_mode?: "shared" | "own";
   fields: ConvertField[];
   // Admin-only (present when the caller is the client admin):
   api_url?: string;
@@ -179,6 +182,62 @@ export interface ApplicantConfig {
 export const getApplicantConfig = () => clientGet<ApplicantConfig>("/applicant-config");
 export const saveApplicantConfig = (body: ApplicantConfig) =>
   clientPost<ApplicantConfig>("/applicant-config", body as unknown as Record<string, unknown>);
+
+/**
+ * The Applicant section mode: 'shared' = the read-only Perfex tracker; 'own' = the
+ * client's OWN applicant table, whose columns the client defines (reuses CustomField).
+ */
+export type ApplicantColumn = CustomField;
+/** Per-client secondary DB credentials for the shared tracker (blank = platform default). */
+export interface ApplicantDbConfig {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  /** Whether a password is stored (never returned). Send a new one to change it; blank keeps it. */
+  has_password?: boolean;
+  /** Only set when submitting a new/changed password. */
+  password?: string;
+}
+export interface ApplicantSource {
+  mode: "shared" | "own";
+  /** Whether the platform's global .env secondary DB is configured (fallback). */
+  global_configured?: boolean;
+  db: ApplicantDbConfig;
+  columns: ApplicantColumn[];
+  can_manage?: boolean;
+}
+/** One row in the client's own applicant table (values keyed by column key). */
+export interface ApplicantRecord {
+  id: number;
+  data: Record<string, string>;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+export interface ApplicantRecordsResult {
+  rows: ApplicantRecord[];
+  total: number;
+  page: number;
+  per_page: number;
+  columns: ApplicantColumn[];
+}
+export const getApplicantSource = () => clientGet<ApplicantSource>("/applicant-source");
+export const saveApplicantSource = (body: { mode: "shared" | "own"; db?: ApplicantDbConfig }) =>
+  clientPost<{ message: string; mode: string }>("/applicant-source", body as unknown as Record<string, unknown>);
+export const testApplicantSource = (db: ApplicantDbConfig) =>
+  clientPost<{ ok: boolean; message: string; schema?: boolean }>("/applicant-source/test", { db } as unknown as Record<string, unknown>);
+export const saveApplicantColumns = (columns: ApplicantColumn[]) =>
+  clientPost<{ message: string; columns: ApplicantColumn[] }>("/applicant-columns", { columns } as unknown as Record<string, unknown>);
+export const getApplicantRecords = (params: { page: number; per_page: number; q?: string }) => {
+  const sp = new URLSearchParams({ page: String(params.page), per_page: String(params.per_page) });
+  if (params.q) sp.set("q", params.q);
+  return clientGet<ApplicantRecordsResult>(`/applicant-records?${sp.toString()}`);
+};
+export const createApplicantRecord = (data: Record<string, string>) =>
+  clientPost<{ message: string; id: number }>("/applicant-records", { data } as unknown as Record<string, unknown>);
+export const updateApplicantRecord = (id: number, data: Record<string, string>) =>
+  clientPost<{ message: string }>(`/applicant-records/${id}`, { data } as unknown as Record<string, unknown>);
+export const deleteApplicantRecord = (id: number) => clientPost(`/applicant-records/${id}/delete`);
 
 export const getBackupSchedule = () =>
   clientGet<{ schedule: BackupSchedule; frequencies: string[] }>("/backup-schedule");
