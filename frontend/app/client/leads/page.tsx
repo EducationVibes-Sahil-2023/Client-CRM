@@ -5,14 +5,15 @@ import {
   getLeads, createLead, updateLead, deleteLead, importLeads, bulkUpdateLeads, getLeadImportSetup,
   getLeadsSetup, getStaff, getMe, getLeadAnalytics, getCallSyncStatus, getLeadCallSummary,
   getLeadDetail, createLeadReminder, updateLeadReminder, deleteLeadReminder, createLeadNote, updateLeadNote, deleteLeadNote,
-  getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS,
+  getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS, LEAD_FIELD_HINTS, LEAD_FORM_FIELDS,
+  getConvertConfig, saveConvertConfig, convertLead,
   type Lead, type LeadStatus, type LeadSource, type LeadType, type LeadReference, type Staff, type LeadImportResult, type LeadDetail,
   type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
-  type LeadImportColumn, type LeadsQuery, type CallSyncStatus, type LeadCallSummary,
+  type LeadImportColumn, type LeadsQuery, type CallSyncStatus, type LeadCallSummary, type ConvertConfig, type ConvertField,
 } from "../../lib/client";
 import { requestNotifyPermission } from "../../lib/notify";
 import { useClient } from "../ClientContext";
-import { CustomFieldInputs, customFieldErrors } from "../CustomFields";
+import { CustomFieldCell, customFieldErrors } from "../CustomFields";
 import RichTextEditor from "../../admin/RichTextEditor";
 
 /** Plain text from rich-text HTML — for "is it empty" checks before saving. */
@@ -26,10 +27,9 @@ import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { Card, Drawer, Modal, PageHeader, Spinner, fmtDate, timeAgo } from "../../admin/ui";
 import { DataTable, IconButton, type Column, type SortState } from "../../admin/DataTable";
-import { DonutSelect } from "../../admin/Charts";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, rangeActive, resolveDateRange, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
-import { useHiddenPrefs, VisibilityMenu } from "../../admin/tableConfig";
+import { useHiddenPrefs, VisibilityMenu, useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
 import { FieldRow, inputCls, isEmail } from "../../admin/clients/formKit";
 import { INDIA_STATES, INDIA_CITIES } from "../../lib/india";
 import { CallActivityItem } from "../../admin/CallActivity";
@@ -41,6 +41,7 @@ interface LeadFilters {
   sub: string[];
   source: string[];
   assigned: string[];   // staff ids, plus the literal "unassigned"
+  reporting: string;    // Reporting Person: a single staff id whose OWN calls drive the person call columns (does not filter rows)
   leadType: string[];
   followStatus: string[]; // follow-up flag: "upcoming" | "overdue" | "done"
   reference: string[];    // reference names
@@ -48,10 +49,23 @@ interface LeadFilters {
   assignedDate: DateRange;
   follow: DateRange;
   updated: DateRange;     // "Updated date" = filter by call date (call_start)
+  connected: DateRange;   // "Connected date" = leads with a connected call in range
+  noConnectAfter: string; // leads NOT connected after this date (stale)
+  noUpdateAfter: string;  // leads NOT updated after this date (stale)
+  // Ghosted: no connected call within the last H hours + M mins (gt = ghosted, lt = active).
+  ghostOn: boolean; ghostHours: string; ghostMins: string; ghostOp: "gt" | "lt";
+  // Assigned-user call-count range (min–max calls the lead's rep made to it).
+  callsOn: boolean; callsMin: string; callsMax: string;
+  // Call talk-time duration: a single H:M bound compared with ≤ (lte) or ≥ (gte).
+  durOn: boolean; durOp: "lte" | "gte"; durHours: string; durMins: string;
 }
 const BLANK_FILTERS: LeadFilters = {
-  status: [], sub: [], source: [], assigned: [], leadType: [], followStatus: [], reference: [],
-  created: EMPTY_RANGE, assignedDate: EMPTY_RANGE, follow: EMPTY_RANGE, updated: EMPTY_RANGE,
+  status: [], sub: [], source: [], assigned: [], reporting: "", leadType: [], followStatus: [], reference: [],
+  created: EMPTY_RANGE, assignedDate: EMPTY_RANGE, follow: EMPTY_RANGE, updated: EMPTY_RANGE, connected: EMPTY_RANGE,
+  noConnectAfter: "", noUpdateAfter: "",
+  ghostOn: false, ghostHours: "5", ghostMins: "", ghostOp: "gt",
+  callsOn: false, callsMin: "", callsMax: "",
+  durOn: false, durOp: "lte", durHours: "", durMins: "",
 };
 // Initial filters on first load: no date filter is pre-applied — the page opens
 // on all leads (Any time). The user can pick an Updated-date (call date) range.
@@ -62,6 +76,7 @@ const FILTER_DEFS: { id: string; label: string }[] = [
   { id: "status", label: "Status" },
   { id: "sub", label: "Sub status" },
   { id: "source", label: "Source" },
+  { id: "reporting", label: "Reporting Person" },
   { id: "assigned", label: "Assigned to" },
   { id: "leadType", label: "Lead type" },
   { id: "followStatus", label: "Follow-up status" },
@@ -70,6 +85,29 @@ const FILTER_DEFS: { id: string; label: string }[] = [
   { id: "assignedDate", label: "Assigned date" },
   { id: "follow", label: "Follow-up date" },
   { id: "updated", label: "Updated date" },
+  { id: "connected", label: "Connected date" },
+  { id: "noConnectAfter", label: "Last connect date" },
+  { id: "noUpdateAfter", label: "Last update date" },
+  { id: "ghost", label: "Ghosted leads" },
+  { id: "calls", label: "Update Count Range" },
+  { id: "duration", label: "Duration Filter" },
+];
+
+// Top-level filter blocks the admin can reorder/hide client-wide (the whole
+// "Date filters" group counts as one unit, "dates"). Order here is the default.
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "status", label: "Status" },
+  { id: "sub", label: "Sub status" },
+  { id: "source", label: "Source" },
+  { id: "reporting", label: "Reporting Person" },
+  { id: "assigned", label: "Assigned to" },
+  { id: "leadType", label: "Lead type" },
+  { id: "followStatus", label: "Follow-up status" },
+  { id: "reference", label: "Reference name" },
+  { id: "dates", label: "Date filters" },
+  { id: "ghost", label: "Ghosted leads" },
+  { id: "calls", label: "Update Count Range" },
+  { id: "duration", label: "Duration Filter" },
 ];
 
 // Field key → label, for messages on admin-configured mandatory fields.
@@ -95,13 +133,17 @@ const SUMMARY_DIMS: { key: SummaryDimKey; label: string; filterKey: "status" | "
 ];
 
 const filtersActive = (f: LeadFilters): boolean =>
-  !!(f.status.length || f.sub.length || f.source.length || f.assigned.length || f.leadType.length ||
-    f.followStatus.length || f.reference.length || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow) || rangeActive(f.updated));
+  !!(f.status.length || f.sub.length || f.source.length || f.assigned.length || f.reporting || f.leadType.length ||
+    f.followStatus.length || f.reference.length || rangeActive(f.created) || rangeActive(f.assignedDate) || rangeActive(f.follow) || rangeActive(f.updated) || rangeActive(f.connected) ||
+    f.noConnectAfter || f.noUpdateAfter || f.ghostOn || (f.callsOn && (!!f.callsMin || !!f.callsMax)) ||
+    (f.durOn && (!!f.durHours || !!f.durMins)));
 
 // How many filter groups are active — drives the count badge on the Filters button.
 const countActiveFilters = (f: LeadFilters): number =>
-  [f.status.length, f.sub.length, f.source.length, f.assigned.length, f.leadType.length,
-    f.followStatus.length, f.reference.length, rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow), rangeActive(f.updated)]
+  [f.status.length, f.sub.length, f.source.length, f.assigned.length, !!f.reporting, f.leadType.length,
+    f.followStatus.length, f.reference.length, rangeActive(f.created), rangeActive(f.assignedDate), rangeActive(f.follow), rangeActive(f.updated), rangeActive(f.connected),
+    !!f.noConnectAfter, !!f.noUpdateAfter, f.ghostOn, f.callsOn && (!!f.callsMin || !!f.callsMax),
+    f.durOn && (!!f.durHours || !!f.durMins)]
     .filter(Boolean).length;
 
 interface Draft {
@@ -111,6 +153,7 @@ interface Draft {
   reference_name: string; email: string;
   assigned_to: string; assigned_date: string;
   city: string; state: string; follow_date: string; created_date: string;
+  description: string; // rich-text HTML
   // Latest reminder datetime (max remind_at) — the follow-up date shown read-only.
   last_reminder_at: string;
   custom: Record<string, string>;
@@ -118,7 +161,7 @@ interface Draft {
 const blank: Draft = {
   name: "", phone: "", alt_phone: "", status_id: "", sub_status_id: "", source_id: "", lead_type_id: "",
   reference_name: "", email: "", assigned_to: "", assigned_date: "",
-  city: "", state: "", follow_date: "", created_date: "", last_reminder_at: "", custom: {},
+  city: "", state: "", follow_date: "", created_date: "", description: "", last_reminder_at: "", custom: {},
 };
 
 const DOT: Record<string, string> = {
@@ -157,6 +200,7 @@ function toDraft(l: Lead): Draft {
     state: l.state ?? "",
     follow_date: l.follow_date ? l.follow_date.slice(0, 10) : "",
     created_date: l.created_date ? l.created_date.slice(0, 10) : "",
+    description: l.description ?? "",
     last_reminder_at: l.last_reminder_at ?? "",
     custom: { ...(l.custom_fields ?? {}) },
   };
@@ -312,6 +356,126 @@ function MiniBars({ items, valueFmt }: { items: { label: string; value: number; 
 }
 
 /**
+ * Stat-card grid for one lead dimension (Status / Sub-status / Type / Source):
+ * a tile per value showing its count with the value's own colour, plus an
+ * optional "Total Leads" tile. Clicking a tile filters the table by that value
+ * (toggles off when it's the sole active filter). `activeIds` are the ids
+ * currently filtering the table for this dimension, so the active tile is ringed.
+ */
+function SummaryGrid({ title, items, total, activeIds, onPick }: {
+  title: string;
+  items: LeadCount[];
+  total?: number;
+  activeIds: string[];
+  onPick: (id: number) => void;
+}) {
+  return (
+    <div className="mb-5 last:mb-0">
+      <h3 className="mb-2.5 text-lg font-bold text-pink-600">{title}</h3>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+        {items.map((it, i) => {
+          // A bucket without an id (e.g. "Unknown Status") can't drive a filter,
+          // so it renders as a plain, non-clickable tile.
+          const clickable = it.id != null;
+          const active = clickable && activeIds.length === 1 && activeIds[0] === String(it.id);
+          const body = (
+            <>
+              <div className="text-2xl font-bold text-slate-800">{it.value.toLocaleString("en-IN")}</div>
+              <div className="mt-1 truncate text-xs font-medium" style={{ color: toHex(it.color) }} title={it.label}>{it.label}</div>
+            </>
+          );
+          const cls = `rounded-xl border bg-white px-3 py-4 text-center shadow-sm ${active ? "border-indigo-400 ring-2 ring-indigo-200" : "border-slate-200"}`;
+          return clickable ? (
+            <button key={it.id} type="button" onClick={() => onPick(it.id as number)} title={`Filter by ${it.label}`} className={`${cls} transition hover:shadow-md`}>
+              {body}
+            </button>
+          ) : (
+            <div key={`x-${i}`} className={cls}>{body}</div>
+          );
+        })}
+        {total != null && (
+          <div className="rounded-xl border border-slate-200 bg-white px-3 py-4 text-center shadow-sm">
+            <div className="text-2xl font-bold text-slate-800">{total.toLocaleString("en-IN")}</div>
+            <div className="mt-1 text-xs font-medium text-sky-500">Total Leads</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Dual-handle range slider. Each handle is its own small draggable element (not
+ * a full-width overlaid <input>), so neither can ever block the other — both the
+ * min and max thumbs are always independently draggable, and clicking the track
+ * jumps the nearest handle. Values are clamped so min never crosses max. Arrow
+ * keys nudge a focused handle.
+ */
+function DualRange({ min, max, step = 1, valueMin, valueMax, onChange }: {
+  min: number; max: number; step?: number;
+  valueMin: number; valueMax: number;
+  onChange: (lo: number, hi: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const lo = Math.min(valueMin, valueMax);
+  const hi = Math.max(valueMin, valueMax);
+  const span = max - min || 1;
+  const clamp = (v: number) => Math.min(max, Math.max(min, v));
+  const pct = (v: number) => ((clamp(v) - min) / span) * 100;
+  // Snap a clientX to a stepped value along the track.
+  const valAt = (clientX: number) => {
+    const el = trackRef.current;
+    if (!el) return min;
+    const r = el.getBoundingClientRect();
+    const ratio = r.width ? Math.min(1, Math.max(0, (clientX - r.left) / r.width)) : 0;
+    return clamp(Math.round((min + ratio * span) / step) * step);
+  };
+  const apply = (which: "lo" | "hi", v: number) =>
+    which === "lo" ? onChange(Math.min(v, hi), hi) : onChange(lo, Math.max(v, lo));
+
+  const startDrag = (which: "lo" | "hi") => (e: React.PointerEvent) => {
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    const move = (ev: PointerEvent) => apply(which, valAt(ev.clientX));
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  // Click on the track → move whichever handle is nearer.
+  const onTrackDown = (e: React.PointerEvent) => {
+    const v = valAt(e.clientX);
+    apply(Math.abs(v - lo) <= Math.abs(v - hi) ? "lo" : "hi", v);
+  };
+  const onKey = (which: "lo" | "hi", v: number) => (e: React.KeyboardEvent) => {
+    const d = e.key === "ArrowLeft" || e.key === "ArrowDown" ? -step
+      : e.key === "ArrowRight" || e.key === "ArrowUp" ? step : 0;
+    if (!d) return;
+    e.preventDefault();
+    apply(which, clamp(v + d));
+  };
+  const thumb = "absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 cursor-pointer touch-none rounded-full border-2 border-emerald-600 bg-white shadow focus:outline-none focus:ring-2 focus:ring-emerald-500/40";
+
+  return (
+    <div ref={trackRef} className="relative h-5 w-full select-none">
+      <div className="absolute top-1/2 h-1 w-full -translate-y-1/2 cursor-pointer rounded-full bg-slate-200" onPointerDown={onTrackDown} />
+      <div className="pointer-events-none absolute top-1/2 h-1 -translate-y-1/2 rounded-full bg-emerald-500" style={{ left: `${pct(lo)}%`, right: `${100 - pct(hi)}%` }} />
+      <div role="slider" tabIndex={0} aria-label="Minimum" aria-valuemin={min} aria-valuemax={max} aria-valuenow={lo}
+        className={thumb} style={{ left: `${pct(lo)}%`, zIndex: lo >= (min + max) / 2 ? 6 : 5 }}
+        onPointerDown={startDrag("lo")} onKeyDown={onKey("lo", lo)} />
+      <div role="slider" tabIndex={0} aria-label="Maximum" aria-valuemin={min} aria-valuemax={max} aria-valuenow={hi}
+        className={thumb} style={{ left: `${pct(hi)}%`, zIndex: 5 }}
+        onPointerDown={startDrag("hi")} onKeyDown={onKey("hi", hi)} />
+    </div>
+  );
+}
+// Upper bound of the assigned-user call-count ("Update Count Range") slider; the
+// max handle here means "no upper limit" (nothing above is filtered out).
+const CALLS_SLIDER_MAX = 30;
+
+/**
  * Render a date with its time stacked underneath (date<br>time). The time line
  * only shows when the value actually carries one — DATE-only fields (stored at
  * midnight) render just the date. Returns null for empty so the cell stays blank.
@@ -394,6 +558,7 @@ export default function ClientLeads() {
   const [leadTab, setLeadTab] = useState<"leads" | "transfers" | "visitors">("leads");
   const [transferLead, setTransferLead] = useState<{ id: number; name: string } | null>(null);
   const [transferMode, setTransferMode] = useState<"direct" | "approval">("approval");
+  const [transferPending, setTransferPending] = useState(0); // pending count → Transfers tab badge
   // Per-lead "Log visitor" — opens the shared VisitorModal pre-filled from the lead.
   const [visitorDraft, setVisitorDraft] = useState<VDraft | null>(null);
   const [visitorTypes, setVisitorTypes] = useState<VisitorType[]>([]);
@@ -411,13 +576,16 @@ export default function ClientLeads() {
   // Lead-form fields the admin has marked mandatory (keys match Draft fields).
   const [requiredFields, setRequiredFields] = useState<Set<string>>(new Set());
   const [leadCustomFields, setLeadCustomFields] = useState<CustomField[]>([]);
+  // Admin-customized field hints/taglines (per lead type; overrides the defaults).
+  const [leadHints, setLeadHints] = useState<Record<string, string>>({});
+  // Admin-defined field display order (keys); empty = the form's natural order.
+  const [leadOrder, setLeadOrder] = useState<string[]>([]);
 
   // Lead-volume summary (counts by dimension) shown between filters and table.
   // Lazy: the analytics query only runs while the summary is open, so the table
   // isn't slowed by an extra fetch on every load / filter change.
   const [analytics, setAnalytics] = useState<LeadAnalytics | null>(null);
   const [callSummary, setCallSummary] = useState<LeadCallSummary | null>(null);
-  const [summaryDim, setSummaryDim] = useState<SummaryDimKey>("status");
   // The Lead and Call summaries toggle independently, so both can show at once.
   // Both reflect the main leads filter (the FilterRail); no separate summary filter.
   const [showLead, setShowLead] = useState(false);
@@ -449,6 +617,16 @@ export default function ClientLeads() {
   // Bumped after adding a note/reminder to remount (and clear) the rich editors.
   const [composerKey, setComposerKey] = useState(0);
 
+  // Lead → Applicant conversion (admin-configurable button + form + external API).
+  const [convertCfg, setConvertCfg] = useState<ConvertConfig | null>(null);
+  const [convertTarget, setConvertTarget] = useState<Lead | null>(null);      // lead being converted
+  const [convertValues, setConvertValues] = useState<Record<string, string>>({});
+  const [converting, setConverting] = useState(false);
+  const [convSetupOpen, setConvSetupOpen] = useState(false);                   // admin config modal
+  const [convDraft, setConvDraft] = useState<ConvertConfig | null>(null);
+  const [convSaving, setConvSaving] = useState(false);
+  useEffect(() => { getConvertConfig().then(setConvertCfg).catch(() => {}); }, []);
+
   // Search applies instantly; every other filter is staged in `filters` and
   // only takes effect (→ `appliedFilters`) when the user clicks Apply.
   // Seed from a global-search deep link (?q=...) when present.
@@ -464,10 +642,28 @@ export default function ClientLeads() {
   const [tableSort, setTableSort] = useState<SortState>(null);
   const [perPage, setPerPage] = useState(defaultPageSize);
   const filterPrefs = useHiddenPrefs("leads_filters");
+  // Client-wide admin filter layout (order + hide + panel placement). Only the
+  // admin can change it; everyone else reads it. Layered on top of the per-user
+  // show/hide (filterPrefs) above.
+  const filterLayout = useFilterLayout("leads_filters", isAdmin);
+  // Map each top-level filter id → its position in the admin's order, applied as
+  // CSS flex `order` so blocks reorder without moving the JSX.
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   // One updater for any single filter field.
   function setFilter<K extends keyof LeadFilters>(key: K, value: LeadFilters[K]) {
     setFilters((f) => ({ ...f, [key]: value }));
   }
+
+  // A single "Date filters" checkbox collapses/expands the whole group of date
+  // filters. It opens automatically if any date filter already holds a value.
+  const anyDateActive = rangeActive(filters.created) || rangeActive(filters.assignedDate) || rangeActive(filters.follow) || rangeActive(filters.updated) || rangeActive(filters.connected) || !!filters.noConnectAfter || !!filters.noUpdateAfter;
+  const [datesOpen, setDatesOpen] = useState(false);
+  const datesShown = datesOpen || anyDateActive;
 
   // Bulk selection (lead ids) for batch actions like delete.
   const [selectedIds, setSelectedIds] = useState<Set<string | number>>(new Set());
@@ -476,14 +672,17 @@ export default function ClientLeads() {
   // Bulk-edit modal: per-field "change" toggles + values + assignment mode.
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
-  const [bChg, setBChg] = useState({ status: false, sub: false, source: false, type: false, created: false, assign: false });
+  const [bChg, setBChg] = useState({ status: false, sub: false, source: false, type: false, reference: false, created: false, assign: false });
   const [bStatus, setBStatus] = useState("");
   const [bSub, setBSub] = useState("");
   const [bSource, setBSource] = useState("");
   const [bType, setBType] = useState("");
-  const [bCreated, setBCreated] = useState("");
+  const [bReference, setBReference] = useState("");
+  const [bCreatedMode, setBCreatedMode] = useState<"new" | "keep">("new"); // new = stamp today
   const [bMode, setBMode] = useState<"single" | "robin">("single");
   const [bAssignees, setBAssignees] = useState<string[]>([]);
+  const [bAssignedAt, setBAssignedAt] = useState(""); // assignment date+time (optional)
+  const [bMassAssign, setBMassAssign] = useState(false); // wipe related data → fresh lead
   const [bNotify, setBNotify] = useState(true);
   const toggleChg = (k: keyof typeof bChg) => setBChg((c) => ({ ...c, [k]: !c[k] }));
 
@@ -519,6 +718,21 @@ export default function ClientLeads() {
     const assignedD = resolveDateRange(appliedFilters.assignedDate);
     const follow = resolveDateRange(appliedFilters.follow);
     const updated = resolveDateRange(appliedFilters.updated);
+    const connected = resolveDateRange(appliedFilters.connected);
+    // Ghosted window: the Duration Filter's two inputs (hours + mins) → total
+    // minutes for the backend. When BOTH are blank, fall back to the shown
+    // placeholder default of 5h; once either is typed, a blank counts as 0.
+    const gh = appliedFilters.ghostHours.trim();
+    const gm = appliedFilters.ghostMins.trim();
+    const ghostBlank = gh === "" && gm === "";
+    const ghostMins = ghostBlank ? 300 : Math.max(0, Math.round((Number(gh) || 0) * 60 + (Number(gm) || 0)));
+    // Call talk-time range: collapse each H:M bound to seconds. A bound is only
+    // sent when at least one of its H/M fields is filled.
+    const hmToSecs = (h: string, m: string): string | undefined =>
+      (h.trim() === "" && m.trim() === "") ? undefined : String(Math.max(0, Math.round(((Number(h) || 0) * 60 + (Number(m) || 0)) * 60)));
+    const durSecs = appliedFilters.durOn ? hmToSecs(appliedFilters.durHours, appliedFilters.durMins) : undefined;
+    const talkMin = appliedFilters.durOp === "gte" ? durSecs : undefined; // ≥ → lower bound
+    const talkMax = appliedFilters.durOp === "lte" ? durSecs : undefined; // ≤ → upper bound
     return {
       q: search.trim() || undefined,
       status: appliedFilters.status,
@@ -527,6 +741,7 @@ export default function ClientLeads() {
       lead_type: appliedFilters.leadType,
       reference: appliedFilters.reference,
       assigned: appliedFilters.assigned,
+      report_person: appliedFilters.reporting || undefined,
       follow_status: appliedFilters.followStatus,
       created_from: created.from,
       created_to: created.to,
@@ -536,6 +751,16 @@ export default function ClientLeads() {
       follow_to: follow.to,
       updated_from: updated.from,
       updated_to: updated.to,
+      connected_from: connected.from,
+      connected_to: connected.to,
+      no_connect_after: appliedFilters.noConnectAfter || undefined,
+      no_update_after: appliedFilters.noUpdateAfter || undefined,
+      ghost_minutes: appliedFilters.ghostOn && ghostMins > 0 ? String(ghostMins) : undefined,
+      ghost_op: appliedFilters.ghostOn ? appliedFilters.ghostOp : undefined,
+      acalls_min: appliedFilters.callsOn ? appliedFilters.callsMin || undefined : undefined,
+      acalls_max: appliedFilters.callsOn ? appliedFilters.callsMax || undefined : undefined,
+      talk_min: talkMin,
+      talk_max: talkMax,
     };
   }, [search, appliedFilters]);
 
@@ -600,6 +825,22 @@ export default function ClientLeads() {
   useEffect(() => { getMe().then((m) => setIsAdmin(!!m.is_admin)).catch(() => {}); }, []);
   // Admin-defined custom fields for the lead form (Form Setup).
   useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
+  // The lead form is customizable PER LEAD TYPE: whenever the form is open and its
+  // lead type changes, load that type's effective required + custom fields (the
+  // type's override, or the base "lead" config when it has none).
+  const formOpen = !!draft;
+  const formType = draft?.lead_type_id ?? "";
+  useEffect(() => {
+    if (!formOpen) return;
+    getFormSetup("lead", { type: Number(formType) || undefined, effective: true })
+      .then((d) => { setRequiredFields(new Set(d.required_fields)); setLeadCustomFields(d.custom_fields); setLeadHints(d.hints ?? {}); setLeadOrder(d.order ?? []); })
+      .catch(() => {});
+  }, [formOpen, formType]);
+  // A field's hint: the admin override, else a contextual dynamic hint, else the
+  // built-in default. Empty string → no hint shown.
+  const LEAD_HINT_DEFAULTS = useMemo(() => Object.fromEntries(LEAD_FIELD_HINTS.map((f) => [f.key, f.default])), []);
+  const hintOf = (key: string, dynamic?: string): string | undefined =>
+    (leadHints[key]?.trim()) || dynamic || LEAD_HINT_DEFAULTS[key] || undefined;
   // Deep-link to a sub-tab (e.g. notifications link to ?tab=transfers).
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -607,7 +848,7 @@ export default function ClientLeads() {
     if (t === "transfers" || t === "visitors") setLeadTab(t);
   }, []);
   // Know the transfer mode so the request modal shows the right wording.
-  useEffect(() => { if (canTransfer) getLeadTransfers().then((d) => setTransferMode(d.mode)).catch(() => {}); }, [canTransfer]);
+  useEffect(() => { if (canTransfer) getLeadTransfers().then((d) => { setTransferMode(d.mode); setTransferPending((d.transfers ?? []).filter((t) => t.status === "pending").length); }).catch(() => {}); }, [canTransfer]);
   // Visitor types/statuses for the per-lead "Log visitor" modal.
   useEffect(() => { if (canVisitors) getVisitorSetup().then((d) => { setVisitorTypes(d.types ?? []); setVisitorStatuses(d.statuses ?? []); }).catch(() => {}); }, [canVisitors]);
 
@@ -701,6 +942,26 @@ export default function ClientLeads() {
     () => [{ value: "unassigned", label: "Unassigned" }, ...staff.filter((s) => !s.reference_id).map((s) => ({ value: String(s.id), label: s.name }))],
     [staff],
   );
+  // When exactly one assignee is picked, their team leader (reports_to) is
+  // offered as a suggestion — surfaced at the top of the Reporting Person
+  // dropdown but NOT auto-selected (the user chooses whether to use it).
+  const suggestedLeader = useMemo(() => {
+    if (filters.assigned.length !== 1 || filters.assigned[0] === "unassigned") return null;
+    const a = staff.find((s) => String(s.id) === filters.assigned[0]);
+    const leader = a?.reports_to ? staff.find((s) => s.id === a.reports_to && !s.reference_id) : null;
+    return leader ? { id: leader.id, name: leader.name } : null;
+  }, [filters.assigned, staff]);
+
+  // Reporting Person: pick any real staff member — the Call Count & Duration
+  // columns then reflect that person's own calls on each lead. A leading blank
+  // clears the selection (columns fall back to the lead's assigned rep). The
+  // suggested team leader is pinned right under the blank for quick picking.
+  const reportingOptions = useMemo<SelectOption[]>(() => {
+    const base = staff.filter((s) => !s.reference_id && (!suggestedLeader || s.id !== suggestedLeader.id)).map((s) => ({ value: String(s.id), label: s.name }));
+    const head: SelectOption[] = [{ value: "", label: "— Assigned rep (default) —" }];
+    if (suggestedLeader) head.push({ value: String(suggestedLeader.id), label: `${suggestedLeader.name} · team leader` });
+    return [...head, ...base];
+  }, [staff, suggestedLeader]);
 
   // Options for the searchable selects in the Add/Edit lead form. These differ
   // from the filter options: each carries a blank "none" row and the form's
@@ -807,6 +1068,7 @@ export default function ClientLeads() {
     setSearch("");
     setFilters(BLANK_FILTERS);
     setAppliedFilters(BLANK_FILTERS);
+    setDatesOpen(false); // collapse the date filters
     setPage(1);
     setSelectedIds(new Set());
   }
@@ -816,27 +1078,13 @@ export default function ClientLeads() {
     setSelectedIds(new Set());
   }
 
-  // ---- lead summary strip ----
-  const activeDim = SUMMARY_DIMS.find((d) => d.key === summaryDim) ?? SUMMARY_DIMS[0];
-  const summaryBars = analytics ? activeDim.pick(analytics) : [];
-  // Donut data: resolve preset colour names to hex for the SVG slices.
-  const summaryDonut = summaryBars.map((b) => ({ id: b.id, label: b.label, value: b.value, color: toHex(b.color) }));
-  // The id currently filtering the table for this dimension (single-select), if any.
-  const summaryActiveId = appliedFilters[activeDim.filterKey].length === 1 ? appliedFilters[activeDim.filterKey][0] : null;
-
-  // Click a slice/legend → filter the table to that value (toggle off if active).
-  function pickSummaryId(id: number) {
-    const fk = activeDim.filterKey;
-    const next = summaryActiveId === String(id) ? [] : [String(id)];
-    setFilters((f) => ({ ...f, [fk]: next }));
-    setAppliedFilters((f) => ({ ...f, [fk]: next }));
-    setPage(1);
-    setSelectedIds(new Set());
-  }
-  function clearSummary() {
-    const fk = activeDim.filterKey;
-    setFilters((f) => ({ ...f, [fk]: [] }));
-    setAppliedFilters((f) => ({ ...f, [fk]: [] }));
+  // ---- lead summary ----
+  // Card-grid click: filter the table by one value of the given dimension
+  // (toggles off when it's already the sole active filter for that dimension).
+  function pickDimId(fk: "status" | "sub" | "leadType" | "source", id: number) {
+    const next = (cur: string[]) => (cur.length === 1 && cur[0] === String(id) ? [] : [String(id)]);
+    setFilters((f) => ({ ...f, [fk]: next(f[fk]) }));
+    setAppliedFilters((f) => ({ ...f, [fk]: next(f[fk]) }));
     setPage(1);
     setSelectedIds(new Set());
   }
@@ -860,6 +1108,55 @@ export default function ClientLeads() {
     loadDetail(l.id);
   }
   function closeView() { setViewing(null); setDetail(null); }
+
+  // ---- Lead → Applicant conversion ----
+  function openConvert(l: Lead) {
+    // Pre-fill any convert field whose key matches a lead field.
+    const seed: Record<string, string> = {};
+    for (const f of convertCfg?.fields ?? []) {
+      const v = (l as unknown as Record<string, unknown>)[f.key];
+      if (typeof v === "string" || typeof v === "number") seed[f.key] = String(v);
+    }
+    setConvertValues(seed);
+    setConvertTarget(l);
+  }
+  async function submitConvert() {
+    if (!convertTarget || !convertCfg) return;
+    const missing = convertCfg.fields.filter((f) => f.required && !(convertValues[f.key] ?? "").trim());
+    if (missing.length) { toast.error(`Please fill: ${missing.map((f) => f.label).join(", ")}`); return; }
+    setConverting(true);
+    try {
+      await convertLead(convertTarget.id, convertValues);
+      toast.success("Lead converted to applicant.");
+      setConvertTarget(null);
+      closeView();
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not convert the lead.");
+    } finally {
+      setConverting(false);
+    }
+  }
+  const emptyConvert: ConvertConfig = { enabled: false, label: "Convert to Applicant", status_id: 0, fields: [], api_url: "", api_method: "POST", api_type: "json", api_headers: {} };
+  function openConvSetup() {
+    setConvDraft(convertCfg ? { ...emptyConvert, ...convertCfg, fields: [...(convertCfg.fields ?? [])] } : emptyConvert);
+    setConvSetupOpen(true);
+  }
+  async function saveConvSetup() {
+    if (!convDraft) return;
+    if (convDraft.enabled && !(convDraft.api_url ?? "").trim()) { toast.error("Enter the API endpoint URL."); return; }
+    setConvSaving(true);
+    try {
+      const saved = await saveConvertConfig(convDraft);
+      setConvertCfg(saved);
+      setConvSetupOpen(false);
+      toast.success("Conversion settings saved.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not save settings.");
+    } finally {
+      setConvSaving(false);
+    }
+  }
 
   async function addReminder() {
     if (!viewing) return;
@@ -1087,16 +1384,16 @@ export default function ClientLeads() {
   }
 
   function openBulk() {
-    setBChg({ status: false, sub: false, source: false, type: false, created: false, assign: false });
-    setBStatus(""); setBSub(""); setBSource(""); setBType(""); setBCreated("");
-    setBMode("single"); setBAssignees([]); setBNotify(true);
+    setBChg({ status: false, sub: false, source: false, type: false, reference: false, created: false, assign: false });
+    setBStatus(""); setBSub(""); setBSource(""); setBType(""); setBReference(""); setBCreatedMode("new");
+    setBMode("single"); setBAssignees([]); setBAssignedAt(""); setBMassAssign(false); setBNotify(true);
     setBulkOpen(true);
   }
 
   async function applyBulk() {
     const ids = selectedLeads.map((l) => l.id);
     if (!ids.length) return;
-    if (!Object.values(bChg).some(Boolean)) { toast.warning("Tick at least one field to change."); return; }
+    if (!Object.values(bChg).some(Boolean) && !bMassAssign) { toast.warning("Tick at least one field to change."); return; }
     if (bChg.status && !bStatus) { toast.warning("Pick a status to apply."); return; }
     if (bChg.assign && bMode === "robin" && bAssignees.length < 2) { toast.warning("Pick 2+ members for round-robin."); return; }
     setBulkSaving(true);
@@ -1107,8 +1404,11 @@ export default function ClientLeads() {
         change_sub_status: bChg.sub, sub_status_id: bSub,
         change_source: bChg.source, source_id: bSource,
         change_type: bChg.type, lead_type_id: bType,
-        change_created: bChg.created, created_date: bCreated,
+        change_reference: bChg.reference, reference_id: references.find((r) => r.name === bReference)?.id ?? 0, reference_name: bReference,
+        change_created: bChg.created, created_mode: bCreatedMode,
         change_assignee: bChg.assign, assign_mode: bMode, assignees: bMode === "single" ? (bAssignees[0] ? [bAssignees[0]] : []) : bAssignees,
+        assigned_at: bAssignedAt || undefined,
+        mass_assign: bMassAssign,
         notify: bNotify,
       };
       const res = await bulkUpdateLeads(body);
@@ -1311,9 +1611,14 @@ export default function ClientLeads() {
     { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) ?? dash },
     // Latest connected (answered) call.
     { key: "last_connected", header: "Last connected", width: 150, sortAccessor: (l) => l.last_connected_at ?? null, render: (l) => stackedDateTime(l.last_connected_at) ?? dash },
-    // Total calls to this lead's number (any staff) vs calls by the assigned staff only.
+    // Total calls to this lead's number (any staff).
     { key: "call_count", header: "Total calls", width: 110, align: "right", sortAccessor: (l) => l.call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.call_count ?? 0}</span> },
-    { key: "assigned_call_count", header: "Assigned calls", width: 130, align: "right", sortAccessor: (l) => l.assigned_call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-600">{l.assigned_call_count ?? 0}</span> },
+    // Reporting-person columns: the Call Count & Duration reflect the Reporting
+    // Person filter's own calls (or the assigned rep when none is selected) — this
+    // "Call Count" already covers the assigned rep, so no separate "Assigned calls".
+    { key: "person_call_count", header: "Call Count", width: 120, align: "right", sortAccessor: (l) => l.person_call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.person_call_count ?? 0}</span> },
+    { key: "total_duration", header: "Total Duration", width: 130, align: "right", sortAccessor: (l) => l.total_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.total_duration ? fmtDuration(l.total_duration) : dash}</span> },
+    { key: "person_call_duration", header: "Duration", width: 120, align: "right", sortAccessor: (l) => l.person_call_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-600">{l.person_call_duration ? fmtDuration(l.person_call_duration) : dash}</span> },
     // Follow-up status flag (orange upcoming / red overdue / green done), server-computed.
     { key: "follow_flag", header: "Follow-up status", width: 150, render: (l) => followFlagBadge(l.follow_flag) ?? dash },
     // First-response SLA: working time from assignment → first connected call by the assigned user.
@@ -1332,7 +1637,7 @@ export default function ClientLeads() {
   // and hide assignment columns for reference-scoped agents (assignment doesn't
   // govern their view — their leads are scoped by reference).
   const hiddenColKeys = new Set<string>([
-    ...(canViewCalls ? [] : ["last_call", "last_connected"]),
+    ...(canViewCalls ? [] : ["last_call", "last_connected", "total_duration", "person_call_count", "person_call_duration"]),
     ...(isAgent ? ["assigned", "assigned_date", "first_response"] : []),
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
@@ -1352,7 +1657,12 @@ export default function ClientLeads() {
   const leadTabsBar = leadSubTabs.length > 1 ? (
     <div className="mb-4 inline-flex rounded-xl border border-slate-200 bg-white p-1">
       {leadSubTabs.map(([v, lbl]) => (
-        <button key={v} onClick={() => setLeadTab(v)} className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${leadTab === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100"}`}>{lbl}</button>
+        <button key={v} onClick={() => setLeadTab(v)} className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium transition ${leadTab === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100"}`}>
+          {lbl}
+          {v === "transfers" && transferPending > 0 && (
+            <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${leadTab === v ? "bg-white/25 text-white" : "bg-amber-500 text-white"}`}>{transferPending}</span>
+          )}
+        </button>
       ))}
     </div>
   ) : null;
@@ -1363,7 +1673,7 @@ export default function ClientLeads() {
       <>
         <PageHeader title="Leads" subtitle="Transfer requests — request, approve and track lead hand-offs." />
         {leadTabsBar}
-        <TransfersTab />
+        <TransfersTab onPendingChange={setTransferPending} />
       </>
     );
   }
@@ -1384,6 +1694,12 @@ export default function ClientLeads() {
         subtitle="Your leads database — add, assign and track every lead."
         action={
           <div className="flex items-center gap-2">
+            {isAdmin && (
+              <button onClick={openConvSetup} title="Configure the Convert-to-Applicant button, form and API" className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                Convert setup
+              </button>
+            )}
             {can("leads", "create") && (
               <button onClick={openImport} className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0-12L8 7m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -1407,6 +1723,7 @@ export default function ClientLeads() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <FilterToggle open={filterDrawerOpen} count={appliedFilterCount} onClick={() => { if (!filterDrawerOpen) setFilters(appliedFilters); setFilterDrawerOpen((o) => !o); }} />
+          {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
           {/* Two independent summary toggles — Lead and Call can show together. */}
           {([["Lead Summary", showLead, setShowLead], ["Call Summary", showCall, setShowCall]] as [string, boolean, (u: (s: boolean) => boolean) => void][]).map(([label, on, set]) => (
             <button
@@ -1435,17 +1752,18 @@ export default function ClientLeads() {
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
         dirty={draftDirty}
-        onReset={() => setFilters(BLANK_FILTERS)}
+        onReset={() => { setFilters(BLANK_FILTERS); setDatesOpen(false); }}
         resetDisabled={!filtersActive(filters)}
         onApply={applyFilters}
         applying={applying}
+        placement={filterLayout.placement}
       >
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-end" style={{ order: -1 }}>
           <VisibilityMenu api={filterPrefs} items={isAgent ? FILTER_DEFS.filter((f) => f.id !== "assigned" && f.id !== "assignedDate") : FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
         </div>
 
-        {!filterPrefs.isHidden("status") && (
-          <label className="flex flex-col gap-1">
+        {!filterPrefs.isHidden("status") && !filterLayout.isHidden("status") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("status") }}>
             <FilterLabel>Status</FilterLabel>
             <MultiSelect ariaLabel="Filter by status" value={filters.status}
               onChange={(v) => setFilters((f) => ({ ...f, status: v, sub: v.length ? f.sub.filter((id) => allSubStatuses.some((s) => String(s.id) === id && ((s.parent_ids ?? []).map(String).some((p) => v.includes(p)) || v.includes(String(s.parent_id ?? ""))))) : f.sub }))}
@@ -1453,78 +1771,196 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!filterPrefs.isHidden("sub") && (
-          <label className="flex flex-col gap-1">
+        {!filterPrefs.isHidden("sub") && !filterLayout.isHidden("sub") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("sub") }}>
             <FilterLabel>Sub status</FilterLabel>
             <MultiSelect ariaLabel="Filter by sub status" value={filters.sub} onChange={(v) => setFilter("sub", v)} options={subFilterOptions} placeholder="All sub statuses" searchPlaceholder="Search sub status…" />
           </label>
         )}
 
-        {!filterPrefs.isHidden("source") && (
-          <label className="flex flex-col gap-1">
+        {!filterPrefs.isHidden("source") && !filterLayout.isHidden("source") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("source") }}>
             <FilterLabel>Source</FilterLabel>
             <MultiSelect ariaLabel="Filter by source" value={filters.source} onChange={(v) => setFilter("source", v)} options={sourceFilterOptions} placeholder="All sources" searchPlaceholder="Search source…" />
           </label>
         )}
 
-        {!isAgent && !filterPrefs.isHidden("assigned") && (
-          <label className="flex flex-col gap-1">
+        {!isAgent && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
+            <FilterLabel>Reporting Person</FilterLabel>
+            <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
+            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Suggested: <b>{suggestedLeader.name}</b> (team leader) — pick it from the top of the list, or choose anyone.</> : "Pick one assignee to see their team leader suggested here."}</span>
+          </label>
+        )}
+
+        {!isAgent && !filterPrefs.isHidden("assigned") && !filterLayout.isHidden("assigned") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("assigned") }}>
             <FilterLabel>Assigned to</FilterLabel>
             <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => setFilter("assigned", v)} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
           </label>
         )}
 
-        {!filterPrefs.isHidden("leadType") && (
-          <label className="flex flex-col gap-1">
+        {!filterPrefs.isHidden("leadType") && !filterLayout.isHidden("leadType") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("leadType") }}>
             <FilterLabel>Lead type</FilterLabel>
             <MultiSelect ariaLabel="Filter by lead type" value={filters.leadType} onChange={(v) => setFilter("leadType", v)} options={leadTypeFilterOptions} placeholder="All types" searchPlaceholder="Search type…" />
           </label>
         )}
 
-        {!filterPrefs.isHidden("followStatus") && (
-          <label className="flex flex-col gap-1">
+        {!filterPrefs.isHidden("followStatus") && !filterLayout.isHidden("followStatus") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("followStatus") }}>
             <FilterLabel>Follow-up status</FilterLabel>
             <MultiSelect ariaLabel="Filter by follow-up status" value={filters.followStatus} onChange={(v) => setFilter("followStatus", v)} options={FOLLOW_STATUS_OPTIONS} placeholder="Any status" searchPlaceholder="Search status…" />
           </label>
         )}
 
-        {!filterPrefs.isHidden("reference") && (
-          <label className="flex flex-col gap-1">
+        {!filterPrefs.isHidden("reference") && !filterLayout.isHidden("reference") && (
+          <label className="flex flex-col gap-1" style={{ order: fo("reference") }}>
             <FilterLabel>Reference</FilterLabel>
             <MultiSelect ariaLabel="Filter by reference" value={filters.reference} onChange={(v) => setFilter("reference", v)} options={referenceFilterOptions} placeholder="All references" searchPlaceholder="Search reference…" />
           </label>
         )}
 
-        {!filterPrefs.isHidden("created") && (
-          <label className="flex flex-col gap-1">
-            <FilterLabel>Date created</FilterLabel>
-            <DateRangeFilter ariaLabel="Date created" value={filters.created} onChange={(v) => setFilter("created", v)} />
-          </label>
+        {/* Single "Date filters" checkbox collapses/expands all the date filters. */}
+        {!filterLayout.isHidden("dates") && (
+        <div className="flex flex-col gap-4" style={{ order: fo("dates") }}>
+        <label className="flex cursor-pointer items-center justify-between gap-2 border-t border-slate-100 pt-3">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Date filters</span>
+          <input type="checkbox" checked={datesShown} onChange={(e) => setDatesOpen(e.target.checked)} className="h-4 w-4 flex-shrink-0 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+        </label>
+
+        {datesShown && <>
+          {!filterPrefs.isHidden("created") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Date created</FilterLabel>
+              <DateRangeFilter ariaLabel="Date created" value={filters.created} onChange={(v) => setFilter("created", v)} />
+            </label>
+          )}
+
+          {!isAgent && !filterPrefs.isHidden("assignedDate") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Assigned date</FilterLabel>
+              <DateRangeFilter ariaLabel="Assigned date" value={filters.assignedDate} onChange={(v) => setFilter("assignedDate", v)} />
+            </label>
+          )}
+
+          {!filterPrefs.isHidden("follow") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Follow-up date</FilterLabel>
+              <DateRangeFilter ariaLabel="Follow-up date" value={filters.follow} onChange={(v) => setFilter("follow", v)} />
+            </label>
+          )}
+
+          {!filterPrefs.isHidden("updated") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Updated date <span className="font-normal normal-case text-slate-400">· by call date</span></FilterLabel>
+              <DateRangeFilter ariaLabel="Updated date" value={filters.updated} onChange={(v) => setFilter("updated", v)} />
+            </label>
+          )}
+
+          {!filterPrefs.isHidden("connected") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Connected date <span className="font-normal normal-case text-slate-400">· has a connected call in range</span></FilterLabel>
+              <DateRangeFilter ariaLabel="Connected date" value={filters.connected} onChange={(v) => setFilter("connected", v)} />
+            </label>
+          )}
+
+          {!filterPrefs.isHidden("noConnectAfter") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Last connect date <span className="font-normal normal-case text-slate-400">· not connected after</span></FilterLabel>
+              <input type="date" value={filters.noConnectAfter} onChange={(e) => setFilter("noConnectAfter", e.target.value)} className={selCls} />
+              <span className="text-[11px] text-slate-400">Leads with no connected call after this date.</span>
+            </label>
+          )}
+
+          {!filterPrefs.isHidden("noUpdateAfter") && (
+            <label className="flex flex-col gap-1">
+              <FilterLabel>Last update date <span className="font-normal normal-case text-slate-400">· not updated after</span></FilterLabel>
+              <input type="date" value={filters.noUpdateAfter} onChange={(e) => setFilter("noUpdateAfter", e.target.value)} className={selCls} />
+              <span className="text-[11px] text-slate-400">Leads not updated after this date.</span>
+            </label>
+          )}
+        </>}
+        </div>
         )}
 
-        {!isAgent && !filterPrefs.isHidden("assignedDate") && (
-          <label className="flex flex-col gap-1">
-            <FilterLabel>Assigned date</FilterLabel>
-            <DateRangeFilter ariaLabel="Assigned date" value={filters.assignedDate} onChange={(v) => setFilter("assignedDate", v)} />
-          </label>
+        {!filterPrefs.isHidden("ghost") && !filterLayout.isHidden("ghost") && (
+          <div className="flex flex-col gap-1" style={{ order: fo("ghost") }}>
+            <div className="flex items-center gap-2">
+              <label className="flex flex-1 cursor-pointer items-center gap-2">
+                <input type="checkbox" checked={filters.ghostOn} onChange={(e) => setFilter("ghostOn", e.target.checked)} className="h-4 w-4 flex-shrink-0 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+                <FilterLabel>Ghosted Leads</FilterLabel>
+              </label>
+              {filters.ghostOn && (
+                <input type="number" min={1} placeholder="5" value={filters.ghostHours} onChange={(e) => setFilter("ghostHours", e.target.value)} title="Hours since last connection" className={`${selCls} w-16 flex-shrink-0`} />
+              )}
+            </div>
+            {filters.ghostOn && (
+              <span className="text-[11px] text-slate-400">Leads not connected in the last {filters.ghostHours || "5"} hour{(filters.ghostHours || "5") === "1" ? "" : "s"}.</span>
+            )}
+          </div>
         )}
 
-        {!filterPrefs.isHidden("follow") && (
-          <label className="flex flex-col gap-1">
-            <FilterLabel>Follow-up date</FilterLabel>
-            <DateRangeFilter ariaLabel="Follow-up date" value={filters.follow} onChange={(v) => setFilter("follow", v)} />
-          </label>
+        {!filterPrefs.isHidden("calls") && !filterLayout.isHidden("calls") && (
+          <div className="flex flex-col gap-1" style={{ order: fo("calls") }}>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input type="checkbox" checked={filters.callsOn} onChange={(e) => setFilter("callsOn", e.target.checked)} className="h-4 w-4 flex-shrink-0 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+              <FilterLabel>Update Count Range</FilterLabel>
+            </label>
+            {filters.callsOn && <>
+              <div className="px-1.5 pt-1">
+                <DualRange
+                  min={0}
+                  max={CALLS_SLIDER_MAX}
+                  valueMin={filters.callsMin === "" ? 0 : Number(filters.callsMin)}
+                  valueMax={filters.callsMax === "" ? CALLS_SLIDER_MAX : Number(filters.callsMax)}
+                  onChange={(lo, hi) => {
+                    setFilter("callsMin", lo <= 0 ? "" : String(lo));
+                    setFilter("callsMax", hi >= CALLS_SLIDER_MAX ? "" : String(hi));
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  type="number" min={0} max={CALLS_SLIDER_MAX} placeholder="0"
+                  value={filters.callsMin}
+                  onChange={(e) => setFilter("callsMin", e.target.value)}
+                  className={`${selCls} w-16`} aria-label="Minimum calls"
+                />
+                <input
+                  type="number" min={0} max={CALLS_SLIDER_MAX} placeholder={String(CALLS_SLIDER_MAX)}
+                  value={filters.callsMax}
+                  onChange={(e) => setFilter("callsMax", e.target.value)}
+                  className={`${selCls} w-16 text-right`} aria-label="Maximum calls"
+                />
+              </div>
+              <span className="text-[11px] text-slate-400">Leads whose assigned rep called them this many times. Drag the handles or type a range ({CALLS_SLIDER_MAX} = no upper limit).</span>
+            </>}
+          </div>
         )}
 
-        {!filterPrefs.isHidden("updated") && (
-          <label className="flex flex-col gap-1">
-            <FilterLabel>Updated date <span className="font-normal normal-case text-slate-400">· by call date</span></FilterLabel>
-            <DateRangeFilter ariaLabel="Updated date" value={filters.updated} onChange={(v) => setFilter("updated", v)} />
-          </label>
+        {!filterPrefs.isHidden("duration") && !filterLayout.isHidden("duration") && (
+          <div className="flex flex-col gap-1" style={{ order: fo("duration") }}>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input type="checkbox" checked={filters.durOn} onChange={(e) => setFilter("durOn", e.target.checked)} className="h-4 w-4 flex-shrink-0 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+              <FilterLabel>Duration Filter</FilterLabel>
+            </label>
+            {filters.durOn && <>
+              <div className="flex items-center gap-1.5">
+                <select value={filters.durOp} onChange={(e) => setFilter("durOp", e.target.value as "lte" | "gte")} className={`${selCls} w-16 flex-shrink-0`} title={filters.durOp === "lte" ? "At most this long" : "At least this long"}>
+                  <option value="lte">≤</option>
+                  <option value="gte">≥</option>
+                </select>
+                <input type="number" min={0} placeholder="Hours" value={filters.durHours} onChange={(e) => setFilter("durHours", e.target.value)} className={`${selCls} w-full`} />
+                <input type="number" min={0} max={59} placeholder="Minutes" value={filters.durMins} onChange={(e) => setFilter("durMins", e.target.value)} className={`${selCls} w-full`} />
+              </div>
+              <span className="text-[11px] text-slate-400">Leads whose total call talk-time is {filters.durOp === "lte" ? "at most" : "at least"} the entered hours &amp; minutes.</span>
+            </>}
+          </div>
         )}
       </FilterRail>
 
-      <div className={filterRailPad(filterDrawerOpen)}>
+      <div className={filterRailPad(filterDrawerOpen, filterLayout.placement)}>
       {/* Today's call totals + last sync — auto-refreshes every minute. */}
       {can("calls", "view") && <CallSyncHeader />}
 
@@ -1583,48 +2019,34 @@ export default function ClientLeads() {
 
         {showLead && (
         <Card className="mt-3">
-        {/* ---- Lead Summary — counts by the chosen dimension; click to filter. */}
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        {/* ---- Lead Summary — a stat-card grid per dimension; click a tile to filter. */}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-semibold text-slate-700">Lead Summary</h3>
-          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs font-medium">
-            {SUMMARY_DIMS.map((d) => (
-              <button key={d.key} onClick={() => setSummaryDim(d.key)} className={`rounded-md px-3 py-1.5 transition ${summaryDim === d.key ? "bg-white text-indigo-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
-                {d.label}
-              </button>
-            ))}
-          </div>
+          {analytics && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{analytics.total.toLocaleString("en-IN")} leads</span>}
+          {activeFilters && <span className="text-xs text-slate-400">reflects the current filters</span>}
         </div>
-          <div>
-            <div className="mb-3 flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-slate-700">Lead count</h3>
-              {analytics && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{analytics.total} leads</span>}
-            </div>
 
-            {!analytics ? (
-              <div className="py-8 text-center text-sm text-slate-400">Loading summary…</div>
-            ) : summaryDonut.length === 0 ? (
-              <div className="py-8 text-center text-sm text-slate-400">No {activeDim.label.toLowerCase()} data yet.</div>
-            ) : (
-              <DonutSelect
-                data={summaryDonut}
-                total={analytics.total}
-                activeId={summaryActiveId != null ? Number(summaryActiveId) : null}
-                onSelect={pickSummaryId}
-              />
-            )}
-
-            <p className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-              {summaryActiveId ? (
-                <>
-                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-indigo-500" />
-                  Table filtered by {activeDim.label.toLowerCase()}.
-                  <button onClick={clearSummary} className="font-medium text-indigo-600 hover:text-indigo-700">Clear</button>
-                </>
-              ) : (
-                <span className="text-slate-400">Click a slice or legend row to filter the table by {activeDim.label.toLowerCase()}.</span>
-              )}
-            </p>
-          </div>
+        {!analytics ? (
+          <div className="py-8 text-center text-sm text-slate-400">Loading summary…</div>
+        ) : (
+          <>
+            {SUMMARY_DIMS.map((d) => {
+              const items = d.pick(analytics);
+              if (!items.length) return null;
+              return (
+                <SummaryGrid
+                  key={d.key}
+                  title={`Lead ${d.label}`}
+                  items={items}
+                  total={d.key === "status" ? analytics.total : undefined}
+                  activeIds={appliedFilters[d.filterKey]}
+                  onPick={(id) => pickDimId(d.filterKey, id)}
+                />
+              );
+            })}
+            <p className="mt-1 text-xs text-slate-400">Click a card to filter the table by that value; click it again to clear.</p>
+          </>
+        )}
         </Card>
         )}
       </div>
@@ -1754,83 +2176,116 @@ export default function ClientLeads() {
       >
         {draft && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <FieldRow label="Name" required={requiredFields.has("name")} error={errors.name}>
-              <input className={inputCls(errors.name)} placeholder="Lead name" value={draft.name} onChange={(e) => setField("name")(e.target.value)} />
-            </FieldRow>
-            <FieldRow label="Reference" required={requiredFields.has("reference_name")} error={errors.reference_name}>
-              <SearchSelect ariaLabel="Reference" value={draft.reference_name} onChange={setField("reference_name")} options={formReferenceOptions} placeholder="— None —" searchPlaceholder="Search references…" />
-            </FieldRow>
-
-            <FieldRow label="Phone" required error={errors.phone} hint="10 digits, without +91">
-              <input className={inputCls(errors.phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.phone} onChange={(e) => setField("phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
-            </FieldRow>
-            <FieldRow label="Alternative phone" required={requiredFields.has("alt_phone")} error={errors.alt_phone} hint={requiredFields.has("alt_phone") ? "10 digits, without +91" : "Optional · 10 digits, without +91"}>
-              <input className={inputCls(errors.alt_phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.alt_phone} onChange={(e) => setField("alt_phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
-            </FieldRow>
-
-            <FieldRow label="Lead type" required={requiredFields.has("lead_type_id")} error={errors.lead_type_id} hint="Categorise this lead. Choosing a type narrows the sub-statuses below. Manage types in Leads Setup.">
-              <SearchSelect ariaLabel="Select lead type" value={draft.lead_type_id} onChange={setField("lead_type_id")} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" className={errors.lead_type_id ? "ring-2 ring-red-500/30" : ""} />
-            </FieldRow>
-            <FieldRow label="Status" required error={errors.status_id}>
-              <SearchSelect ariaLabel="Select status" value={draft.status_id} onChange={setField("status_id")} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" className={errors.status_id ? "ring-2 ring-red-500/30" : ""} />
-            </FieldRow>
-            <FieldRow label="Sub status" required={requiredFields.has("sub_status_id")} error={errors.sub_status_id} hint={draft.status_id ? (subOptions.length ? undefined : "No sub-statuses for this status/type") : "Pick a status first"}>
-              {subOptions.length ? (
-                <SearchSelect ariaLabel="Select sub status" value={draft.sub_status_id} onChange={setField("sub_status_id")} options={formSubOptions} placeholder="— None —" searchPlaceholder="Search sub status…" className={errors.sub_status_id ? "ring-2 ring-red-500/30" : ""} />
-              ) : (
-                <div className={readonlyCls}>—</div>
-              )}
-            </FieldRow>
-
-            <FieldRow label="Lead source" required={requiredFields.has("source_id")} error={errors.source_id} hint="Where this lead came from. Manage sources in Leads Setup.">
-              <SearchSelect ariaLabel="Select lead source" value={draft.source_id} onChange={setField("source_id")} options={formSourceOptions} placeholder="— None —" searchPlaceholder="Search source…" className={errors.source_id ? "ring-2 ring-red-500/30" : ""} />
-            </FieldRow>
-
-            <FieldRow label="Email" required={requiredFields.has("email")} error={errors.email}>
-              <input className={inputCls(errors.email)} type="email" placeholder="lead@example.com" value={draft.email} onChange={(e) => setField("email")(e.target.value)} />
-            </FieldRow>
-            {/* Assignee is masked on create — a new lead is auto-assigned to whoever
-                captures it. Admins (who aren't staff) still pick explicitly; on edit
-                the field stays available to non-agents. */}
-            {!isAgent && (isAdmin || draft.id) && (
-              <FieldRow label="Assigned to" required={requiredFields.has("assigned_to")} error={errors.assigned_to}>
-                <SearchSelect ariaLabel="Select assignee" value={draft.assigned_to} onChange={setField("assigned_to")} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" className={errors.assigned_to ? "ring-2 ring-red-500/30" : ""} />
-              </FieldRow>
-            )}
-
-            {!isAgent && <FieldRow label="Assigned date" hint="Set automatically when the lead is assigned"><div className={readonlyCls}>{draft.assigned_date ? fmtDateTime(draft.assigned_date) : "—"}</div></FieldRow>}
-            <FieldRow label="Follow-up date" hint="The lead's latest reminder date & time"><div className={readonlyCls}>{draft.last_reminder_at ? fmtDateTime(draft.last_reminder_at) : "—"}</div></FieldRow>
-
-            <FieldRow label="State" required={requiredFields.has("state")} error={errors.state} hint="Pick from the list or type a new one.">
-              <input
-                list="lead-state-list"
-                value={draft.state}
-                onChange={(e) => setDraft((d) => d && { ...d, state: e.target.value })}
-                placeholder="Start typing a state…"
-                autoComplete="off"
-                className={inputCls(errors.state)}
-              />
-              <datalist id="lead-state-list">
-                {stateSuggestions.map((s) => <option key={s} value={s} />)}
-              </datalist>
-            </FieldRow>
-            <FieldRow label="City" required={requiredFields.has("city")} error={errors.city} hint="Pick from the list or type a new one.">
-              <input
-                list="lead-city-list"
-                value={draft.city}
-                onChange={(e) => setField("city")(e.target.value)}
-                placeholder="Start typing a city…"
-                autoComplete="off"
-                className={inputCls(errors.city)}
-              />
-              <datalist id="lead-city-list">
-                {citySuggestions.map((c) => <option key={c} value={c} />)}
-              </datalist>
-            </FieldRow>
-
-            <FieldRow label="Created date" hint="Set automatically when the lead is created"><div className={readonlyCls}>{draft.created_date ? fmtDate(draft.created_date) : draft.id ? "—" : "Today"}</div></FieldRow>
-
-            <CustomFieldInputs fields={leadCustomFields} values={draft.custom} onChange={(k, v) => setDraft((d) => d && { ...d, custom: { ...d.custom, [k]: v } })} errors={errors} />
+            {(() => {
+              // Each built-in field as a keyed node; conditionally-hidden ones are
+              // null. They render in the admin's saved order (Form Setup → Arrange),
+              // falling back to the natural order for any field not listed.
+              const nodes: Record<string, React.ReactNode> = {
+                name: (
+                  <FieldRow key="name" label="Name" required={requiredFields.has("name")} error={errors.name} hint={hintOf("name")}>
+                    <input className={inputCls(errors.name)} placeholder="Lead name" value={draft.name} onChange={(e) => setField("name")(e.target.value)} />
+                  </FieldRow>
+                ),
+                reference_name: (
+                  <FieldRow key="reference_name" label="Reference" required={requiredFields.has("reference_name")} error={errors.reference_name} hint={hintOf("reference_name")}>
+                    <SearchSelect ariaLabel="Reference" value={draft.reference_name} onChange={setField("reference_name")} options={formReferenceOptions} placeholder="— None —" searchPlaceholder="Search references…" />
+                  </FieldRow>
+                ),
+                phone: (
+                  <FieldRow key="phone" label="Phone" required error={errors.phone} hint={hintOf("phone")}>
+                    <input className={inputCls(errors.phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.phone} onChange={(e) => setField("phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
+                  </FieldRow>
+                ),
+                alt_phone: (
+                  <FieldRow key="alt_phone" label="Alternative phone" required={requiredFields.has("alt_phone")} error={errors.alt_phone} hint={hintOf("alt_phone", requiredFields.has("alt_phone") ? "10 digits, without +91" : undefined)}>
+                    <input className={inputCls(errors.alt_phone)} inputMode="numeric" maxLength={10} placeholder="10-digit mobile (no +91)" value={draft.alt_phone} onChange={(e) => setField("alt_phone")(e.target.value.replace(/\D/g, "").slice(0, 10))} />
+                  </FieldRow>
+                ),
+                lead_type_id: (
+                  <FieldRow key="lead_type_id" label="Lead type" required={requiredFields.has("lead_type_id")} error={errors.lead_type_id} hint={hintOf("lead_type_id")}>
+                    <SearchSelect ariaLabel="Select lead type" value={draft.lead_type_id} onChange={setField("lead_type_id")} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" className={errors.lead_type_id ? "ring-2 ring-red-500/30" : ""} />
+                  </FieldRow>
+                ),
+                status_id: (
+                  <FieldRow key="status_id" label="Status" required error={errors.status_id} hint={hintOf("status_id")}>
+                    <SearchSelect ariaLabel="Select status" value={draft.status_id} onChange={setField("status_id")} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" className={errors.status_id ? "ring-2 ring-red-500/30" : ""} />
+                  </FieldRow>
+                ),
+                sub_status_id: (
+                  <FieldRow key="sub_status_id" label="Sub status" required={requiredFields.has("sub_status_id")} error={errors.sub_status_id} hint={draft.status_id ? (subOptions.length ? hintOf("sub_status_id") : "No sub-statuses for this status/type") : "Pick a status first"}>
+                    {subOptions.length ? (
+                      <SearchSelect ariaLabel="Select sub status" value={draft.sub_status_id} onChange={setField("sub_status_id")} options={formSubOptions} placeholder="— None —" searchPlaceholder="Search sub status…" className={errors.sub_status_id ? "ring-2 ring-red-500/30" : ""} />
+                    ) : (
+                      <div className={readonlyCls}>—</div>
+                    )}
+                  </FieldRow>
+                ),
+                source_id: (
+                  <FieldRow key="source_id" label="Lead source" required={requiredFields.has("source_id")} error={errors.source_id} hint={hintOf("source_id")}>
+                    <SearchSelect ariaLabel="Select lead source" value={draft.source_id} onChange={setField("source_id")} options={formSourceOptions} placeholder="— None —" searchPlaceholder="Search source…" className={errors.source_id ? "ring-2 ring-red-500/30" : ""} />
+                  </FieldRow>
+                ),
+                email: (
+                  <FieldRow key="email" label="Email" required={requiredFields.has("email")} error={errors.email} hint={hintOf("email")}>
+                    <input className={inputCls(errors.email)} type="email" placeholder="lead@example.com" value={draft.email} onChange={(e) => setField("email")(e.target.value)} />
+                  </FieldRow>
+                ),
+                // Assignee is masked on create — a new lead is auto-assigned to whoever
+                // captures it. Admins (who aren't staff) still pick explicitly; on edit
+                // the field stays available to non-agents.
+                assigned_to: (!isAgent && (isAdmin || draft.id)) ? (
+                  <FieldRow key="assigned_to" label="Assigned to" required={requiredFields.has("assigned_to")} error={errors.assigned_to} hint={hintOf("assigned_to")}>
+                    <SearchSelect ariaLabel="Select assignee" value={draft.assigned_to} onChange={setField("assigned_to")} options={formAssignedOptions} placeholder="— Unassigned —" searchPlaceholder="Search team…" className={errors.assigned_to ? "ring-2 ring-red-500/30" : ""} />
+                  </FieldRow>
+                ) : null,
+                assigned_date: !isAgent ? (
+                  <FieldRow key="assigned_date" label="Assigned date" hint="Set automatically when the lead is assigned"><div className={readonlyCls}>{draft.assigned_date ? fmtDateTime(draft.assigned_date) : "—"}</div></FieldRow>
+                ) : null,
+                follow_up_date: (
+                  <FieldRow key="follow_up_date" label="Follow-up date" hint="The lead's latest reminder date & time"><div className={readonlyCls}>{draft.last_reminder_at ? fmtDateTime(draft.last_reminder_at) : "—"}</div></FieldRow>
+                ),
+                state: (
+                  <FieldRow key="state" label="State" required={requiredFields.has("state")} error={errors.state} hint={hintOf("state")}>
+                    <input list="lead-state-list" value={draft.state} onChange={(e) => setDraft((d) => d && { ...d, state: e.target.value })} placeholder="Start typing a state…" autoComplete="off" className={inputCls(errors.state)} />
+                    <datalist id="lead-state-list">{stateSuggestions.map((s) => <option key={s} value={s} />)}</datalist>
+                  </FieldRow>
+                ),
+                city: (
+                  <FieldRow key="city" label="City" required={requiredFields.has("city")} error={errors.city} hint={hintOf("city")}>
+                    <input list="lead-city-list" value={draft.city} onChange={(e) => setField("city")(e.target.value)} placeholder="Start typing a city…" autoComplete="off" className={inputCls(errors.city)} />
+                    <datalist id="lead-city-list">{citySuggestions.map((c) => <option key={c} value={c} />)}</datalist>
+                  </FieldRow>
+                ),
+                created_date: (
+                  <FieldRow key="created_date" label="Created date" hint="Set automatically when the lead is created"><div className={readonlyCls}>{draft.created_date ? fmtDate(draft.created_date) : draft.id ? "—" : "Today"}</div></FieldRow>
+                ),
+                description: (
+                  <div key="description" className="sm:col-span-2">
+                    <FieldRow label="Description" required={requiredFields.has("description")} error={errors.description} hint={hintOf("description")}>
+                      <RichTextEditor key={`lead-desc-${draft.id ?? "new"}`} initialHTML={draft.description} onChange={(html) => setDraft((d) => d && { ...d, description: html })} placeholder="Add a description for this lead…" minHeight={120} />
+                    </FieldRow>
+                  </div>
+                ),
+              };
+              // Custom fields become nodes too, so the admin's arranged order can
+              // place them anywhere among the built-ins. A custom key never
+              // overwrites a built-in (built-ins added first).
+              for (const f of leadCustomFields) {
+                if (f.key in nodes) continue;
+                nodes[f.key] = (
+                  <CustomFieldCell
+                    key={`cf-${f.key}`}
+                    field={f}
+                    value={draft.custom[f.key] ?? ""}
+                    onChange={(v) => setDraft((d) => d && { ...d, custom: { ...d.custom, [f.key]: v } })}
+                    error={errors[`custom_${f.key}`]}
+                  />
+                );
+              }
+              const natural = [...LEAD_FORM_FIELDS.map((f) => f.key), ...leadCustomFields.map((f) => f.key)];
+              const ordered = [...leadOrder.filter((k) => k in nodes), ...natural.filter((k) => k in nodes && !leadOrder.includes(k))];
+              return ordered.map((k) => nodes[k]).filter(Boolean);
+            })()}
           </div>
         )}
       </Drawer>
@@ -1845,6 +2300,12 @@ export default function ClientLeads() {
         footer={
           <div className="flex items-center justify-end gap-2">
             <button onClick={closeView} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
+            {convertCfg?.enabled && can("leads", "update") && (
+              <button onClick={() => viewing && openConvert(viewing)} className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                {convertCfg.label}
+              </button>
+            )}
             <button onClick={() => { const l = viewing!; closeView(); openEdit(l); }} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
               Edit
@@ -1907,6 +2368,12 @@ export default function ClientLeads() {
                     </div>
                   ))}
                 </dl>
+                {stripHtml(lead.description ?? "") && (
+                  <div className="mt-4">
+                    <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Description</div>
+                    <div className="rte-content mt-1 text-sm text-slate-700" dangerouslySetInnerHTML={{ __html: lead.description ?? "" }} />
+                  </div>
+                )}
               </section>
               )}
 
@@ -2071,12 +2538,12 @@ export default function ClientLeads() {
       </Drawer>
 
       {/* Bulk edit / assign selected leads */}
-      <Modal open={bulkOpen} onClose={() => !bulkSaving && setBulkOpen(false)} title={`Bulk edit ${selectedLeads.length} lead${selectedLeads.length === 1 ? "" : "s"}`}>
+      <Modal open={bulkOpen} onClose={() => !bulkSaving && setBulkOpen(false)} title={`Bulk edit ${selectedLeads.length} lead${selectedLeads.length === 1 ? "" : "s"}`} width="max-w-5xl">
         <div className="space-y-4">
           <p className="text-sm text-slate-500">Tick a field to change it on all selected leads. Unticked fields are left as they are.</p>
 
           {/* Status + Sub-status */}
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <BulkField checked={bChg.status} onToggle={() => toggleChg("status")} label="Status">
               <SearchSelect ariaLabel="Status" value={bStatus} onChange={(v) => { setBStatus(v); setBSub(""); }} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" />
             </BulkField>
@@ -2089,8 +2556,14 @@ export default function ClientLeads() {
             <BulkField checked={bChg.type} onToggle={() => toggleChg("type")} label="Lead type">
               <SearchSelect ariaLabel="Lead type" value={bType} onChange={setBType} options={formLeadTypeOptions} placeholder="— None —" searchPlaceholder="Search type…" />
             </BulkField>
+            <BulkField checked={bChg.reference} onToggle={() => toggleChg("reference")} label="Reference name">
+              <SearchSelect ariaLabel="Reference" value={bReference} onChange={setBReference} options={formReferenceOptions} placeholder="— None —" searchPlaceholder="Search references…" />
+            </BulkField>
             <BulkField checked={bChg.created} onToggle={() => toggleChg("created")} label="Created date">
-              <input type="date" value={bCreated} onChange={(e) => setBCreated(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
+              <select value={bCreatedMode} onChange={(e) => setBCreatedMode(e.target.value as "new" | "keep")} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15">
+                <option value="new">Set to today (new)</option>
+                <option value="keep">Keep the old created date</option>
+              </select>
             </BulkField>
           </div>
 
@@ -2110,8 +2583,21 @@ export default function ClientLeads() {
                   <p className="text-xs text-slate-400">Selected leads are split evenly across these members, in order.</p>
                 </>
               )}
+              <div>
+                <span className="mb-1 block text-xs font-medium text-slate-500">Assignment date &amp; time <span className="font-normal text-slate-400">· optional, defaults to now</span></span>
+                <input type="datetime-local" value={bAssignedAt} onChange={(e) => setBAssignedAt(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
+              </div>
             </div>
           </BulkField>
+
+          {/* Mass assignation — reset the lead so the new assignee starts fresh */}
+          <label className="flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2.5 text-sm">
+            <span>
+              <span className="font-medium text-amber-800">Mass assignation (fresh lead)</span>
+              <span className="mt-0.5 block text-xs text-amber-700">Removes this lead&apos;s reminders, notes, follow-up, first-response &amp; description so the new assignee starts clean. The lead itself, its status and calls are kept.</span>
+            </span>
+            <input type="checkbox" checked={bMassAssign} onChange={(e) => setBMassAssign(e.target.checked)} className="mt-0.5 h-5 w-5 flex-shrink-0 cursor-pointer accent-amber-600" />
+          </label>
 
           <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2.5 text-sm">
             <span>
@@ -2251,6 +2737,99 @@ export default function ClientLeads() {
         canManage={isAdmin}
         onDone={() => setVisitorDraft(null)}
       />
+
+      {/* Convert-to-Applicant form (fields configured by the admin) */}
+      <Modal open={!!convertTarget} title={convertCfg?.label || "Convert to Applicant"} onClose={() => setConvertTarget(null)}>
+        <div className="space-y-3">
+          <p className="text-xs text-slate-500">Fill the form to convert <b>{convertTarget?.name?.trim() || convertTarget?.phone}</b>. On success it's sent to the configured system and the lead's status is updated.</p>
+          {(convertCfg?.fields ?? []).length === 0 && <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">No form fields configured yet.</p>}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {(convertCfg?.fields ?? []).map((f) => (
+              <label key={f.key} className={f.type === "textarea" ? "sm:col-span-2" : ""}>
+                <span className="mb-1 block text-sm font-medium text-slate-700">{f.label}{f.required && <span className="text-rose-500"> *</span>}</span>
+                {f.type === "textarea" ? (
+                  <textarea value={convertValues[f.key] ?? ""} onChange={(e) => setConvertValues((v) => ({ ...v, [f.key]: e.target.value }))} rows={3} className={`${selCls} w-full`} />
+                ) : (
+                  <input type={f.type === "number" ? "number" : f.type === "date" ? "date" : f.type === "email" ? "email" : f.type === "tel" ? "tel" : "text"} value={convertValues[f.key] ?? ""} onChange={(e) => setConvertValues((v) => ({ ...v, [f.key]: e.target.value }))} className={`${selCls} w-full`} />
+                )}
+              </label>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <button onClick={() => setConvertTarget(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button onClick={submitConvert} disabled={converting} className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">
+              {converting ? "Converting…" : (convertCfg?.label || "Convert")}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Admin: configure the Convert-to-Applicant button, form fields & API */}
+      <Modal open={convSetupOpen} title="Convert-to-Applicant setup" onClose={() => setConvSetupOpen(false)}>
+        {convDraft && (
+        <div className="space-y-4">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={convDraft.enabled} onChange={(e) => setConvDraft({ ...convDraft, enabled: e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+            <span className="text-sm font-medium text-slate-700">Enable the button on leads</span>
+          </label>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label>
+              <span className="mb-1 block text-sm font-medium text-slate-700">Button text</span>
+              <input value={convDraft.label} onChange={(e) => setConvDraft({ ...convDraft, label: e.target.value })} maxLength={40} placeholder="Convert to Applicant" className={`${selCls} w-full`} />
+            </label>
+            <label>
+              <span className="mb-1 block text-sm font-medium text-slate-700">Status after convert</span>
+              <select value={convDraft.status_id} onChange={(e) => setConvDraft({ ...convDraft, status_id: Number(e.target.value) })} className={`${selCls} w-full`}>
+                <option value={0}>— No change —</option>
+                {statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </label>
+            <label className="sm:col-span-2">
+              <span className="mb-1 block text-sm font-medium text-slate-700">API endpoint URL</span>
+              <input value={convDraft.api_url ?? ""} onChange={(e) => setConvDraft({ ...convDraft, api_url: e.target.value })} placeholder="https://your-system.com/api/applicants" className={`${selCls} w-full`} />
+            </label>
+            <label>
+              <span className="mb-1 block text-sm font-medium text-slate-700">Method</span>
+              <select value={convDraft.api_method ?? "POST"} onChange={(e) => setConvDraft({ ...convDraft, api_method: e.target.value })} className={`${selCls} w-full`}>
+                <option>POST</option><option>PUT</option>
+              </select>
+            </label>
+            <label>
+              <span className="mb-1 block text-sm font-medium text-slate-700">Body format</span>
+              <select value={convDraft.api_type ?? "json"} onChange={(e) => setConvDraft({ ...convDraft, api_type: e.target.value })} className={`${selCls} w-full`}>
+                <option value="json">JSON</option><option value="form">Form data</option>
+              </select>
+            </label>
+          </div>
+
+          <div>
+            <span className="mb-1 block text-sm font-medium text-slate-700">Form fields</span>
+            <p className="mb-2 text-xs text-slate-400">These fields appear in the convert form and are sent to the API using their key.</p>
+            <div className="space-y-1.5">
+              {convDraft.fields.map((f, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  <input value={f.label} onChange={(e) => setConvDraft({ ...convDraft, fields: convDraft.fields.map((x, j) => j === i ? { ...x, label: e.target.value } : x) })} placeholder="Label" className={`${selCls} min-w-0 flex-1`} />
+                  <input value={f.key} onChange={(e) => setConvDraft({ ...convDraft, fields: convDraft.fields.map((x, j) => j === i ? { ...x, key: e.target.value.replace(/[^a-z0-9_]/gi, "") } : x) })} placeholder="api_key" className={`${selCls} w-28`} />
+                  <select value={f.type} onChange={(e) => setConvDraft({ ...convDraft, fields: convDraft.fields.map((x, j) => j === i ? { ...x, type: e.target.value } : x) })} className={`${selCls} w-24`}>
+                    {["text", "email", "number", "date", "tel", "textarea"].map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  <label className="flex items-center gap-1 text-xs text-slate-500"><input type="checkbox" checked={f.required} onChange={(e) => setConvDraft({ ...convDraft, fields: convDraft.fields.map((x, j) => j === i ? { ...x, required: e.target.checked } : x) })} className="h-3.5 w-3.5" />req</label>
+                  <button type="button" onClick={() => setConvDraft({ ...convDraft, fields: convDraft.fields.filter((_, j) => j !== i) })} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" /></svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button type="button" onClick={() => setConvDraft({ ...convDraft, fields: [...convDraft.fields, { key: "", label: "", type: "text", required: false } as ConvertField] })} className="mt-2 text-sm font-medium text-indigo-600 hover:text-indigo-700">+ Add field</button>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-1">
+            <button onClick={() => setConvSetupOpen(false)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button onClick={saveConvSetup} disabled={convSaving} className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{convSaving ? "Saving…" : "Save"}</button>
+          </div>
+        </div>
+        )}
+      </Modal>
     </>
   );
 }

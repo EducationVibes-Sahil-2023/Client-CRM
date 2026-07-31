@@ -21,6 +21,13 @@ import { PageHeader, Card, EmptyState, SkeletonBlock, SkeletonText, Modal, Drawe
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "audience", label: "Audience" },
+  { id: "attrs", label: "Attributes" },
+  { id: "created", label: "Date posted" },
+];
 
 type Dept = { id: number; name: string };
 type StaffOpt = { id: number; name: string; department_id: number | null };
@@ -111,7 +118,14 @@ function AttachmentChip({ a }: { a: AnnouncementAttachment }) {
 export default function AnnouncementsPage() {
   const toast = useToast();
   const confirm = useConfirm();
-  const { can } = useClient();
+  const { can, isAdmin } = useClient();
+  const filterLayout = useFilterLayout("announcements_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [items, setItems] = useState<Announcement[]>([]);
   const [departments, setDepartments] = useState<Dept[]>([]);
   const [staff, setStaff] = useState<StaffOpt[]>([]);
@@ -337,6 +351,7 @@ export default function AnnouncementsPage() {
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search announcements…" className={`${field} pl-9`} />
           </div>
           <FilterToggle open={filterOpen} count={appliedCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+          {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
         </div>
         {filtersOn && (
           <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>
@@ -344,7 +359,7 @@ export default function AnnouncementsPage() {
       </div>
 
       {/* The list. When the rail is open it pads right so nothing hides behind it. */}
-      <div className={filterRailPad(filterOpen)}>
+      <div className={filterRailPad(filterOpen, filterLayout.placement)}>
       {loading ? (
         <div className="space-y-3">
           {Array.from({ length: 5 }).map((_, i) => <SkeletonBlock key={i} className="h-24" />)}
@@ -419,19 +434,26 @@ export default function AnnouncementsPage() {
         resetDisabled={!annFiltersActive(filters)}
         onApply={applyFilters}
         applyDisabled={!draftDirty}
+        placement={filterLayout.placement}
       >
-        <label className="flex flex-col gap-1">
+        {!filterLayout.isHidden("audience") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("audience") }}>
           <FilterLabel>Audience</FilterLabel>
           <MultiSelect ariaLabel="Filter by audience" value={filters.audience} onChange={(v) => setFilter("audience", v)} options={AUDIENCE_OPTIONS} placeholder="Any audience" searchPlaceholder="Search audience…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("attrs") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("attrs") }}>
           <FilterLabel>Attributes</FilterLabel>
           <MultiSelect ariaLabel="Filter by attributes" value={filters.attrs} onChange={(v) => setFilter("attrs", v)} options={ATTR_OPTIONS} placeholder="Any" searchPlaceholder="Search…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("created") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("created") }}>
           <FilterLabel>Date posted</FilterLabel>
           <DateRangeFilter ariaLabel="Date posted" value={filters.created} onChange={(v) => setFilter("created", v)} />
         </label>
+        )}
       </FilterRail>
 
       {/* Create drawer (slides in from the right) */}

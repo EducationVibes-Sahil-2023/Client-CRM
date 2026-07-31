@@ -10,6 +10,32 @@ const field = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus
  * (key → string). Shared by the lead, visitor and staff forms. Validation errors
  * are keyed `custom_<key>` to match the backend.
  */
+/** One custom field's label + input (shared by the grouped renderer and the
+ * interleaved lead form where fields sit at their arranged positions). */
+export function CustomFieldCell({
+  field: f, value, onChange, error,
+}: {
+  field: CustomField;
+  value: string;
+  onChange: (val: string) => void;
+  error?: string;
+}) {
+  const cls = `${field} ${error ? "border-rose-300" : ""}`;
+  return (
+    <div>
+      <span className="mb-1 block text-sm font-medium text-slate-600">{f.label}{f.required && <span className="text-rose-500"> *</span>}</span>
+      {f.type === "textarea" ? (
+        <textarea value={value} onChange={(e) => onChange(e.target.value)} rows={3} className={cls} />
+      ) : f.type === "select" ? (
+        <SearchSelect ariaLabel={f.label} value={value} onChange={onChange} options={[{ value: "", label: "— Select —" }, ...f.options.map((o) => ({ value: o, label: o }))]} placeholder="— Select —" searchPlaceholder="Search…" className={error ? "ring-2 ring-rose-500/30" : ""} />
+      ) : (
+        <input type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"} value={value} onChange={(e) => onChange(e.target.value)} className={cls} />
+      )}
+      {error && <p className="mt-1 text-xs text-rose-600">{error}</p>}
+    </div>
+  );
+}
+
 export function CustomFieldInputs({
   fields, values, onChange, errors, className = "sm:col-span-2",
 }: {
@@ -22,25 +48,9 @@ export function CustomFieldInputs({
   if (!fields.length) return null;
   return (
     <div className={`space-y-3 border-t border-slate-100 pt-3 ${className}`}>
-      {fields.map((f) => {
-        const ek = `custom_${f.key}`;
-        const val = values[f.key] ?? "";
-        const err = errors?.[ek];
-        const cls = `${field} ${err ? "border-rose-300" : ""}`;
-        return (
-          <div key={f.key}>
-            <span className="mb-1 block text-sm font-medium text-slate-600">{f.label}{f.required && <span className="text-rose-500"> *</span>}</span>
-            {f.type === "textarea" ? (
-              <textarea value={val} onChange={(e) => onChange(f.key, e.target.value)} rows={3} className={cls} />
-            ) : f.type === "select" ? (
-              <SearchSelect ariaLabel={f.label} value={val} onChange={(v) => onChange(f.key, v)} options={[{ value: "", label: "— Select —" }, ...f.options.map((o) => ({ value: o, label: o }))]} placeholder="— Select —" searchPlaceholder="Search…" className={err ? "ring-2 ring-rose-500/30" : ""} />
-            ) : (
-              <input type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"} value={val} onChange={(e) => onChange(f.key, e.target.value)} className={cls} />
-            )}
-            {err && <p className="mt-1 text-xs text-rose-600">{err}</p>}
-          </div>
-        );
-      })}
+      {fields.map((f) => (
+        <CustomFieldCell key={f.key} field={f} value={values[f.key] ?? ""} onChange={(v) => onChange(f.key, v)} error={errors?.[`custom_${f.key}`]} />
+      ))}
     </div>
   );
 }

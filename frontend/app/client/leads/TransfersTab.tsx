@@ -12,6 +12,14 @@ import { DataTable, IconButton, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useClient } from "../ClientContext";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "date", label: "Transfer date" },
+  { id: "to", label: "Transferred to" },
+  { id: "from", label: "Transferred from" },
+];
 import { PerfSummary } from "./DateSummary";
 
 const STATUS_META: Record<TransferStatus, { label: string; cls: string }> = {
@@ -20,16 +28,28 @@ const STATUS_META: Record<TransferStatus, { label: string; cls: string }> = {
   rejected: { label: "Rejected", cls: "bg-rose-50 text-rose-700" },
   cancelled: { label: "Cancelled", cls: "bg-slate-100 text-slate-500" },
 };
-const STATUS_OPTS: SelectOption[] = (Object.keys(STATUS_META) as TransferStatus[]).map((s) => ({ value: s, label: STATUS_META[s].label }));
 
-const BLANK = { status: [] as string[], to: [] as string[], from: [] as string[], date: EMPTY_RANGE as DateRange };
+const BLANK = { to: [] as string[], from: [] as string[], date: EMPTY_RANGE as DateRange };
 // Dashboards default to the last 7 days (Reset clears back to "all" via BLANK).
 const DEFAULTS = { ...BLANK, date: { preset: "7d" } as DateRange };
 type Filters = typeof BLANK;
 
-export default function TransfersTab() {
+// Inside the section: "Pending" (awaiting a decision) vs "Other" (already
+// approved / rejected / cancelled).
+type View = "pending" | "other";
+
+export default function TransfersTab({ onPendingChange }: { onPendingChange?: (n: number) => void } = {}) {
+  const [view, setView] = useState<View>("pending");
   const toast = useToast();
   const confirm = useConfirm();
+  const { isAdmin } = useClient();
+  const filterLayout = useFilterLayout("transfers_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [rows, setRows] = useState<LeadTransfer[]>([]);
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<"direct" | "approval">("approval");
@@ -47,10 +67,14 @@ export default function TransfersTab() {
   const load = useCallback(() => {
     setLoading(true);
     return getLeadTransfers()
-      .then((d) => { setRows(d.transfers ?? []); setMode(d.mode); setCanDecide(d.can_decide); setMyStaffId(d.my_staff_id); })
+      .then((d) => {
+        const all = d.transfers ?? [];
+        setRows(all); setMode(d.mode); setCanDecide(d.can_decide); setMyStaffId(d.my_staff_id);
+        onPendingChange?.(all.filter((r) => r.status === "pending").length);
+      })
       .catch(() => toast.error("Could not load transfers."))
       .finally(() => setLoading(false));
-  }, [toast]);
+  }, [toast, onPendingChange]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { getStaff().then((d) => setStaff(d.staff ?? [])).catch(() => {}); }, []);
 
@@ -59,19 +83,19 @@ export default function TransfersTab() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
-      if (applied.status.length && !applied.status.includes(r.status)) return false;
+      // The active sub-tab decides which statuses show.
+      if (view === "pending" ? r.status !== "pending" : r.status === "pending") return false;
       if (applied.to.length && !applied.to.includes(String(r.to_staff_id))) return false;
       if (applied.from.length && !applied.from.includes(String(r.from_staff_id ?? ""))) return false;
       if (!inDateRange(r.created_at, applied.date)) return false;
       if (q && ![r.lead_name, r.from_name, r.to_name, r.requested_name, r.reason].some((v) => (v ?? "").toLowerCase().includes(q))) return false;
       return true;
     });
-  }, [rows, applied, search]);
+  }, [rows, applied, search, view]);
 
-  const appliedCount = [applied.status.length, applied.to.length, applied.from.length, rangeActive(applied.date)].filter(Boolean).length;
+  const appliedCount = [applied.to.length, applied.from.length, rangeActive(applied.date)].filter(Boolean).length;
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(applied), [draft, applied]);
-  const draftSet = !!(draft.status.length || draft.to.length || draft.from.length || rangeActive(draft.date));
-  const pendingCount = rows.filter((r) => r.status === "pending").length;
+  const draftSet = !!(draft.to.length || draft.from.length || rangeActive(draft.date));
 
   async function act(id: number, fn: () => Promise<unknown>, ok: string) {
     setBusy(id);
@@ -107,18 +131,30 @@ export default function TransfersTab() {
   ];
 
   return (
-    <div className={filterRailPad(railOpen)}>
+    <div className={filterRailPad(railOpen, filterLayout.placement)}>
+      {/* Pending vs Other (approved / rejected / cancelled) sub-tabs. */}
+      <div className="mb-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-sm">
+        {([["pending", "Pending"], ["other", "Other"]] as [View, string][]).map(([v, lbl]) => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            className={`rounded-md px-3.5 py-1.5 font-medium transition ${view === v ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+          >
+            {lbl}
+          </button>
+        ))}
+      </div>
+
       {/* Toolbar */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-1 items-center gap-2">
-          <div className="flex-shrink-0"><FilterToggle open={railOpen} count={appliedCount} onClick={() => { setDraft(applied); setRailOpen((o) => !o); }} /></div>
+          <div className="flex flex-shrink-0 items-center gap-2"><FilterToggle open={railOpen} count={appliedCount} onClick={() => { setDraft(applied); setRailOpen((o) => !o); }} />{isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}</div>
           <div className="relative w-full max-w-sm">
             <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search lead, rep, reason…" className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 pl-9 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {pendingCount > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700">{pendingCount} pending</span>}
           {canDecide && (
             <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs font-medium" title="How transfers are applied">
               {(["approval", "direct"] as const).map((m) => (
@@ -133,8 +169,8 @@ export default function TransfersTab() {
 
       {!loading && filtered.length > 0 && (
         <PerfSummary
-          title="Counselor performance — transfers received"
-          totalLabel="Total transfers" totalSub="In the selected period"
+          title={view === "pending" ? "Counselor performance — pending transfers" : "Counselor performance — transfers received"}
+          totalLabel={view === "pending" ? "Pending transfers" : "Total transfers"} totalSub="In the selected period"
           activeLabel="Active counselors" topLabel="Top counselor" unit="transfers" color="#6366f1"
           rows={Object.values(filtered.reduce((acc, r) => {
             const name = r.to_name ?? "Unknown";
@@ -147,7 +183,10 @@ export default function TransfersTab() {
       {loading ? (
         <Spinner />
       ) : filtered.length === 0 ? (
-        <EmptyState title={rows.length ? "No matching transfers" : "No transfers yet"} hint={rows.length ? "Try clearing the filters." : "Transfer a lead from the Leads tab to start."} />
+        <EmptyState
+          title={rows.length ? (view === "pending" ? "No pending transfers" : "No processed transfers") : "No transfers yet"}
+          hint={rows.length ? (view === "pending" ? "Nothing is awaiting a decision right now." : "Approved, rejected & cancelled transfers show here.") : "Transfer a lead from the Leads tab to start."}
+        />
       ) : (
         <DataTable
           tableKey="lead_transfers"
@@ -190,11 +229,11 @@ export default function TransfersTab() {
         onApply={() => { setApplied(draft); setRailOpen(false); }}
         applyDisabled={!dirty}
         applyLabel="Apply"
+        placement={filterLayout.placement}
       >
-        <div className="space-y-1.5"><FilterLabel>Transfer date</FilterLabel><DateRangeFilter ariaLabel="Transfer date" value={draft.date} onChange={(v) => setDraft((d) => ({ ...d, date: v }))} /></div>
-        <div className="space-y-1.5"><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={draft.status} onChange={(v) => setDraft((d) => ({ ...d, status: v }))} options={STATUS_OPTS} placeholder="Any status" searchPlaceholder="Search…" /></div>
-        <div className="space-y-1.5"><FilterLabel>Transferred to</FilterLabel><MultiSelect ariaLabel="To" value={draft.to} onChange={(v) => setDraft((d) => ({ ...d, to: v }))} options={staffOpts} placeholder="Anyone" searchPlaceholder="Search team…" /></div>
-        <div className="space-y-1.5"><FilterLabel>Transferred from</FilterLabel><MultiSelect ariaLabel="From" value={draft.from} onChange={(v) => setDraft((d) => ({ ...d, from: v }))} options={staffOpts} placeholder="Anyone" searchPlaceholder="Search team…" /></div>
+        {!filterLayout.isHidden("date") && <div className="space-y-1.5" style={{ order: fo("date") }}><FilterLabel>Transfer date</FilterLabel><DateRangeFilter ariaLabel="Transfer date" value={draft.date} onChange={(v) => setDraft((d) => ({ ...d, date: v }))} /></div>}
+        {!filterLayout.isHidden("to") && <div className="space-y-1.5" style={{ order: fo("to") }}><FilterLabel>Transferred to</FilterLabel><MultiSelect ariaLabel="To" value={draft.to} onChange={(v) => setDraft((d) => ({ ...d, to: v }))} options={staffOpts} placeholder="Anyone" searchPlaceholder="Search team…" /></div>}
+        {!filterLayout.isHidden("from") && <div className="space-y-1.5" style={{ order: fo("from") }}><FilterLabel>Transferred from</FilterLabel><MultiSelect ariaLabel="From" value={draft.from} onChange={(v) => setDraft((d) => ({ ...d, from: v }))} options={staffOpts} placeholder="Anyone" searchPlaceholder="Search team…" /></div>}
       </FilterRail>
     </div>
   );

@@ -35,6 +35,14 @@ import { FieldSetupDrawer } from "../FieldSetupDrawer";
 import RichTextEditor from "../../admin/RichTextEditor";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "assignee", label: "Assignee" },
+  { id: "type", label: "Type" },
+  { id: "priority", label: "Priority" },
+  { id: "due", label: "Due date" },
+];
 
 interface Draft {
   id?: number;
@@ -183,6 +191,13 @@ function initials(name: string) {
 export default function TasksPage() {
   const toast = useToast();
   const { refreshNotifications, isAdmin, can } = useClient();
+  const filterLayout = useFilterLayout("tasks_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [stages, setStages] = useState<TaskStage[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
@@ -428,12 +443,13 @@ export default function TasksPage() {
       {/* Toolbar — instant search + a Filters panel (assignee / type / priority /
           due date), mirroring the Announcements section. Nothing applies until
           “Apply”; the search box filters as you type. */}
-      <div className={`mb-4 flex flex-wrap items-center gap-2 ${filterRailPad(filterOpen)}`}>
+      <div className={`mb-4 flex flex-wrap items-center gap-2 ${filterRailPad(filterOpen, filterLayout.placement)}`}>
         <div className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2">
           <svg className="h-4 w-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.2-3.2" strokeLinecap="round" /></svg>
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search tasks" className="w-40 bg-transparent text-sm focus:outline-none" />
         </div>
         <FilterToggle open={filterOpen} count={appliedFilterCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+        {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
         {(taskFiltersActive(applied) || query.trim()) && (
           <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>
         )}
@@ -444,7 +460,7 @@ export default function TasksPage() {
         </div>
       </div>
 
-      <div className={filterRailPad(filterOpen)}>
+      <div className={filterRailPad(filterOpen, filterLayout.placement)}>
 
       {tasks === null ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -567,23 +583,32 @@ export default function TasksPage() {
         resetDisabled={!taskFiltersActive(filters)}
         onApply={applyFilters}
         applyDisabled={!draftDirty}
+        placement={filterLayout.placement}
       >
-        <div className="space-y-1.5">
+        {!filterLayout.isHidden("assignee") && (
+        <div className="space-y-1.5" style={{ order: fo("assignee") }}>
           <FilterLabel>Assignee</FilterLabel>
           <MultiSelect ariaLabel="Filter by assignee" value={filters.assignee} onChange={(v) => setFilter("assignee", v)} options={assigneeOptions} placeholder="Anyone" searchPlaceholder="Search people…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("type") && (
+        <div className="space-y-1.5" style={{ order: fo("type") }}>
           <FilterLabel>Type</FilterLabel>
           <MultiSelect ariaLabel="Filter by type" value={filters.type} onChange={(v) => setFilter("type", v)} options={TYPE_OPTIONS} placeholder="Any type" searchPlaceholder="Search…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("priority") && (
+        <div className="space-y-1.5" style={{ order: fo("priority") }}>
           <FilterLabel>Priority</FilterLabel>
           <MultiSelect ariaLabel="Filter by priority" value={filters.priority} onChange={(v) => setFilter("priority", v)} options={PRIORITY_OPTIONS} placeholder="Any priority" searchPlaceholder="Search…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("due") && (
+        <div className="space-y-1.5" style={{ order: fo("due") }}>
           <FilterLabel>Due date</FilterLabel>
           <DateRangeFilter ariaLabel="Due date" value={filters.due} onChange={(v) => setFilter("due", v)} />
         </div>
+        )}
       </FilterRail>
 
       {/* ---- Create / edit drawer ---- */}

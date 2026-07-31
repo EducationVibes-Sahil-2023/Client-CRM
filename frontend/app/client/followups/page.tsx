@@ -9,10 +9,21 @@ import { useToast } from "../../components/toast/ToastProvider";
 import { useClient } from "../ClientContext";
 import { Card, PageHeader, EmptyState, SkeletonStats, SkeletonBlock } from "../../admin/ui";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
 import { DataTable, type Column } from "../../admin/DataTable";
 import { DonutChart } from "../../admin/Charts";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, resolveDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
+
+// Admin-reorderable filter blocks for this section (client-wide layout).
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "date", label: "Follow-up date" },
+  { id: "source", label: "Lead source" },
+  { id: "status", label: "Lead status" },
+  { id: "dept", label: "Department" },
+  { id: "office", label: "Office" },
+  { id: "assign", label: "Assign" },
+];
 
 // ---- colour helpers ----
 const HEX: Record<string, string> = {
@@ -397,6 +408,15 @@ const cardTitle = "text-sm font-semibold text-slate-700";
 
 export default function ClientFollowups() {
   const toast = useToast();
+  const { isAdmin } = useClient();
+  // Client-wide admin filter layout (order + hide + placement) for this section.
+  const filterLayout = useFilterLayout("followups_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [dash, setDash] = useState<FollowupDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   // Draft filters (what the user is editing) only take effect on "Apply" →
@@ -494,11 +514,14 @@ export default function ClientFollowups() {
     <>
       <PageHeader title="Follow Up Tracker" subtitle="Stay on top of every lead follow-up — upcoming, due today, overdue and completed." />
 
-      <div className={`space-y-6 ${filterRailPad(filterOpen)}`}>
+      <div className={`space-y-6 ${filterRailPad(filterOpen, filterLayout.placement)}`}>
         {/* Filters — a Filters toggle opens the right-side rail; nothing applies
             until “Apply”, mirroring the Announcements section. */}
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <FilterToggle open={filterOpen} count={appliedCount} onClick={() => { if (!filterOpen) openFilters(); else setFilterOpen(false); }} />
+          <div className="flex items-center gap-2">
+            <FilterToggle open={filterOpen} count={appliedCount} onClick={() => { if (!filterOpen) openFilters(); else setFilterOpen(false); }} />
+            {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
+          </div>
           {(draftSet || appliedActive) && (
             <button onClick={resetFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>
           )}
@@ -513,16 +536,19 @@ export default function ClientFollowups() {
           onApply={applyFilters}
           applyDisabled={loading}
           applying={loading}
+          placement={filterLayout.placement}
         >
-          <div className="space-y-1.5">
+          {!filterLayout.isHidden("date") && (
+          <div className="space-y-1.5" style={{ order: fo("date") }}>
             <FilterLabel>Follow-up date</FilterLabel>
             <DateRangeFilter ariaLabel="Follow-up date range" value={range} onChange={setRange} future />
           </div>
-          <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
-          <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
-          <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
-          <div className="space-y-1.5"><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>
-          <div className="space-y-1.5"><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>
+          )}
+          {!filterLayout.isHidden("source") && <div className="space-y-1.5" style={{ order: fo("source") }}><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={fSource} onChange={setFSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>}
+          {!filterLayout.isHidden("status") && <div className="space-y-1.5" style={{ order: fo("status") }}><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={fStatus} onChange={setFStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>}
+          {!filterLayout.isHidden("dept") && <div className="space-y-1.5" style={{ order: fo("dept") }}><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={fDept} onChange={setFDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>}
+          {!filterLayout.isHidden("office") && <div className="space-y-1.5" style={{ order: fo("office") }}><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={fOffice} onChange={setFOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>}
+          {!filterLayout.isHidden("assign") && <div className="space-y-1.5" style={{ order: fo("assign") }}><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={fAssign} onChange={setFAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>}
         </FilterRail>
 
         {loading && !dash ? (

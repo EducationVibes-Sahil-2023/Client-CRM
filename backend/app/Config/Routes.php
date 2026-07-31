@@ -18,6 +18,18 @@ $routes->post('demo-request', 'PublicController::demoRequest');
 // authenticated by a per-client API key (header X-API-Key / Bearer / api_key).
 $routes->post('calls/ingest', 'CallIngest::store');
 
+// Public Web-to-Lead form: render config + submit. Not session-based — the opaque
+// token resolves its owning client via the main-DB web_form_index, and the lead is
+// written to that client's tenant DB. Embedded via <iframe> on external sites.
+$routes->get('public/forms/(:segment)', 'WebFormPublic::show/$1');
+$routes->post('public/forms/(:segment)', 'WebFormPublic::submit/$1');
+
+// Facebook Lead Ads webhook (app-level, sessionless). GET = verification handshake
+// (echoes hub.challenge); POST = leadgen events signed with the app secret. The
+// page id in the payload resolves the tenant via the main-DB fb_page_index.
+$routes->get('public/fb/webhook', 'FbWebhook::verify');
+$routes->post('public/fb/webhook', 'FbWebhook::receive');
+
 // Authentication
 $routes->group('auth', static function (RouteCollection $routes) {
     $routes->post('login', 'Auth::login');
@@ -176,10 +188,27 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->get('features', 'ClientController::features');
     $routes->get('activity', 'ClientController::activity');
 
+    // Applicant section — read-only view of the external (secondary) DB: clients
+    // + basic details. Admin-only data; the label + URL slug are admin-editable.
+    $routes->get('external-clients', 'ClientController::externalClients');
+    $routes->get('applicant-tracker', 'ClientController::applicantTracker');
+    $routes->get('applicant-tracker-filters', 'ClientController::applicantTrackerFilters');
+    $routes->get('applicant-config', 'ClientController::applicantConfig');
+    $routes->post('applicant-config', 'ClientController::saveApplicantConfig');
+    // Lead → Applicant conversion (admin-configurable button + form + API).
+    $routes->get('convert-config', 'ClientController::convertConfig');
+    $routes->post('convert-config', 'ClientController::saveConvertConfig');
+    $routes->post('leads/(:num)/convert', 'ClientController::convertLead/$1');
+
     // Unified form-field setup (mandatory + custom fields) for any form. GET is
     // readable by the form pages; saving is admin-only (enforced in the method).
     $routes->get('form-setup/(:segment)', 'ClientController::formSetup/$1');
     $routes->post('form-field-settings/(:segment)', 'ClientController::saveFormFieldSettings/$1');
+
+    // Excel Data Hub — generic import column setup for lead|task|team (per-entity
+    // permission enforced in-method; lead reuses the leads import config).
+    $routes->get('import-setup/(:segment)', 'ClientController::importSetup/$1');
+    $routes->post('import-setup/(:segment)', 'ClientController::saveImportSetup/$1');
 
     // Reports hub — gated by the super-admin 'reports' feature, then by the
     // per-role 'reports' module permission inside each method.
@@ -236,6 +265,28 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->get('followup-dashboard', 'ClientController::followupDashboard');
     });
 
+    // Facebook Lead Ads integration — admin-only (enforced in FacebookController::guard()).
+    // Not plan-gated: availability is an admin decision, like the Excel Data Hub.
+    $routes->get('facebook', 'FacebookController::index');
+    $routes->post('facebook/config', 'FacebookController::saveConfig');
+    $routes->get('facebook/oauth-url', 'FacebookController::oauthUrl');
+    $routes->post('facebook/connect', 'FacebookController::connect');
+    $routes->get('facebook/pages/(:num)/forms', 'FacebookController::pageForms/$1');
+    $routes->post('facebook/forms', 'FacebookController::saveForm');
+    $routes->post('facebook/forms/(:num)/delete', 'FacebookController::deleteForm/$1');
+    $routes->post('facebook/forms/(:num)/sync', 'FacebookController::syncForm/$1');
+    $routes->post('facebook/disconnect', 'FacebookController::disconnect');
+
+    // Google Sheets → Leads sync — admin-only (enforced in-method). Per-client
+    // service account; on-demand + `php spark sheets:sync` cron.
+    $routes->get('google-sheets', 'GoogleSheetsController::index');
+    $routes->post('google-sheets/config', 'GoogleSheetsController::saveConfig');
+    $routes->post('google-sheets/preview', 'GoogleSheetsController::preview');
+    $routes->post('google-sheets', 'GoogleSheetsController::saveSheet');
+    $routes->get('google-sheets/(:num)', 'GoogleSheetsController::sheet/$1');
+    $routes->post('google-sheets/(:num)/delete', 'GoogleSheetsController::deleteSheet/$1');
+    $routes->post('google-sheets/(:num)/sync', 'GoogleSheetsController::syncSheet/$1');
+
     // Email (Gmail/IMAP) + Google Calendar integrations (gated by 'email_config')
     $routes->group('', ['filter' => 'feature:email_config'], static function (RouteCollection $routes) {
         $routes->get('integrations/gmail', 'ClientController::gmailSettings');
@@ -266,6 +317,8 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->post('staff/(:num)/reassign-leads', 'ClientController::reassignStaffLeads/$1');
     $routes->post('staff/(:num)/login-as', 'ClientController::loginAsStaff/$1');
     $routes->post('staff/(:num)/delete', 'ClientController::deleteStaff/$1');
+    // Excel Data Hub — bulk import of team members from a mapped sheet.
+    $routes->post('team/import', 'ClientController::importTeam');
 
     // Lead setup (statuses, marketing types, sources, lead/conversion types).
     // Not a separate feature — it comes with the 'leads' feature.
@@ -288,6 +341,14 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('lead-notes/(:num)/delete', 'ClientController::deleteNote/$1');
         $routes->post('leads/(:num)', 'ClientController::updateLead/$1');
         $routes->post('leads/(:num)/delete', 'ClientController::deleteLead/$1');
+
+        // Web to Lead — admin-built embeddable forms (admin-only, enforced in-method).
+        $routes->get('web-forms', 'ClientController::webForms');
+        $routes->post('web-forms', 'ClientController::createWebForm');
+        $routes->get('web-forms/(:num)', 'ClientController::webForm/$1');
+        $routes->post('web-forms/(:num)', 'ClientController::updateWebForm/$1');
+        $routes->post('web-forms/(:num)/delete', 'ClientController::deleteWebForm/$1');
+        $routes->post('web-forms/(:num)/api-key', 'ClientController::regenerateWebFormApiKey/$1');
 
         $routes->get('lead-statuses', 'ClientController::leadStatuses');
         $routes->post('lead-statuses', 'ClientController::createLeadStatus');
@@ -362,6 +423,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->get('task-setup', 'ClientController::taskSetup', ['filter' => 'feature:tasks']);
     $routes->post('task-field-settings', 'ClientController::saveTaskFieldSettings', ['filter' => 'feature:tasks']);
     $routes->post('tasks', 'ClientController::createTask', ['filter' => 'feature:tasks']);
+    $routes->post('tasks/import', 'ClientController::importTasks', ['filter' => 'feature:tasks']);
     $routes->get('tasks/(:num)', 'ClientController::task/$1', ['filter' => 'feature:tasks']);
     $routes->post('tasks/(:num)', 'ClientController::updateTask/$1', ['filter' => 'feature:tasks']);
     $routes->post('tasks/(:num)/delete', 'ClientController::deleteTask/$1', ['filter' => 'feature:tasks']);

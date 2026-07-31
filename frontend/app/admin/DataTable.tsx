@@ -136,6 +136,11 @@ interface DataTableProps<T> {
   onSelectionChange?: (keys: Set<string | number>) => void;
   /** Pagination layout: "between" (default) or "right" to group controls right. */
   pageAlign?: "between" | "right";
+  /** Freeze (pin) the first N columns while scrolling horizontally (0–5). */
+  frozenCols?: number;
+  /** Store the column layout CLIENT-WIDE (admin sets it for everyone) instead
+   *  of per-user. Only the client admin can change it. */
+  sharedConfig?: boolean;
   /** When true, the Columns menu lets the user rename column headers (client admin). */
   canRenameColumns?: boolean;
 }
@@ -179,6 +184,8 @@ export function DataTable<T>({
   onSelectionChange,
   pageAlign = "between",
   canRenameColumns,
+  frozenCols = 0,
+  sharedConfig = false,
 }: DataTableProps<T>) {
   const [internalView, setInternalView] = useState<DataView>(defaultView);
   const [query, setQuery] = useState(initialSearch);
@@ -187,7 +194,7 @@ export function DataTable<T>({
   const setView = setInternalView;
 
   // Per-user column layout (only active when tableKey is set).
-  const tc = useTableConfig(tableKey, columns, canRenameColumns);
+  const tc = useTableConfig(tableKey, columns, canRenameColumns, sharedConfig);
   const customize = !!tableKey;
   const cols = tc.columns;
 
@@ -341,9 +348,37 @@ export function DataTable<T>({
   };
   const cellNowrap = nowrap ? "whitespace-nowrap" : "";
 
+  // Freeze (pin) the first N columns. We measure the rendered header cell widths
+  // to compute each frozen column's left offset, then make those header + body
+  // cells `position: sticky` so they stay put while the rest scrolls sideways.
+  const frozen = Math.min(Math.max(Math.floor(frozenCols), 0), 5);
+  const headCellRefs = useRef<(HTMLTableCellElement | null)[]>([]);
+  const [frozenLefts, setFrozenLefts] = useState<number[]>([]);
+  useEffect(() => {
+    // Only ever replace the array when the numbers actually change — this effect's
+    // deps (cols/displayRows) get fresh references each render, so returning a new
+    // array unconditionally would loop (set state → re-render → re-run → …).
+    const same = (a: number[], b: number[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+    if (!frozen) { setFrozenLefts((prev) => (prev.length ? [] : prev)); return; }
+    const measure = () => {
+      const out: number[] = [];
+      let acc = selectable ? 44 : 0;
+      for (let i = 0; i < frozen; i++) { out.push(acc); acc += headCellRefs.current[i]?.offsetWidth ?? 0; }
+      setFrozenLefts((prev) => (same(prev, out) ? prev : out));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [frozen, selectable, cols, displayRows]);
+  // Sticky style for the frozen column at data-index `ci` (or undefined).
+  const frozenCell = (ci: number, header: boolean): React.CSSProperties | undefined =>
+    ci < frozen && frozenLefts[ci] !== undefined
+      ? { position: "sticky", left: frozenLefts[ci], zIndex: header ? 21 : 11, background: header ? "var(--table-header-bg)" : "var(--surface-bg)", boxShadow: ci === frozen - 1 ? "8px 0 8px -8px rgba(15,23,42,0.12)" : undefined }
+      : undefined;
+
   const activeView: DataView = card ? view : "list";
   const showToolbar = !isControlled && !!(card || searchKeys || toolbar);
-  const shell = "overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm";
+  const shell = "overflow-hidden rounded-2xl border border-slate-200 dt-surface shadow-sm";
 
   const pager = !loading && visible.length > 0 && (
     onPage ? (
@@ -378,7 +413,7 @@ export function DataTable<T>({
         <div className="overflow-x-auto">
           <table className="w-full text-[13px]">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              <tr className="dt-head border-b border-slate-100 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 {selectable && <th className="w-11 px-4 py-2.5" />}
                 {cols.map((c) => (
                   <th key={c.key} className={`px-4 py-2.5 ${c.className ?? ""}`}><span className="truncate">{c.header}</span></th>
@@ -438,27 +473,30 @@ export function DataTable<T>({
               </colgroup>
             )}
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              <tr className="dt-head border-b border-slate-100 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 {selectable && (
-                  <th className="sticky left-0 z-20 w-11 bg-slate-50 px-4 py-2.5">
+                  <th className="dt-sticky-head sticky left-0 z-20 w-11 px-4 py-2.5">
                     <input
                       type="checkbox"
                       aria-label="Select all on this page"
                       checked={!!allSelected}
                       ref={(el) => { if (el) el.indeterminate = !!someSelected; }}
                       onChange={toggleAll}
+                      style={{ accentColor: "var(--table-accent)" }}
                       className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                     />
                   </th>
                 )}
-                {cols.map((c) => {
+                {cols.map((c, ci) => {
                   const isSorted = effectiveSort?.key === c.key;
                   const sortableHere = isColSortable(c.key);
                   const isOver = customize && overCol === c.key && dragCol !== c.key;
+                  const fz = frozenCell(ci, true);
                   return (
                     <th
                       key={c.key}
-                      style={customize ? { textAlign: c.resolvedAlign } : undefined}
+                      ref={(el) => { headCellRefs.current[ci] = el; }}
+                      style={{ ...(customize ? { textAlign: c.resolvedAlign } : {}), ...fz }}
                       draggable={customize && resizingKey === null}
                       onDragStart={customize ? () => setDragCol(c.key) : undefined}
                       onDragOver={customize ? (e) => { if (dragCol && dragCol !== c.key) { e.preventDefault(); setOverCol(c.key); } } : undefined}
@@ -476,8 +514,8 @@ export function DataTable<T>({
                         >
                           {c.header}
                           <span className="flex flex-col -space-y-1">
-                            <svg className={`h-2 w-2 ${isSorted && effectiveSort?.dir === "asc" ? "text-indigo-600" : "text-slate-300"}`} fill="currentColor" viewBox="0 0 20 20"><path d="M10 4l5 6H5z" /></svg>
-                            <svg className={`h-2 w-2 ${isSorted && effectiveSort?.dir === "desc" ? "text-indigo-600" : "text-slate-300"}`} fill="currentColor" viewBox="0 0 20 20"><path d="M10 16l-5-6h10z" /></svg>
+                            <svg className="h-2 w-2 text-slate-300" style={isSorted && effectiveSort?.dir === "asc" ? { color: "var(--table-accent)" } : undefined} fill="currentColor" viewBox="0 0 20 20"><path d="M10 4l5 6H5z" /></svg>
+                            <svg className="h-2 w-2 text-slate-300" style={isSorted && effectiveSort?.dir === "desc" ? { color: "var(--table-accent)" } : undefined} fill="currentColor" viewBox="0 0 20 20"><path d="M10 16l-5-6h10z" /></svg>
                           </span>
                         </button>
                       ) : (
@@ -498,7 +536,7 @@ export function DataTable<T>({
                   );
                 })}
                 {(rowActions || quickActions) && (
-                  <th className="sticky right-0 z-20 whitespace-nowrap bg-slate-50 px-4 py-2.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.12)]">Actions</th>
+                  <th className="dt-sticky-head sticky right-0 z-20 whitespace-nowrap px-4 py-2.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.12)]">Actions</th>
                 )}
               </tr>
             </thead>
@@ -507,11 +545,11 @@ export function DataTable<T>({
                 <tr
                   key={getKey(row)}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}
-                  className={`group border-b border-slate-100 transition last:border-0 hover:bg-indigo-50/40 ${selectable && selected.has(getKey(row)) ? "bg-indigo-50/40" : ""} ${onRowClick ? "cursor-pointer" : ""}`}
+                  className={`dt-row group border-b border-slate-100 last:border-0 ${selectable && selected.has(getKey(row)) ? "dt-row-selected" : ""} ${onRowClick ? "cursor-pointer" : ""}`}
                 >
                   {selectable && (
                     <td
-                      className={`sticky left-0 z-10 w-11 px-4 py-2 align-middle transition group-hover:bg-[#f8faff] ${selectable && selected.has(getKey(row)) ? "bg-[#f8faff]" : "bg-white"}`}
+                      className={`sticky left-0 z-10 w-11 px-4 py-2 align-middle ${selectable && selected.has(getKey(row)) ? "dt-sticky-selected" : "dt-sticky"}`}
                       onClick={(e) => e.stopPropagation()}
                     >
                       <input
@@ -519,22 +557,26 @@ export function DataTable<T>({
                         aria-label="Select row"
                         checked={selected.has(getKey(row))}
                         onChange={() => toggleRow(getKey(row))}
+                        style={{ accentColor: "var(--table-accent)" }}
                         className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                       />
                     </td>
                   )}
-                  {cols.map((c) => (
+                  {cols.map((c, ci) => {
+                    const fz = frozenCell(ci, false);
+                    return (
                     <td
                       key={c.key}
-                      style={customize ? { textAlign: c.resolvedAlign } : undefined}
-                      className={`px-4 py-2 align-middle ${cellNowrap} ${customize && !nowrap ? "truncate" : ""} ${c.className ?? ""}`}
+                      style={{ ...(customize ? { textAlign: c.resolvedAlign } : {}), ...fz }}
+                      className={`px-4 py-2 align-middle ${cellNowrap} ${customize && !nowrap ? "truncate" : ""} ${c.className ?? ""} ${fz ? "dt-frozen" : ""}`}
                     >
                       {c.render(row)}
                     </td>
-                  ))}
+                    );
+                  })}
                   {(rowActions || quickActions) && (
                     <td
-                      className={`sticky right-0 z-10 whitespace-nowrap px-4 py-2 shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.12)] transition group-hover:bg-[#f8faff] ${selectable && selected.has(getKey(row)) ? "bg-[#f8faff]" : "bg-white"}`}
+                      className={`sticky right-0 z-10 whitespace-nowrap px-4 py-2 shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.12)] ${selectable && selected.has(getKey(row)) ? "dt-sticky-selected" : "dt-sticky"}`}
                       onClick={(e) => e.stopPropagation()}
                     >
                       <div className="flex items-center justify-end gap-1">

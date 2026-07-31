@@ -10,7 +10,9 @@ import {
   readNotification,
   type AppNotification,
 } from "../lib/chat";
-import { getBranding, getFeatures, getMe, pollReminders, getAnnouncementsUnread, markAllAnnouncementsRead, stopImpersonation, type FeatureMap, type LimitMap, type Perm, type UsageMap } from "../lib/client";
+import { getBranding, getFeatures, getMe, pollReminders, getAnnouncementsUnread, markAllAnnouncementsRead, stopImpersonation, getApplicantConfig, type ApplicantConfig, type FeatureMap, type LimitMap, type Perm, type UsageMap } from "../lib/client";
+
+const DEFAULT_APPLICANT: ApplicantConfig = { label: "Applicant", slug: "applicant" };
 import { requestNotifyPermission, notifyMessage } from "../lib/notify";
 import { subscribeToPush } from "../lib/push";
 import { DEFAULT_BRANDING, resolvePageSize, resolveLoaderStyle, type Branding, type LoaderStyle } from "../lib/theme";
@@ -63,6 +65,10 @@ interface Ctx {
   // client" (kind "client") or an admin "view as team member" (kind "staff").
   impersonation: { name: string | null; client: string | null; kind: "client" | "staff"; viewing: string | null } | null;
   exitImpersonation: () => void;
+  // Applicant section — admin-editable display name + URL slug.
+  applicant: ApplicantConfig;
+  applicantLoaded: boolean;
+  setApplicant: (c: ApplicantConfig) => void;
   // branding / appearance
   branding: Branding;
   brandingLoaded: boolean;
@@ -174,6 +180,17 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
     (module: string, action: keyof Perm = "view") => isAdmin || !!permissions[module]?.[action],
     [isAdmin, permissions],
   );
+
+  // Applicant section config (admin-editable label + URL slug). Loaded once so
+  // the sidebar can build the nav link and the dynamic route can validate itself.
+  const [applicant, setApplicant] = useState<ApplicantConfig>(DEFAULT_APPLICANT);
+  const [applicantLoaded, setApplicantLoaded] = useState(false);
+  useEffect(() => {
+    getApplicantConfig()
+      .then((c) => setApplicant({ label: c.label || DEFAULT_APPLICANT.label, slug: c.slug || DEFAULT_APPLICANT.slug, colors: c.colors ?? {}, frozen: c.frozen ?? 1 }))
+      .catch(() => {})
+      .finally(() => setApplicantLoaded(true));
+  }, []);
 
   // Load the client's branding/appearance config once (themes the whole panel).
   useEffect(() => {
@@ -366,6 +383,9 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
         can,
         impersonation,
         exitImpersonation,
+        applicant,
+        applicantLoaded,
+        setApplicant,
         branding,
         brandingLoaded,
         updateBranding: (b: Branding) => {

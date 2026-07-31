@@ -30,6 +30,15 @@ import { FieldRow, inputCls } from "../../admin/clients/formKit";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "status", label: "Status" },
+  { id: "group", label: "Group" },
+  { id: "allocation", label: "Allocation" },
+  { id: "managedBy", label: "Managed by" },
+  { id: "location", label: "Location" },
+];
 import { FieldSetupDrawer } from "../FieldSetupDrawer";
 import RichTextEditor from "../../admin/RichTextEditor";
 import { DonutChart, BarChart } from "../../admin/Charts";
@@ -127,6 +136,13 @@ export default function AssetsPage() {
   const toast = useToast();
   const confirm = useConfirm();
   const { defaultPageSize, isAdmin, can } = useClient();
+  const filterLayout = useFilterLayout("assets_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [assets, setAssets] = useState<Asset[] | null>(null);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -401,7 +417,7 @@ export default function AssetsPage() {
           <SkeletonBlock className="h-96" />
         </div>
       ) : (
-        <div className={`space-y-5 ${filterRailPad(filterOpen)}`}>
+        <div className={`space-y-5 ${filterRailPad(filterOpen, filterLayout.placement)}`}>
           {/* KPI cards */}
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <StatCard label="Total assets" value={String(stats.total)} tone="slate" icon="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-14L4 7m8 4v10M4 7v10l8 4" />
@@ -452,6 +468,7 @@ export default function AssetsPage() {
               <input value={query} onChange={(e) => { setQuery(e.target.value); resetPaging(); }} placeholder="Search assets, code, group, holder…" className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
             </div>
             <FilterToggle open={filterOpen} count={appliedFilterCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+            {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
             {(assetFiltersActive(applied) || query.trim()) && (
               <button onClick={clearFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear</button>
             )}
@@ -582,27 +599,38 @@ export default function AssetsPage() {
         resetDisabled={!assetFiltersActive(filters)}
         onApply={applyFilters}
         applyDisabled={!draftDirty}
+        placement={filterLayout.placement}
       >
-        <div className="space-y-1.5">
+        {!filterLayout.isHidden("status") && (
+        <div className="space-y-1.5" style={{ order: fo("status") }}>
           <FilterLabel>Status</FilterLabel>
           <MultiSelect ariaLabel="Filter by status" value={filters.status} onChange={(v) => setFilter("status", v)} options={statusOptions} placeholder="Any status" searchPlaceholder="Search status…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("group") && (
+        <div className="space-y-1.5" style={{ order: fo("group") }}>
           <FilterLabel>Group</FilterLabel>
           <MultiSelect ariaLabel="Filter by group" value={filters.group} onChange={(v) => setFilter("group", v)} options={groupOptions} placeholder="Any group" searchPlaceholder="Search groups…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("allocation") && (
+        <div className="space-y-1.5" style={{ order: fo("allocation") }}>
           <FilterLabel>Allocation</FilterLabel>
           <MultiSelect ariaLabel="Filter by allocation" value={filters.allocation} onChange={(v) => setFilter("allocation", v)} options={ALLOCATION_OPTIONS} placeholder="Any" searchPlaceholder="Search…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("managedBy") && (
+        <div className="space-y-1.5" style={{ order: fo("managedBy") }}>
           <FilterLabel>Managed by</FilterLabel>
           <MultiSelect ariaLabel="Filter by manager" value={filters.managedBy} onChange={(v) => setFilter("managedBy", v)} options={managedByOptions} placeholder="Anyone" searchPlaceholder="Search people…" />
         </div>
-        <div className="space-y-1.5">
+        )}
+        {!filterLayout.isHidden("location") && (
+        <div className="space-y-1.5" style={{ order: fo("location") }}>
           <FilterLabel>Location</FilterLabel>
           <MultiSelect ariaLabel="Filter by location" value={filters.location} onChange={(v) => setFilter("location", v)} options={locationOptions} placeholder="Any location" searchPlaceholder="Search locations…" />
         </div>
+        )}
       </FilterRail>
 
       {/* Create / edit — right-side drawer */}

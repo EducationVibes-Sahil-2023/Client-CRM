@@ -9,7 +9,7 @@ import ChatLauncher from "../components/chat/ChatLauncher";
 import type { AppNotification } from "../lib/chat";
 import { globalSearch, type SearchGroup } from "../lib/client";
 import { timeAgo } from "../lib/datetime";
-import { brandCssVars, fontStack, fontSizePx } from "../lib/theme";
+import { brandCssVars, surfaceCssVars, fontStack, fontSizePx } from "../lib/theme";
 import { API_URL } from "../lib/api";
 
 /** Icon + tint per notification type. */
@@ -279,7 +279,7 @@ function AnnouncementBell() {
 function Topbar() {
   const { toggleCollapsed, setMobileOpen, user } = useClient();
   return (
-    <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-slate-200 bg-white px-4 sm:px-6">
+    <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-slate-200 px-4 sm:px-6" style={{ background: "var(--surface-bg)" }}>
       <button onClick={toggleCollapsed} className="hidden h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 lg:flex" aria-label="Toggle sidebar">
         <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" /></svg>
       </button>
@@ -358,7 +358,15 @@ function Shell({ children }: { children: React.ReactNode }) {
   }, []);
 
   const dark = branding.theme_mode === "dark" || (branding.theme_mode === "system" && systemDark);
-  const style = { ...brandCssVars(branding.brand_color), "--app-font": fontStack(branding.font_family) } as React.CSSProperties;
+  // Brand scale + custom surface colours (surfaces apply in light mode only —
+  // surfaceCssVars returns {} in dark so the fixed dark palette wins) + the panel
+  // background, so the shell itself adopts the chosen page colour.
+  const style = {
+    ...brandCssVars(branding.brand_color),
+    ...surfaceCssVars(branding, dark),
+    "--app-font": fontStack(branding.font_family),
+    background: "var(--panel-bg)",
+  } as React.CSSProperties;
 
   // Mirror the brand scale + density onto the document root while the client
   // panel is mounted, so the *window* scrollbar (which belongs to the root, not
@@ -373,13 +381,18 @@ function Shell({ children }: { children: React.ReactNode }) {
     // it actually affects rem units (rem is relative to the root, not the shell).
     root.style.fontSize = fontSizePx(branding.font_size);
     root.dataset.clientPanel = dark ? "dark" : "light";
+    // Paint the window (root) background to match the panel so overscroll and the
+    // scrollbar gutter blend in. Light: the admin's colour; dark: the fixed dark.
+    const panelBg = dark ? "#0f172a" : (/^#[0-9a-fA-F]{6}$/.test(branding.panel_bg) ? branding.panel_bg : "#f8fafc");
+    root.style.background = panelBg;
     return () => {
       Object.keys(vars).forEach((k) => root.style.removeProperty(k));
       root.style.removeProperty("--scrollbar-size");
       root.style.removeProperty("font-size");
+      root.style.removeProperty("background");
       delete root.dataset.clientPanel;
     };
-  }, [branding.brand_color, branding.density, branding.font_size, dark]);
+  }, [branding.brand_color, branding.density, branding.font_size, branding.panel_bg, dark]);
 
   // Swap the browser-tab favicon to the client's while the panel is mounted
   // (favicon_url if set, else fall back to the logo). Restored on unmount.
@@ -405,7 +418,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className={`client-shell min-h-screen bg-slate-50 ${dark ? "dark" : ""}`}
+      className={`client-shell min-h-screen ${dark ? "dark" : ""}`}
       data-density={branding.density}
       data-sidebar={branding.sidebar_style}
       style={style}

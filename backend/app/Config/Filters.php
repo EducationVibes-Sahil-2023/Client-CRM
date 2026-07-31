@@ -67,7 +67,11 @@ class Filters extends BaseFilters
         'after' => [
             'pagecache',   // Web Page Caching
             'performance', // Performance Metrics
-            'toolbar',     // Debug Toolbar
+            // 'toolbar' (Debug Toolbar) intentionally disabled: this backend is a
+            // pure JSON API, so the toolbar serves no purpose and — when it runs
+            // in a non-production/dev environment or can't write writable/debugbar
+            // — its run() returns bool and 500s the response
+            // ("Toolbar::run(): Return value must be of type string, bool returned").
             'cors',        // Adds CORS headers to every response.
         ],
     ];

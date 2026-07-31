@@ -34,6 +34,46 @@
   padding-bottom: 0.4rem;
 }
 
+/* ---- Customizable surface & table colours ----
+   Defaults live here (also used by non-shell/admin pages). In LIGHT mode the
+   client shell overrides these inline with the admin's chosen colours; in DARK
+   mode the shell emits none and the fixed dark values below (.client-shell.dark)
+   take over. Components read them via var(--panel-bg) etc. */
+:root {
+  --panel-bg: #f8fafc;
+  --surface-bg: #ffffff;
+  --sidebar-bg: #ffffff;
+  --sidebar-text: #475569;
+  --sidebar-icon: #94a3b8;
+  --table-header-bg: #f8fafc;
+  --table-accent: #6366f1;
+  /* A translucent tint of the table accent for hover/selection fills. */
+  --table-accent-soft: color-mix(in srgb, var(--table-accent) 9%, transparent);
+  --table-accent-softer: color-mix(in srgb, var(--table-accent) 5%, transparent);
+}
+
+/* ---- Data table surfaces (driven by the vars above) ----
+   Used by DataTable so its container, header, row hover/selection and sticky
+   (pinned) cells all follow the admin's chosen table colours. Sticky cells must
+   stay OPAQUE (they overlay scrolled content), so their fills mix the accent
+   into the solid surface colour rather than using a translucent tint. */
+.dt-surface { background: var(--surface-bg); }
+.dt-head { background: var(--table-header-bg); }
+.dt-row { transition: background-color 0.15s; }
+.dt-row:hover { background: var(--table-accent-soft); }
+.dt-row-selected { background: var(--table-accent-soft); }
+.dt-sticky { background: var(--surface-bg); }
+.dt-sticky-head { background: var(--table-header-bg); }
+.group:hover .dt-sticky,
+.dt-sticky-selected {
+  background: color-mix(in srgb, var(--table-accent) 9%, var(--surface-bg));
+}
+/* Frozen (pinned) data cells carry an inline background, so the hover fill needs
+   !important to win over it. */
+.group:hover .dt-frozen {
+  background: color-mix(in srgb, var(--table-accent) 9%, var(--surface-bg)) !important;
+}
+
 /* ---- Dark mode ----
    The app is built light-first (no dark: variants in markup), so we remap the
    common neutral surface/text/border utilities under .client-shell.dark. The
@@ -43,6 +83,15 @@
 .client-shell.dark {
   color-scheme: dark;
   background-color: #0f172a;
+  /* Fixed dark palette for the customizable surfaces (overrides the light
+     defaults; the shell emits no inline surface vars in dark mode). */
+  --panel-bg: #0f172a;
+  --surface-bg: #1e293b;
+  --sidebar-bg: #1e293b;
+  --sidebar-text: #b6c2d3;
+  --sidebar-icon: #7c8ba1;
+  --table-header-bg: #182236;
+  --table-accent: #818cf8;
 }
 .client-shell.dark .bg-white { background-color: #1e293b; }
 .client-shell.dark .bg-slate-50 { background-color: #182236; }

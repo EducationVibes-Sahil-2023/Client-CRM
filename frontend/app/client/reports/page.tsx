@@ -12,6 +12,16 @@ import { Card, PageHeader, EmptyState, SkeletonStats, SkeletonBlock } from "../.
 import { DataTable, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useClient } from "../ClientContext";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "created", label: "Created date" },
+  { id: "status", label: "Lead status" },
+  { id: "source", label: "Lead source" },
+  { id: "type", label: "Lead type" },
+  { id: "assign", label: "Assigned to" },
+];
 
 // ---- colour helpers ----
 const HEX: Record<string, string> = {
@@ -59,6 +69,14 @@ type Filters = typeof BLANK;
 
 export default function ReportsPage() {
   const toast = useToast();
+  const { isAdmin } = useClient();
+  const filterLayout = useFilterLayout("reports_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [report, setReport] = useState<ReportKey | null>(null);
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<ReportView | null>(null);
@@ -205,7 +223,7 @@ export default function ReportsPage() {
   // ---- Report view ----
   const def = REPORTS.find((r) => r.key === report)!;
   return (
-    <div className={filterRailPad(railOpen)}>
+    <div className={filterRailPad(railOpen, filterLayout.placement)}>
       <PageHeader
         title={def.label}
         subtitle={def.desc}
@@ -216,6 +234,7 @@ export default function ReportsPage() {
               All reports
             </button>
             <FilterToggle open={railOpen} count={appliedCount} onClick={() => { setDraft(applied); setRailOpen(true); }} />
+            {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
             <button
               onClick={() => view && exportCsv(view.filename, view.csv.headers, view.csv.rows)}
               disabled={!view || view.rows.length === 0}
@@ -268,8 +287,10 @@ export default function ReportsPage() {
         resetDisabled={!draftSet}
         onApply={() => { setApplied(draft); setRailOpen(false); }}
         applyDisabled={!dirty}
+        placement={filterLayout.placement}
       >
-        <div>
+        {!filterLayout.isHidden("created") && (
+        <div style={{ order: fo("created") }}>
           <FilterLabel>Created date</FilterLabel>
           <div className="mt-1 flex items-end gap-2">
             <input type="date" value={draft.from} max={draft.to || undefined} onChange={(e) => setF("from", e.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
@@ -277,10 +298,11 @@ export default function ReportsPage() {
             <input type="date" value={draft.to} min={draft.from || undefined} onChange={(e) => setF("to", e.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15" />
           </div>
         </div>
-        <label className="flex flex-col gap-1"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={draft.status} onChange={(v) => setF("status", v)} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></label>
-        <label className="flex flex-col gap-1"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={draft.source} onChange={(v) => setF("source", v)} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></label>
-        <label className="flex flex-col gap-1"><FilterLabel>Lead type</FilterLabel><MultiSelect ariaLabel="Lead type" value={draft.type} onChange={(v) => setF("type", v)} options={typeOpts} placeholder="All types" searchPlaceholder="Search…" /></label>
-        <label className="flex flex-col gap-1"><FilterLabel>Assigned to</FilterLabel><MultiSelect ariaLabel="Assigned to" value={draft.assign} onChange={(v) => setF("assign", v)} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></label>
+        )}
+        {!filterLayout.isHidden("status") && <label className="flex flex-col gap-1" style={{ order: fo("status") }}><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={draft.status} onChange={(v) => setF("status", v)} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></label>}
+        {!filterLayout.isHidden("source") && <label className="flex flex-col gap-1" style={{ order: fo("source") }}><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={draft.source} onChange={(v) => setF("source", v)} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></label>}
+        {!filterLayout.isHidden("type") && <label className="flex flex-col gap-1" style={{ order: fo("type") }}><FilterLabel>Lead type</FilterLabel><MultiSelect ariaLabel="Lead type" value={draft.type} onChange={(v) => setF("type", v)} options={typeOpts} placeholder="All types" searchPlaceholder="Search…" /></label>}
+        {!filterLayout.isHidden("assign") && <label className="flex flex-col gap-1" style={{ order: fo("assign") }}><FilterLabel>Assigned to</FilterLabel><MultiSelect ariaLabel="Assigned to" value={draft.assign} onChange={(v) => setF("assign", v)} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></label>}
       </FilterRail>
     </div>
   );

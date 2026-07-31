@@ -35,6 +35,16 @@ import { Badge, Drawer, Modal, PageHeader, SkeletonText } from "../../admin/ui";
 import { Avatar, AvatarCell, DataTable, EntityCard, IconButton, RowMenu, type Column, type RowAction } from "../../admin/DataTable";
 import { MultiSelect, SearchSelect, type SelectOption } from "../../admin/SearchSelect";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "role", label: "Role" },
+  { id: "department", label: "Department" },
+  { id: "office", label: "Office" },
+  { id: "leadType", label: "Lead type" },
+  { id: "reportsTo", label: "Reports to" },
+  { id: "status", label: "Status" },
+];
 import { FieldRow, inputCls, isEmail, isPhone } from "../../admin/clients/formKit";
 import RichTextEditor from "../../admin/RichTextEditor";
 
@@ -118,6 +128,13 @@ export default function TeamPage() {
   const toast = useToast();
   const confirm = useConfirm();
   const { limitFor, defaultPageSize, isAdmin, can } = useClient();
+  const filterLayout = useFilterLayout("team_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const staffLimit = limitFor("team"); // null = unlimited
   const [staff, setStaff] = useState<Staff[] | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
@@ -509,6 +526,7 @@ export default function TeamPage() {
           search stays instant. Nothing applies until “Apply”. */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <FilterToggle open={filterOpen} count={appliedCount} onClick={() => { if (!filterOpen) setFilters(applied); setFilterOpen((o) => !o); }} />
+        {isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}
         <div className="flex items-center gap-3">
           <p className="text-xs text-slate-400">
             {filteredStaff.length} of {staff?.length ?? 0} staff{teamFiltersActive(applied) ? " match your filters" : ""}.
@@ -527,34 +545,47 @@ export default function TeamPage() {
         resetDisabled={!teamFiltersActive(filters)}
         onApply={applyFilters}
         applyDisabled={!draftDirty}
+        placement={filterLayout.placement}
       >
-        <label className="flex flex-col gap-1">
+        {!filterLayout.isHidden("role") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("role") }}>
           <FilterLabel>Role</FilterLabel>
           <MultiSelect ariaLabel="Filter by role" value={filters.role} onChange={(v) => setFilter("role", v)} options={roleOptions} placeholder="All roles" searchPlaceholder="Search role…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("department") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("department") }}>
           <FilterLabel>Department</FilterLabel>
           <MultiSelect ariaLabel="Filter by department" value={filters.department} onChange={(v) => setFilter("department", v)} options={deptOptions} placeholder="All departments" searchPlaceholder="Search department…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("office") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("office") }}>
           <FilterLabel>Office</FilterLabel>
           <MultiSelect ariaLabel="Filter by office" value={filters.office} onChange={(v) => setFilter("office", v)} options={officeOptions} placeholder="All offices" searchPlaceholder="Search office…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("leadType") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("leadType") }}>
           <FilterLabel>Lead type</FilterLabel>
           <MultiSelect ariaLabel="Filter by lead type" value={filters.leadType} onChange={(v) => setFilter("leadType", v)} options={leadTypeOptions} placeholder="All types" searchPlaceholder="Search type…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("reportsTo") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("reportsTo") }}>
           <FilterLabel>Reports to</FilterLabel>
           <MultiSelect ariaLabel="Filter by reporting person" value={filters.reportsTo} onChange={(v) => setFilter("reportsTo", v)} options={managerOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
         </label>
-        <label className="flex flex-col gap-1">
+        )}
+        {!filterLayout.isHidden("status") && (
+        <label className="flex flex-col gap-1" style={{ order: fo("status") }}>
           <FilterLabel>Status</FilterLabel>
           <MultiSelect ariaLabel="Filter by status" value={filters.status} onChange={(v) => setFilter("status", v)} options={STATUS_OPTIONS} placeholder="Any status" searchPlaceholder="Search status…" />
         </label>
+        )}
       </FilterRail>
 
-      <div className={filterRailPad(filterOpen)}>
+      <div className={filterRailPad(filterOpen, filterLayout.placement)}>
       <DataTable
         tableKey="team"
         canRenameColumns={isAdmin}

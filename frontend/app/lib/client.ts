@@ -36,6 +36,150 @@ export const clientPost = <T = unknown>(path: string, body?: Record<string, unkn
     body: JSON.stringify(body ?? {}),
   }).then(handle) as Promise<T>;
 
+export interface ExternalClient {
+  userid: number;
+  company: string | null;
+  phonenumber: string | null;
+  city: string | null;
+  state: string | null;
+  datecreated: string | null;
+  title: string | null;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  email: string | null;
+  mobile: string | null;
+  dob: string | null;
+  gender: string | null;
+  father_name: string | null;
+  mother_name: string | null;
+  university_name: string | null;
+  applicant_country: string | null;
+}
+
+export interface ExternalClientsResult {
+  rows: ExternalClient[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+export const getExternalClients = (params: { page: number; per_page: number; q?: string }) => {
+  const sp = new URLSearchParams();
+  sp.set("page", String(params.page));
+  sp.set("per_page", String(params.per_page));
+  if (params.q) sp.set("q", params.q);
+  return clientGet<ExternalClientsResult>(`/external-clients?${sp.toString()}`);
+};
+
+export interface ApplicantTrackerColumn {
+  key: string;
+  label: string;
+  /** Whether the column is shown by default (from the tracker config). */
+  selected: boolean;
+}
+export interface ApplicantTrackerResult {
+  columns: ApplicantTrackerColumn[];
+  rows: Record<string, string | number | null>[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+/** Multi-select filter keys (arrays of ids/values). */
+export const APPLICANT_MULTI_KEYS = [
+  "status", "stage", "sub_stage", "lead_type", "source", "client_type", "neet_status",
+  "pcc_status", "passport_status", "doc_status", "ev_partner", "counsellor",
+  "fly_departure", "fly_vendors", "apostille_vendors", "visa_vendors",
+  "university", "country", "fly_batch", "apostille_status",
+] as const;
+/** Single-value filter keys (Yes/No, dates, year, toggle). */
+export type ApplicantTrackerFilters = Partial<Record<(typeof APPLICANT_MULTI_KEYS)[number], string[]>> & {
+  minor?: string;
+  tf_status?: string;
+  academic_year?: string;
+  courier_date?: string;
+  apostille_received?: string;
+  visa_payment_date?: string;
+  fly_date?: string;
+  from?: string;
+  to?: string;
+  last_from?: string;
+  last_to?: string;
+  all?: string; // "1" → show every applicant (not just those matching local leads)
+};
+export const getApplicantTracker = (
+  params: { page: number; per_page: number; q?: string } & ApplicantTrackerFilters,
+) => {
+  const sp = new URLSearchParams();
+  sp.set("page", String(params.page));
+  sp.set("per_page", String(params.per_page));
+  if (params.q) sp.set("q", params.q);
+  APPLICANT_MULTI_KEYS.forEach((k) => {
+    const v = params[k];
+    if (v && v.length) sp.set(k, v.join(","));
+  });
+  (["minor", "tf_status", "academic_year", "courier_date", "apostille_received",
+    "visa_payment_date", "fly_date", "from", "to", "last_from", "last_to", "all"] as const)
+    .forEach((k) => { if (params[k]) sp.set(k, params[k] as string); });
+  return clientGet<ApplicantTrackerResult>(`/applicant-tracker?${sp.toString()}`);
+};
+
+export interface ApplicantOption { id: number; name: string }
+export interface ApplicantTrackerFilterOptions {
+  status: ApplicantOption[];
+  stage: ApplicantOption[];
+  sub_stage: ApplicantOption[];
+  lead_type: ApplicantOption[];
+  source: ApplicantOption[];
+  neet_status: ApplicantOption[];
+  passport_status: ApplicantOption[];
+  doc_status: ApplicantOption[];
+  ev_partner: ApplicantOption[];
+  fly_departure: ApplicantOption[];
+  vendors: ApplicantOption[];
+  counsellor: ApplicantOption[];
+  client_type: ApplicantOption[];
+  university: string[];
+  country: string[];
+  fly_batch: string[];
+  apostille_status: string[];
+  minor: string[];
+  tf_status: string[];
+}
+export const getApplicantTrackerFilters = () =>
+  clientGet<ApplicantTrackerFilterOptions>("/applicant-tracker-filters");
+
+// ---- Lead → Applicant conversion (admin-configurable button + form + API) ----
+export interface ConvertField { key: string; label: string; type: string; required: boolean }
+export interface ConvertConfig {
+  enabled: boolean;
+  label: string;
+  status_id: number;
+  fields: ConvertField[];
+  // Admin-only (present when the caller is the client admin):
+  api_url?: string;
+  api_method?: string;   // "POST" | "PUT"
+  api_type?: string;     // "json" | "form"
+  api_headers?: Record<string, string>;
+}
+export const getConvertConfig = () => clientGet<ConvertConfig>("/convert-config");
+export const saveConvertConfig = (c: ConvertConfig) =>
+  clientPost<ConvertConfig>("/convert-config", c as unknown as Record<string, unknown>);
+export const convertLead = (id: number, values: Record<string, string>) =>
+  clientPost<{ ok: boolean; message: string; api_status?: number }>(`/leads/${id}/convert`, { values });
+
+export interface ApplicantConfig {
+  label: string;
+  slug: string;
+  /** Admin-defined value → hex colour map (e.g. { "YES": "#16a34a" }). */
+  colors?: Record<string, string>;
+  /** Number of leading columns pinned (frozen) while scrolling (0–5). */
+  frozen?: number;
+}
+export const getApplicantConfig = () => clientGet<ApplicantConfig>("/applicant-config");
+export const saveApplicantConfig = (body: ApplicantConfig) =>
+  clientPost<ApplicantConfig>("/applicant-config", body as unknown as Record<string, unknown>);
+
 export const getBackupSchedule = () =>
   clientGet<{ schedule: BackupSchedule; frequencies: string[] }>("/backup-schedule");
 export const saveBackupSchedule = (b: Partial<BackupSchedule>) =>
@@ -254,6 +398,8 @@ export interface Lead {
   state: string | null;
   follow_date: string | null;
   created_date: string | null;
+  /** Rich-text description (sanitized HTML), or null. */
+  description: string | null;
   created_at: string;
   updated_at: string | null;
   /** Latest reminder datetime for this lead (max remind_at), or null if none. */
@@ -273,6 +419,13 @@ export interface Lead {
   call_count?: number;
   /** Calls to this lead's number(s) made by the lead's assigned staff. */
   assigned_call_count?: number;
+  /** Total talk-time (seconds) across all calls to this lead's number(s). */
+  total_duration?: number;
+  /** Calls to this lead's number(s) by the selected Reporting Person (or, when
+   *  none is selected, the lead's assigned rep). */
+  person_call_count?: number;
+  /** Talk-time (seconds) for those Reporting-Person / assigned-rep calls. */
+  person_call_duration?: number;
   /** First-response SLA: working seconds from assignment → first connected call
    *  by the assigned user (10 = off-day credit), or null if not yet responded. */
   first_response_seconds?: number | string | null;
@@ -594,6 +747,28 @@ export const getLeadImportSetup = () =>
 export const saveLeadImportSetup = (columns: { key: string; include: boolean; required: boolean }[]) =>
   clientPost<{ message: string; columns: LeadImportColumn[] }>("/lead-import-setup", { columns });
 
+// ---- Excel Data Hub: generic import (leads / tasks / team) ----
+export type ImportEntity = "lead" | "task" | "team";
+/** Same shape as LeadImportColumn — a template column with include/required flags. */
+export type ImportColumn = LeadImportColumn;
+export interface ImportResult {
+  inserted: number;
+  failed: number;
+  errors: { row: number; message: string }[];
+  assigned?: Record<string, number>;
+}
+/** Import column config for any entity (lead reuses the leads import config server-side). */
+export const getImportSetup = (entity: ImportEntity) =>
+  clientGet<{ columns: ImportColumn[]; can_manage: boolean }>(`/import-setup/${entity}`);
+export const saveImportSetup = (entity: ImportEntity, columns: { key: string; include: boolean; required: boolean }[]) =>
+  clientPost<{ message: string; columns: ImportColumn[] }>(`/import-setup/${entity}`, { columns });
+/** Bulk-import tasks (optional round-robin assignment). */
+export const importTasks = (rows: Record<string, string>[], options: { assign_mode?: "single" | "robin"; assignees?: number[]; notify?: boolean } = {}) =>
+  clientPost<ImportResult>("/tasks/import", { rows, options } as Record<string, unknown>);
+/** Bulk-import team (staff directory) members. */
+export const importTeam = (rows: Record<string, string>[]) =>
+  clientPost<ImportResult>("/team/import", { rows } as Record<string, unknown>);
+
 export interface LeadCount {
   /** The grouped entity's id (status/sub-status/type/source id), when applicable. */
   id?: number;
@@ -635,6 +810,25 @@ export interface LeadsQuery {
   /** "Updated date" = filter by call date (leads with a call in range). */
   updated_from?: string;
   updated_to?: string;
+  /** "Connected date" = leads with a connected call in this range. */
+  connected_from?: string;
+  connected_to?: string;
+  /** Ghosted: no connected call within the last N minutes (hours*60 + mins). */
+  ghost_minutes?: string;
+  ghost_op?: string;   // "gt" (≥ / ghosted) | "lt" (≤ / active)
+  /** Range on the number of calls the lead's ASSIGNED user made to it. */
+  acalls_min?: string;
+  acalls_max?: string;
+  /** Range on the lead's total call talk-time (seconds). */
+  talk_min?: string;
+  talk_max?: string;
+  /** Reporting Person: a staff id whose OWN calls drive the person call-count/
+   *  duration columns. Does not filter which leads are returned. */
+  report_person?: string;
+  /** Leads NOT connected (no connected call) after this date. */
+  no_connect_after?: string;
+  /** Leads NOT updated (lead row unchanged) after this date. */
+  no_update_after?: string;
 }
 
 /** Append the shared lead filter params (used by the list AND the analytics summary). */
@@ -660,6 +854,17 @@ function leadFilterParams(qs: URLSearchParams, f: LeadsQuery): void {
   put("follow_to", f.follow_to);
   put("updated_from", f.updated_from);
   put("updated_to", f.updated_to);
+  put("connected_from", f.connected_from);
+  put("connected_to", f.connected_to);
+  put("ghost_minutes", f.ghost_minutes);
+  put("ghost_op", f.ghost_op);
+  put("acalls_min", f.acalls_min);
+  put("acalls_max", f.acalls_max);
+  put("talk_min", f.talk_min);
+  put("talk_max", f.talk_max);
+  put("report_person", f.report_person);
+  put("no_connect_after", f.no_connect_after);
+  put("no_update_after", f.no_update_after);
 }
 
 export const getLeads = (query: LeadsQuery = {}) => {
@@ -942,14 +1147,228 @@ export type CustomField = TaskCustomField;
 export type FormKey = "lead" | "task" | "asset" | "visitor" | "staff";
 export interface FormSetup {
   form: FormKey;
+  type?: number;
   requirable: { key: string; label: string }[];
   required_fields: string[];
   custom_fields: CustomField[];
+  /** Admin-customized field hint/tagline overrides (fieldKey → text). */
+  hints?: Record<string, string>;
+  /** Admin-defined field display order (list of field keys). Empty = natural order. */
+  order?: string[];
   can_manage: boolean;
 }
-export const getFormSetup = (form: FormKey) => clientGet<FormSetup>(`/form-setup/${form}`);
-export const saveFormFields = (form: FormKey, body: { required_fields: string[]; custom_fields: CustomField[] }) =>
-  clientPost<{ message: string; required_fields: string[]; custom_fields: CustomField[] }>(`/form-field-settings/${form}`, body as unknown as Record<string, unknown>);
+
+/**
+ * Every field the lead form renders, in its natural order — the set the admin can
+ * rearrange (and the preview draws). Superset of LEAD_FIELD_HINTS: also includes
+ * the read-only display fields (assigned/follow-up/created dates).
+ */
+export const LEAD_FORM_FIELDS: { key: string; label: string; readOnly?: boolean }[] = [
+  { key: "name", label: "Name" },
+  { key: "reference_name", label: "Reference" },
+  { key: "phone", label: "Phone" },
+  { key: "alt_phone", label: "Alternative phone" },
+  { key: "lead_type_id", label: "Lead type" },
+  { key: "status_id", label: "Status" },
+  { key: "sub_status_id", label: "Sub status" },
+  { key: "source_id", label: "Lead source" },
+  { key: "email", label: "Email" },
+  { key: "assigned_to", label: "Assigned to" },
+  { key: "assigned_date", label: "Assigned date", readOnly: true },
+  { key: "follow_up_date", label: "Follow-up date", readOnly: true },
+  { key: "state", label: "State" },
+  { key: "city", label: "City" },
+  { key: "created_date", label: "Created date", readOnly: true },
+  { key: "description", label: "Description" },
+];
+
+/** Lead-form fields whose hint/tagline the admin can customize, with defaults. */
+export const LEAD_FIELD_HINTS: { key: string; label: string; default: string }[] = [
+  { key: "name", label: "Name", default: "" },
+  { key: "reference_name", label: "Reference", default: "" },
+  { key: "phone", label: "Phone", default: "10 digits, without +91" },
+  { key: "alt_phone", label: "Alternative phone", default: "Optional · 10 digits, without +91" },
+  { key: "lead_type_id", label: "Lead type", default: "Categorise this lead. Choosing a type narrows the sub-statuses below. Manage types in Leads Setup." },
+  { key: "status_id", label: "Status", default: "" },
+  { key: "sub_status_id", label: "Sub status", default: "" },
+  { key: "source_id", label: "Lead source", default: "Where this lead came from. Manage sources in Leads Setup." },
+  { key: "email", label: "Email", default: "" },
+  { key: "assigned_to", label: "Assigned to", default: "" },
+  { key: "state", label: "State", default: "Pick from the list or type a new one." },
+  { key: "city", label: "City", default: "Pick from the list or type a new one." },
+  { key: "description", label: "Description", default: "Free-form notes about this lead — supports formatting." },
+];
+/**
+ * Form setup for a form. For leads, `type` targets a lead-type override; pass
+ * `effective` to resolve inheritance (type override, else base) — the lead form
+ * uses effective, the admin editor edits the type's own override.
+ */
+export const getFormSetup = (form: FormKey, opts?: { type?: number; effective?: boolean }) => {
+  const sp = new URLSearchParams();
+  if (opts?.type) sp.set("type", String(opts.type));
+  if (opts?.effective) sp.set("effective", "1");
+  const qs = sp.toString();
+  return clientGet<FormSetup>(`/form-setup/${form}${qs ? `?${qs}` : ""}`);
+};
+export const saveFormFields = (form: FormKey, body: { required_fields: string[]; custom_fields: CustomField[]; hints?: Record<string, string>; order?: string[]; type?: number }) =>
+  clientPost<{ message: string; required_fields: string[]; custom_fields: CustomField[]; order: string[] }>(`/form-field-settings/${form}`, body as unknown as Record<string, unknown>);
+
+// ---- Web to Lead (admin-built embeddable forms) ----
+/** A field placed on a web form: a built-in lead field or a lead custom field. */
+export interface WebFormField {
+  key: string;
+  /** Parameter / JSON name external callers send (API/Postman). Defaults to `key`. */
+  param?: string;
+  label: string;
+  /** text | tel | email | number | textarea | date | select */
+  type: string;
+  required: boolean;
+  placeholder?: string;
+  builtin: boolean;
+  options: string[];
+}
+/** A saved Web-to-Lead form definition (admin view). */
+export interface WebForm {
+  id: number;
+  name: string;
+  token: string;
+  /** Server-to-server API key (Postman/Zapier) — passed as the X-Api-Key header. */
+  api_key?: string | null;
+  language: string;
+  submit_text: string;
+  success_message: string | null;
+  fields: WebFormField[];
+  source_id: number | null;
+  status_id: number | null;
+  assigned_to: number | null;
+  lead_type_id: number | null;
+  auto_assignee: number[];
+  auto_assign_state_wise: number;
+  /** State name → the counsellor(s) it routes to (round-robined when several). */
+  state_assignee_map: Record<string, number[]>;
+  auto_mark_public: number;
+  allow_location_fields: number;
+  notify_on_transfer: number;
+  allow_duplicate: number;
+  prevent_duplicate_field: string | null;
+  prevent_duplicate_field2: string | null;
+  create_duplicate_as_task: number;
+  notify_on_import: number;
+  notify_type: string;
+  notify_staff: number[];
+  submission_count: number;
+  enabled: number;
+  created_at?: string | null;
+}
+/** The builder's available fields + lookups (kept in sync with the real lead form). */
+export interface WebFormBuilderFields {
+  builtin: { key: string; label: string; type: string }[];
+  custom: CustomField[];
+  sources: { id: number; name: string }[];
+  statuses: { id: number; name: string }[];
+  lead_types: { id: number; name: string }[];
+  staff: { id: number; name: string }[];
+  states: string[];
+}
+export const listWebForms = () =>
+  clientGet<{ forms: WebForm[]; builder_fields: WebFormBuilderFields }>("/web-forms");
+export const getWebForm = (id: number) =>
+  clientGet<{ form: WebForm; builder_fields: WebFormBuilderFields }>(`/web-forms/${id}`);
+export const createWebForm = (body: Record<string, unknown>) =>
+  clientPost<{ message: string; id: number; token: string }>("/web-forms", body);
+export const updateWebForm = (id: number, body: Record<string, unknown>) =>
+  clientPost<{ message: string; id: number }>(`/web-forms/${id}`, body);
+export const deleteWebForm = (id: number) => clientPost(`/web-forms/${id}/delete`);
+export const regenerateWebFormApiKey = (id: number) =>
+  clientPost<{ message: string; api_key: string }>(`/web-forms/${id}/api-key`);
+
+// ---- Facebook Lead Ads integration ----
+/** A subscribed FB lead form + how its submissions map onto a CRM lead. */
+export interface FbForm {
+  id: number;
+  page_id: string;
+  form_id: string;
+  form_name: string;
+  /** FB form field name → lead key ("name"…) or "custom_<key>". */
+  field_map: Record<string, string>;
+  source_id: number | null;
+  status_id: number | null;
+  lead_type_id: number | null;
+  assigned_to: number | null;
+  auto_assignee: number[];
+  auto_assign_state_wise: number;
+  state_assignee_map: Record<string, number[]>;
+  allow_duplicate: number;
+  prevent_duplicate_field: string | null;
+  prevent_duplicate_field2: string | null;
+  create_duplicate_as_task: number;
+  notify_on_import: number;
+  notify_type: string;
+  notify_staff: number[];
+  submission_count: number;
+  enabled: number;
+}
+export interface FbPage { id: number; page_id: string; page_name: string; enabled: number; forms: FbForm[] }
+/** The client's Meta App config (secret never returned — only whether one is saved). */
+export interface FacebookConfig { app_id: string; has_secret: boolean; verify_token: string }
+export interface FacebookState { configured: boolean; connected: boolean; config: FacebookConfig; pages: FbPage[] }
+/** A lead form as returned live from the Graph API (for the "add form" picker). */
+export interface FbLiveForm { id: string; name: string; status: string }
+
+export const getFacebook = () => clientGet<FacebookState>("/facebook");
+export const saveFacebookConfig = (body: { app_id: string; app_secret: string }) =>
+  clientPost<{ message: string }>("/facebook/config", body);
+export const facebookOauthUrl = (redirectUri: string) =>
+  clientGet<{ url: string }>(`/facebook/oauth-url?redirect_uri=${encodeURIComponent(redirectUri)}`);
+export const connectFacebook = (code: string, redirectUri: string) =>
+  clientPost<{ message: string; pages: number }>("/facebook/connect", { code, redirect_uri: redirectUri });
+export const getPageForms = (pageRowId: number) =>
+  clientGet<{ forms: FbLiveForm[] }>(`/facebook/pages/${pageRowId}/forms`);
+export const saveFbForm = (body: Record<string, unknown>) =>
+  clientPost<{ message: string; id: number }>("/facebook/forms", body);
+export const deleteFbForm = (id: number) => clientPost(`/facebook/forms/${id}/delete`);
+export const syncFbForm = (id: number) => clientPost<{ inserted: number; skipped: number }>(`/facebook/forms/${id}/sync`);
+export const disconnectFacebook = () => clientPost("/facebook/disconnect");
+
+// ---- Google Sheets → Leads sync ----
+/** A connected Google Sheet + how its columns map onto leads. */
+export interface SheetSync {
+  id: number;
+  name: string;
+  spreadsheet_id: string;
+  spreadsheet_url: string;
+  sheet_tab: string;
+  header_row: number;
+  /** Sheet column header → lead key ("name"…) | "status" | "custom_<key>". */
+  column_map: Record<string, string>;
+  dedupe_field: string;
+  source_id: number | null;
+  status_id: number | null;
+  lead_type_id: number | null;
+  assigned_to: number | null;
+  auto_assignee: number[];
+  write_back: number;
+  status_result_column: string;
+  inserted_count: number;
+  updated_count: number;
+  skipped_count: number;
+  last_synced_at: string | null;
+  enabled: number;
+}
+export interface SheetsConfig { has_service_account: boolean; service_account_email: string }
+export interface SheetsState { configured: boolean; config: SheetsConfig; sheets: SheetSync[] }
+export interface SheetPreview { spreadsheet_id: string; tabs: string[]; tab: string; headers: string[]; sample: string[][] }
+export interface SheetSyncResult { message: string; inserted: number; updated: number; skipped: number; total: number; errors: { row: number; message: string }[] }
+
+export const getSheets = () => clientGet<SheetsState>("/google-sheets");
+export const saveSheetsConfig = (service_account: string) =>
+  clientPost<{ message: string; service_account_email: string }>("/google-sheets/config", { service_account });
+export const previewSheet = (body: { spreadsheet_url: string; sheet_tab?: string; header_row?: number }) =>
+  clientPost<SheetPreview>("/google-sheets/preview", body);
+export const saveSheet = (body: Record<string, unknown>) =>
+  clientPost<{ message: string; id: number }>("/google-sheets", body);
+export const deleteSheet = (id: number) => clientPost(`/google-sheets/${id}/delete`);
+export const syncSheet = (id: number) => clientPost<SheetSyncResult>(`/google-sheets/${id}/sync`);
 
 export interface TaskComment {
   id: number;
@@ -1064,11 +1483,13 @@ export interface TableConfig {
   aligns?: Record<string, "left" | "center" | "right">;
   /** The user's chosen rows-per-page for this table (overrides the client default). */
   pageSize?: number;
+  /** Filter-panel placement (filter-layout configs only): where the FilterRail sits. */
+  placement?: "right" | "left" | "top";
 }
-export const getTableConfig = (tableKey: string) =>
-  clientGet<{ config: TableConfig | null }>(`/table-prefs/${tableKey}`);
-export const saveTableConfig = (tableKey: string, config: TableConfig) =>
-  clientPost<{ message: string; config: TableConfig }>(`/table-prefs/${tableKey}`, { config } as Record<string, unknown>);
+export const getTableConfig = (tableKey: string, shared = false) =>
+  clientGet<{ config: TableConfig | null }>(`/table-prefs/${tableKey}${shared ? "?shared=1" : ""}`);
+export const saveTableConfig = (tableKey: string, config: TableConfig, shared = false) =>
+  clientPost<{ message: string; config: TableConfig }>(`/table-prefs/${tableKey}${shared ? "?shared=1" : ""}`, { config } as Record<string, unknown>);
 
 // ---- client-wide custom column names (read by all; written by client admin) ----
 export const getTableLabels = (tableKey: string) =>

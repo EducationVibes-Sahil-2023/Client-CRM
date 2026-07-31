@@ -30,6 +30,11 @@ export const icons: Record<string, string> = {
   orgchart: "M9 3h6v4H9zM3 17h6v4H3zm12 0h6v4h-6zM12 7v4M6 17v-2a1 1 0 011-1h10a1 1 0 011 1v2",
   palette: "M12 2a10 10 0 100 20 2 2 0 002-2 2 2 0 00-.5-1.3 2 2 0 01-.5-1.2 2 2 0 012-2H19a3 3 0 003-3 8 8 0 00-8-8zM6.5 12a1 1 0 110-2 1 1 0 010 2zm3-4a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2z",
   docs: "M4 19.5A2.5 2.5 0 016.5 17H20M4 19.5A2.5 2.5 0 006.5 22H20V2H6.5A2.5 2.5 0 004 4.5v15zM9 7h7M9 11h7",
+  database: "M12 2C7 2 3 3.8 3 6s4 4 9 4 9-1.8 9-4-4-4-9-4zM3 6v6c0 2.2 4 4 9 4s9-1.8 9-4V6M3 12v6c0 2.2 4 4 9 4s9-1.8 9-4v-6",
+  webtolead: "M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71",
+  excel: "M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V9l-6-6H9zM13 3v6h6M9 13l3 3m0-3l-3 3",
+  facebook: "M18 2h-3a5 5 0 00-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 011-1h3z",
+  googlesheets: "M5 3h9l5 5v13a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1zm9 0v5h5M8 12h8M8 15h8M8 18h5",
 };
 
 export interface NavItem {
@@ -85,14 +90,33 @@ export const setupNav: NavItem[] = [
   { key: "office-locations", href: "/client/office-locations", label: "Office Locations", icon: "office", feature: "team", module: "team" },
   { key: "leads-setup", href: "/client/leads-setup", label: "Leads Setup", icon: "statuses", feature: "leads", module: "leads_setup" },
   { key: "form-setup", href: "/client/form-setup", label: "Form Setup", icon: "formsetup", adminOnly: true },
+  { key: "web-to-lead", href: "/client/web-to-lead", label: "Web to Lead", icon: "webtolead", feature: "leads", adminOnly: true },
+  { key: "excel", href: "/client/excel", label: "Excel / Data", icon: "excel", adminOnly: true },
+  { key: "facebook", href: "/client/facebook", label: "Facebook Leads", icon: "facebook", adminOnly: true },
+  { key: "google-sheets", href: "/client/google-sheets", label: "Google Sheets", icon: "googlesheets", adminOnly: true },
   { key: "email-config", href: "/client/email-config", label: "Email Setup", icon: "email", feature: "email_config", adminOnly: true },
   { key: "appearance", href: "/client/appearance", label: "Appearance", icon: "palette", adminOnly: true },
   { key: "settings", href: "/client/settings", label: "Dashboard Config", icon: "config", adminOnly: true },
 ];
 
 export default function ClientSidebar() {
-  const { collapsed, mobileOpen, setMobileOpen, user, hasFeature, branding, can, isAdmin, featuresLoaded, permissionsLoaded } = useClient();
+  const { collapsed, mobileOpen, setMobileOpen, user, hasFeature, branding, can, isAdmin, featuresLoaded, permissionsLoaded, applicant } = useClient();
   const pathname = usePathname();
+
+  // The Applicant section is admin-editable (label + URL slug), so its nav item
+  // is built from the live config and slotted in just after Leads.
+  const mainNav = ((): NavItem[] => {
+    const arr = [...MAIN_NAV];
+    const at = arr.findIndex((i) => i.key === "leads");
+    arr.splice(at >= 0 ? at + 1 : arr.length, 0, {
+      key: "applicant",
+      href: `/client/${applicant.slug}`,
+      label: applicant.label,
+      icon: "database",
+      adminOnly: true,
+    });
+    return arr;
+  })();
   const initials = (user.name || user.email || "C").slice(0, 1).toUpperCase();
   const solid = branding.sidebar_style === "solid";
 
@@ -110,7 +134,9 @@ export default function ClientSidebar() {
   const Item = ({ item }: { item: NavItem }) => {
     const active = item.exact ? pathname === item.href : pathname.startsWith(item.href);
     const activeCls = solid ? "bg-emerald-600 text-white shadow-sm shadow-emerald-600/30" : "bg-emerald-50 text-emerald-700";
-    const iconCls = active ? (solid ? "text-white" : "text-emerald-600") : "text-slate-400 group-hover:text-slate-600";
+    // Active icons follow the brand/solid style; inactive icons use the admin's
+    // configurable sidebar-icon colour (--sidebar-icon).
+    const iconCls = active ? (solid ? "text-white" : "text-emerald-600") : "";
     // Admin overrides (Appearance → Menu): custom label + icon per nav key.
     const label = branding.menu_labels?.[item.key] || item.label;
     const iconPath = icons[branding.menu_icons?.[item.key] ?? ""] ?? icons[item.icon];
@@ -119,10 +145,11 @@ export default function ClientSidebar() {
         href={item.href}
         title={collapsed ? label : undefined}
         onClick={() => setMobileOpen(false)}
-        className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${active ? activeCls : "text-slate-600 hover:bg-slate-100"} ${collapsed ? "justify-center" : ""}`}
+        className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${active ? activeCls : "hover:bg-slate-100"} ${collapsed ? "justify-center" : ""}`}
+        style={active ? undefined : { color: "var(--sidebar-text)" }}
       >
         {active && !solid && <span className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-emerald-600" />}
-        <svg className={`anim-ico h-5 w-5 flex-shrink-0 ${iconCls}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={iconPath} strokeLinecap="round" strokeLinejoin="round" /></svg>
+        <svg className={`anim-ico h-5 w-5 flex-shrink-0 ${iconCls}`} style={active ? undefined : { color: "var(--sidebar-icon)" }} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={iconPath} strokeLinecap="round" strokeLinejoin="round" /></svg>
         {!collapsed && <span className="truncate">{label}</span>}
       </Link>
     );
@@ -141,7 +168,7 @@ export default function ClientSidebar() {
   return (
     <>
       {mobileOpen && <div className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden" onClick={() => setMobileOpen(false)} />}
-      <aside className={`fixed inset-y-0 left-0 z-40 flex flex-col border-r border-slate-200 bg-white transition-all duration-300 ${collapsed ? "w-20" : "w-64"} ${mobileOpen ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`}>
+      <aside className={`fixed inset-y-0 left-0 z-40 flex flex-col border-r border-slate-200 transition-all duration-300 ${collapsed ? "w-20" : "w-64"} ${mobileOpen ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`} style={{ background: "var(--sidebar-bg)" }}>
         <div className={`flex h-16 items-center gap-3 px-5 ${collapsed ? "justify-center" : ""}`}>
           {collapsed ? (
             collapsedSrc ? (
@@ -166,7 +193,7 @@ export default function ClientSidebar() {
         </div>
 
         <nav className="no-scrollbar flex-1 space-y-1 overflow-y-auto px-3 py-2">
-          {gate(orderNav(MAIN_NAV, branding.menu_order)).map((i) => <Item key={i.key} item={i} />)}
+          {gate(orderNav(mainNav, branding.menu_order)).map((i) => <Item key={i.key} item={i} />)}
           {(() => {
             const setup = gate(setupNav);
             if (setup.length === 0) return null;

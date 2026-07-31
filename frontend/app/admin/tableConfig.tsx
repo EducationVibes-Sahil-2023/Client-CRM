@@ -23,10 +23,14 @@ export interface TableConfigApi<T> {
   /** Every column (visible or not) in order, for the customization panel. */
   allColumns: { key: string; header: string; defaultHeader: string; hidden: boolean; lockVisible: boolean; align: Align }[];
   toggleHidden: (key: string) => void;
+  /** Show/hide many columns at once (e.g. a whole column group). */
+  setGroupHidden: (keys: string[], hidden: boolean) => void;
   setAlign: (key: string, align: Align) => void;
   setWidth: (key: string, width: number) => void;
   /** Move `key` so it sits just before `beforeKey` (drag-and-drop reorder). */
   moveBefore: (key: string, beforeKey: string | null) => void;
+  /** Move a whole group of columns before `beforeKey`, preserving their order. */
+  moveGroupBefore: (keys: string[], beforeKey: string | null) => void;
   reset: () => void;
   /** True when the layout differs from the column defaults. */
   customized: boolean;
@@ -60,7 +64,7 @@ const emptyConfig: TableConfig = {};
  * handle doesn't spam the server. When `tableKey` is undefined the table is not
  * customizable and the columns pass through untouched.
  */
-export function useTableConfig<T>(tableKey: string | undefined, columns: Column<T>[], canRename = false): TableConfigApi<T> {
+export function useTableConfig<T>(tableKey: string | undefined, columns: Column<T>[], canRename = false, shared = false): TableConfigApi<T> {
   const [config, setConfig] = useState<TableConfig>(emptyConfig);
   const [ready, setReady] = useState(!tableKey);
   const dirty = useRef(false);          // gate saves until the user actually changes something
@@ -82,22 +86,24 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
   useEffect(() => {
     if (!tableKey) return;
     let alive = true;
-    getTableConfig(tableKey)
+    getTableConfig(tableKey, shared)
       .then((r) => { if (alive) setConfig(r.config ?? emptyConfig); })
       .catch(() => { /* fall back to defaults */ })
       .finally(() => { if (alive) setReady(true); });
     return () => { alive = false; };
-  }, [tableKey]);
+  }, [tableKey, shared]);
 
-  // Debounced persistence — only after a user-driven change.
+  // Debounced persistence — only after a user-driven change. For a shared
+  // (client-wide) layout only the admin persists; others keep changes local.
   useEffect(() => {
     if (!tableKey || !dirty.current) return;
+    if (shared && !canRename) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveTableConfig(tableKey, config).catch(() => { /* keep the local layout regardless */ });
+      saveTableConfig(tableKey, config, shared).catch(() => { /* keep the local layout regardless */ });
     }, 600);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [config, tableKey]);
+  }, [config, tableKey, shared, canRename]);
 
   // Load the client-wide column names once per table key (everyone reads them).
   useEffect(() => {
@@ -242,6 +248,17 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
     });
   }, [byKey, defaultHidden, update]);
 
+  const setGroupHidden = useCallback((keys: string[], hidden: boolean) => {
+    update((c) => {
+      const set = new Set(c.hidden ?? defaultHidden);
+      for (const k of keys) {
+        if (byKey[k]?.lockVisible) continue;
+        if (hidden) set.add(k); else set.delete(k);
+      }
+      return { ...c, hidden: [...set] };
+    });
+  }, [byKey, defaultHidden, update]);
+
   const setAlign = useCallback((key: string, align: Align) => {
     update((c) => ({ ...c, aligns: { ...(c.aligns ?? {}), [key]: align } }));
   }, [update]);
@@ -264,6 +281,20 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
     });
   }, [orderedKeys, update]);
 
+  // Move a whole group of columns (keeping their internal order) to sit just
+  // before `beforeKey` — used to drag a column group to a new position.
+  const moveGroupBefore = useCallback((keys: string[], beforeKey: string | null) => {
+    const moving = new Set(keys);
+    update((c) => {
+      const rest = orderedKeys.filter((k) => !moving.has(k));
+      const ordered = orderedKeys.filter((k) => moving.has(k)); // preserve order
+      let to = beforeKey === null || moving.has(beforeKey) ? rest.length : rest.indexOf(beforeKey);
+      if (to === -1) to = rest.length;
+      rest.splice(to, 0, ...ordered);
+      return { ...c, order: rest };
+    });
+  }, [orderedKeys, update]);
+
   const setPageSize = useCallback((n: number) => {
     update((c) => ({ ...c, pageSize: n }));
   }, [update]);
@@ -281,7 +312,7 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
       ready: true,
       columns: columns.map((c) => ({ ...c, resolvedWidth: c.width ?? DEFAULT_COL_WIDTH, resolvedAlign: c.align ?? "left" })),
       allColumns: [],
-      toggleHidden: () => {}, setAlign: () => {}, setWidth: () => {}, moveBefore: () => {}, reset: () => {},
+      toggleHidden: () => {}, setGroupHidden: () => {}, setAlign: () => {}, setWidth: () => {}, moveBefore: () => {}, moveGroupBefore: () => {}, reset: () => {},
       customized: false,
       canRename: false, setLabel: () => {}, labelOf: () => "",
       pageSize: undefined, setPageSize: () => {},
@@ -289,7 +320,7 @@ export function useTableConfig<T>(tableKey: string | undefined, columns: Column<
     };
   }
 
-  return { ready, columns: visibleColumns, allColumns, toggleHidden, setAlign, setWidth, moveBefore, reset, customized, canRename, setLabel, labelOf, pageSize: config.pageSize, setPageSize, sort, isSortable, setColumnSortable, setDefaultSort };
+  return { ready, columns: visibleColumns, allColumns, toggleHidden, setGroupHidden, setAlign, setWidth, moveBefore, moveGroupBefore, reset, customized, canRename, setLabel, labelOf, pageSize: config.pageSize, setPageSize, sort, isSortable, setColumnSortable, setDefaultSort };
 }
 
 // ---------------------------------------------------------------- settings UI
@@ -308,7 +339,11 @@ export function ColumnSettings<T>({ api }: { api: TableConfigApi<T> }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dragGroup, setDragGroup] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const ref = useRef<HTMLDivElement>(null);
+  const groupOf = (header: string): string | null => { const m = header.match(/^(.+?) - .+$/); return m ? m[1] : null; };
+  const toggleCollapse = (g: string) => setCollapsed((s) => { const n = new Set(s); n.has(g) ? n.delete(g) : n.add(g); return n; });
 
   useEffect(() => {
     if (!open) return;
@@ -387,15 +422,60 @@ export function ColumnSettings<T>({ api }: { api: TableConfigApi<T> }) {
 
           <ul className="max-h-72 overflow-y-auto py-1">
             {rows.length === 0 && <li className="px-3 py-2 text-sm text-slate-400">No matching columns</li>}
-            {rows.map((c) => (
+            {rows.map((c, i) => {
+              // Columns named "Group - Name" get a group header + a group checkbox
+              // that shows/hides the whole group at once.
+              const gm = c.header.match(/^(.+?) - .+$/);
+              const group = gm ? gm[1] : null;
+              const prevGm = i > 0 ? rows[i - 1].header.match(/^(.+?) - .+$/) : null;
+              const showHeader = !q && group && (!prevGm || prevGm[1] !== group);
+              const groupCols = showHeader ? rows.filter((x) => x.header.startsWith(`${group} - `)) : [];
+              const groupKeys = groupCols.map((x) => x.key);
+              const groupVisible = groupCols.filter((x) => !x.hidden).length;
+              const isCollapsed = !!group && collapsed.has(group);
+              // A drop onto this row moves either the dragged single column or the
+              // whole dragged group so it lands just before this column.
+              const handleDrop = () => {
+                if (dragGroup) { api.moveGroupBefore(rows.filter((x) => x.header.startsWith(`${dragGroup} - `)).map((x) => x.key), c.key); setDragGroup(null); }
+                else if (dragKey) { api.moveBefore(dragKey, c.key); setDragKey(null); }
+              };
+              return (
+              <span key={c.key}>
+              {showHeader && (
+                <li
+                  draggable={!q}
+                  onDragStart={() => { setDragGroup(group); setDragKey(null); }}
+                  onDragOver={(e) => { if ((dragKey || dragGroup) && dragGroup !== group) e.preventDefault(); }}
+                  onDrop={() => { if (dragGroup && dragGroup !== group) { api.moveGroupBefore(rows.filter((x) => x.header.startsWith(`${dragGroup} - `)).map((x) => x.key), groupKeys[0]); setDragGroup(null); } else if (dragKey) { api.moveBefore(dragKey, groupKeys[0]); setDragKey(null); } }}
+                  onDragEnd={() => setDragGroup(null)}
+                  className={`flex items-center gap-2 border-t border-slate-100 bg-slate-50/60 px-2 py-1.5 first:border-t-0 ${q ? "" : "cursor-grab active:cursor-grabbing"} ${dragGroup === group ? "opacity-40" : ""}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={groupVisible === groupCols.length}
+                    ref={(el) => { if (el) el.indeterminate = groupVisible > 0 && groupVisible < groupCols.length; }}
+                    onChange={() => api.setGroupHidden(groupKeys, groupVisible === groupCols.length)}
+                    className="h-4 w-4 flex-shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                  />
+                  <span className="flex-1 truncate text-xs font-semibold uppercase tracking-wide text-slate-500">{group} <span className="font-normal normal-case text-slate-400">({groupVisible}/{groupCols.length})</span></span>
+                  <button
+                    type="button"
+                    onClick={() => group && toggleCollapse(group)}
+                    title={isCollapsed ? "Expand" : "Minimize"}
+                    className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-200/70 hover:text-slate-600"
+                  >
+                    <svg className={`h-3.5 w-3.5 transition ${isCollapsed ? "-rotate-90" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                </li>
+              )}
+              {isCollapsed ? null : (
               <li
-                key={c.key}
                 draggable={!q}
-                onDragStart={() => setDragKey(c.key)}
-                onDragOver={(e) => { if (dragKey && dragKey !== c.key) e.preventDefault(); }}
-                onDrop={() => { if (dragKey) { api.moveBefore(dragKey, c.key); setDragKey(null); } }}
+                onDragStart={() => { setDragKey(c.key); setDragGroup(null); }}
+                onDragOver={(e) => { if ((dragKey && dragKey !== c.key) || dragGroup) e.preventDefault(); }}
+                onDrop={handleDrop}
                 onDragEnd={() => setDragKey(null)}
-                className={`flex items-center gap-2 px-2 py-1.5 ${dragKey === c.key ? "opacity-40" : ""} ${q ? "" : "cursor-grab active:cursor-grabbing"} hover:bg-slate-50`}
+                className={`flex items-center gap-2 px-2 py-1.5 ${group ? "ml-3" : ""} ${dragKey === c.key ? "opacity-40" : ""} ${q ? "" : "cursor-grab active:cursor-grabbing"} hover:bg-slate-50`}
               >
                 {!q && (
                   <svg className="h-4 w-4 flex-shrink-0 text-slate-300" fill="currentColor" viewBox="0 0 20 20"><path d="M7 4a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM7 10a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM7 16a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM16 4a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM16 10a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM16 16a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" /></svg>
@@ -444,10 +524,13 @@ export function ColumnSettings<T>({ api }: { api: TableConfigApi<T> }) {
                   ))}
                 </div>
               </li>
-            ))}
+              )}
+              </span>
+              );
+            })}
           </ul>
           <p className="border-t border-slate-100 px-3 py-2 text-[11px] text-slate-400">
-            Drag rows to reorder · drag a column edge in the table to resize. Show/hide &amp; layout are saved to your account.
+            Drag rows to reorder · drag a group header to move the whole group · use the ⌄ to minimize a group. Show/hide &amp; layout are saved to your account.
             {api.canRename && <span className="mt-0.5 block text-indigo-500">Renamed column names apply for your whole team. Clear a name to restore its default.</span>}
           </p>
         </div>
@@ -508,6 +591,199 @@ export function useHiddenPrefs(tableKey: string): HiddenPrefsApi {
     toggle, reset,
     customized: hidden.length > 0,
   };
+}
+
+// -------------------------------------------- admin filter layout (client-wide)
+
+export type FilterPlacement = "right" | "left" | "top";
+export interface FilterDef { id: string; label: string }
+
+export interface FilterLayoutApi {
+  ready: boolean;
+  /** Whether this user (client admin) may change the client-wide layout. */
+  canEdit: boolean;
+  /** Saved admin order of filter ids (may omit newer ids — merge via orderFilters). */
+  order: string[];
+  isHidden: (id: string) => boolean;
+  placement: FilterPlacement;
+  setOrder: (ids: string[]) => void;
+  toggleHidden: (id: string) => void;
+  setPlacement: (p: FilterPlacement) => void;
+  reset: () => void;
+  customized: boolean;
+}
+
+/** Merge a section's filter defs with a saved admin order: saved ids first
+ *  (existing only), then any new defs appended — same rule as column ordering. */
+export function orderFilters<T extends { id: string }>(defs: T[], savedOrder: string[] | undefined): T[] {
+  if (!savedOrder || savedOrder.length === 0) return defs;
+  const byId = new Map(defs.map((d) => [d.id, d] as const));
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const id of savedOrder) {
+    const d = byId.get(id);
+    if (d && !seen.has(id)) { out.push(d); seen.add(id); }
+  }
+  for (const d of defs) if (!seen.has(d.id)) out.push(d);
+  return out;
+}
+
+/**
+ * Client-wide (admin) filter layout for one section: the order of filters, which
+ * are hidden for everyone, and where the panel sits. Stored in the SHARED
+ * table-prefs bucket (user 0) under `sectionKey`; only the client admin persists
+ * changes — everyone else reads them. Mirrors useTableConfig's shared path.
+ */
+export function useFilterLayout(sectionKey: string, canEdit: boolean): FilterLayoutApi {
+  const [config, setConfig] = useState<TableConfig>({});
+  const [ready, setReady] = useState(false);
+  const dirty = useRef(false);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getTableConfig(sectionKey, true)
+      .then((r) => { if (alive) setConfig(r.config ?? {}); })
+      .catch(() => { /* fall back to defaults */ })
+      .finally(() => { if (alive) setReady(true); });
+    return () => { alive = false; };
+  }, [sectionKey]);
+
+  // Only the admin persists the shared layout; others keep any change local.
+  useEffect(() => {
+    if (!dirty.current || !canEdit) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      saveTableConfig(sectionKey, config, true).catch(() => { /* keep local */ });
+    }, 600);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [config, sectionKey, canEdit]);
+
+  const update = useCallback((fn: (c: TableConfig) => TableConfig) => {
+    dirty.current = true;
+    setConfig((c) => fn(c));
+  }, []);
+
+  const placement: FilterPlacement = config.placement === "left" || config.placement === "top" ? config.placement : "right";
+  const hidden = useMemo(() => new Set(config.hidden ?? []), [config.hidden]);
+
+  const setOrder = useCallback((ids: string[]) => update((c) => ({ ...c, order: ids })), [update]);
+  const toggleHidden = useCallback((id: string) => update((c) => {
+    const s = new Set(c.hidden ?? []);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    return { ...c, hidden: [...s] };
+  }), [update]);
+  const setPlacement = useCallback((p: FilterPlacement) => update((c) => ({ ...c, placement: p })), [update]);
+  const reset = useCallback(() => update(() => ({})), [update]);
+
+  return {
+    ready, canEdit,
+    order: config.order ?? [],
+    isHidden: (id: string) => hidden.has(id),
+    placement,
+    setOrder, toggleHidden, setPlacement, reset,
+    customized: !!(config.order?.length || config.hidden?.length || config.placement),
+  };
+}
+
+const PLACEMENT_OPTS: { v: FilterPlacement; label: string; icon: string }[] = [
+  { v: "left", label: "Left", icon: "M4 4v16M9 8h11M9 12h11M9 16h11" },
+  { v: "right", label: "Right", icon: "M20 4v16M4 8h11M4 12h11M4 16h11" },
+  { v: "top", label: "Top", icon: "M4 4h16M7 9v11M12 9v11M17 9v11" },
+];
+
+/**
+ * Admin-only gear for a section's client-wide filter layout: drag to reorder,
+ * untick to hide a filter for everyone, and choose the panel placement. Pure
+ * controller over a {@link FilterLayoutApi}; render it only for the client admin.
+ */
+export function FilterLayoutMenu({ api, defs }: { api: FilterLayoutApi; defs: FilterDef[] }) {
+  const [open, setOpen] = useState(false);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+
+  const ordered = orderFilters(defs, api.order);
+  const moveBefore = (id: string, beforeId: string | null) => {
+    if (id === beforeId) return;
+    const ids = ordered.map((d) => d.id);
+    const from = ids.indexOf(id);
+    if (from === -1) return;
+    ids.splice(from, 1);
+    const to = beforeId === null ? ids.length : ids.indexOf(beforeId);
+    ids.splice(to === -1 ? ids.length : to, 0, id);
+    api.setOrder(ids);
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="Filter layout — applies to your whole team"
+        className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium transition ${open || api.customized ? "border-indigo-300 bg-indigo-50 text-indigo-700" : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"}`}
+      >
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13M18 15l3 3-3 3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        Layout
+      </button>
+
+      {open && (
+        <div className="animate-fade-up absolute left-0 z-40 mt-1 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Filter layout · whole team</span>
+            {api.customized && <button onClick={api.reset} className="text-xs font-medium text-indigo-600 hover:text-indigo-700">Reset</button>}
+          </div>
+
+          <div className="border-b border-slate-100 p-2">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Panel placement</div>
+            <div className="flex gap-1">
+              {PLACEMENT_OPTS.map((p) => (
+                <button
+                  key={p.v}
+                  onClick={() => api.setPlacement(p.v)}
+                  className={`flex flex-1 items-center justify-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition ${api.placement === p.v ? "border-indigo-400 bg-indigo-50 text-indigo-700" : "border-slate-200 text-slate-500 hover:bg-slate-50"}`}
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={p.icon} strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <ul className="max-h-72 overflow-y-auto py-1">
+            {ordered.map((d) => (
+              <li
+                key={d.id}
+                draggable
+                onDragStart={() => setDragId(d.id)}
+                onDragOver={(e) => { if (dragId && dragId !== d.id) e.preventDefault(); }}
+                onDrop={() => { if (dragId) moveBefore(dragId, d.id); setDragId(null); }}
+                onDragEnd={() => setDragId(null)}
+                className={`flex cursor-grab items-center gap-2 px-2 py-1.5 hover:bg-slate-50 active:cursor-grabbing ${dragId === d.id ? "opacity-40" : ""}`}
+              >
+                <svg className="h-4 w-4 flex-shrink-0 text-slate-300" fill="currentColor" viewBox="0 0 20 20"><path d="M7 4a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM7 10a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM7 16a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM16 4a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM16 10a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM16 16a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z" /></svg>
+                <input
+                  type="checkbox"
+                  checked={!api.isHidden(d.id)}
+                  onChange={() => api.toggleHidden(d.id)}
+                  onDragStart={(e) => e.preventDefault()}
+                  className="h-4 w-4 flex-shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                />
+                <span className={`flex-1 truncate text-sm ${api.isHidden(d.id) ? "text-slate-400" : "text-slate-700"}`}>{d.label}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="border-t border-slate-100 px-3 py-2 text-[11px] text-slate-400">Drag to reorder · untick to hide a filter for the whole team. Applies to everyone.</p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

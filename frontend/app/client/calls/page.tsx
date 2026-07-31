@@ -11,6 +11,23 @@ import { useClient } from "../ClientContext";
 import { Card, PageHeader, Spinner, EmptyState, SkeletonStats, SkeletonBlock } from "../../admin/ui";
 import { fmtWallDateTime } from "../../lib/datetime";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const DASH_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "date", label: "Date" },
+  { id: "source", label: "Lead source" },
+  { id: "status", label: "Lead status" },
+  { id: "dept", label: "Department" },
+  { id: "office", label: "Office" },
+  { id: "assign", label: "Assign" },
+];
+const LOG_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "status", label: "Status" },
+  { id: "type", label: "Type" },
+  { id: "source", label: "Source" },
+  { id: "connected", label: "Connected" },
+  { id: "date", label: "Call date" },
+];
 import { DataTable, Pagination, Avatar, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, resolveDateRange, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
@@ -397,6 +414,12 @@ function ConnectAppPanel() {
 export default function ClientCalls() {
   const toast = useToast();
   const { defaultPageSize, isAdmin } = useClient();
+  const dashLayout = useFilterLayout("calls_filters", isAdmin);
+  const logLayout = useFilterLayout("calls_log_filters", isAdmin);
+  const dashOrder = useMemo(() => { const m: Record<string, number> = {}; orderFilters(DASH_LAYOUT_DEFS, dashLayout.order).forEach((d, i) => { m[d.id] = i; }); return m; }, [dashLayout.order]);
+  const logOrder = useMemo(() => { const m: Record<string, number> = {}; orderFilters(LOG_LAYOUT_DEFS, logLayout.order).forEach((d, i) => { m[d.id] = i; }); return m; }, [logLayout.order]);
+  const dfo = (id: string): number => dashOrder[id] ?? 0;
+  const lfo = (id: string): number => logOrder[id] ?? 0;
   const [tab, setTab] = useState<"dashboard" | "log" | "connect">("dashboard");
 
   // ---- dashboard state ----
@@ -619,11 +642,12 @@ export default function ClientCalls() {
       {tab === "connect" ? (
         <ConnectAppPanel />
       ) : tab === "dashboard" ? (
-        <div className={`space-y-4 ${filterRailPad(filterOpen)}`}>
+        <div className={`space-y-4 ${filterRailPad(filterOpen, dashLayout.placement)}`}>
           {/* Filters — Date + Refresh stay in the bar; the rest live in the right-side rail. */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <FilterToggle open={filterOpen} count={dashCount} onClick={() => { if (!filterOpen) syncDashDraft(); setFilterOpen((o) => !o); }} />
+              {isAdmin && <FilterLayoutMenu api={dashLayout} defs={DASH_LAYOUT_DEFS} />}
             </div>
             <div className="flex items-center gap-2">
               {filtersActive && <button onClick={clearDashFilters} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Clear filters</button>}
@@ -642,13 +666,14 @@ export default function ClientCalls() {
             onApply={applyDashFilters}
             applyDisabled={!dashDirty}
             applyLabel="Apply"
+            placement={dashLayout.placement}
           >
-            <div className="space-y-1.5"><FilterLabel>Date</FilterLabel><DateRangeFilter ariaLabel="Dashboard date range" value={dfDate} onChange={setDfDate} /></div>
-            <div className="space-y-1.5"><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={dfSource} onChange={setDfSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={dfStatus} onChange={setDfStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={dfDept} onChange={setDfDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={dfOffice} onChange={setDfOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={dfAssign} onChange={setDfAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>
+            {!dashLayout.isHidden("date") && <div className="space-y-1.5" style={{ order: dfo("date") }}><FilterLabel>Date</FilterLabel><DateRangeFilter ariaLabel="Dashboard date range" value={dfDate} onChange={setDfDate} /></div>}
+            {!dashLayout.isHidden("source") && <div className="space-y-1.5" style={{ order: dfo("source") }}><FilterLabel>Lead source</FilterLabel><MultiSelect ariaLabel="Lead source" value={dfSource} onChange={setDfSource} options={sourceOpts} placeholder="All sources" searchPlaceholder="Search…" /></div>}
+            {!dashLayout.isHidden("status") && <div className="space-y-1.5" style={{ order: dfo("status") }}><FilterLabel>Lead status</FilterLabel><MultiSelect ariaLabel="Lead status" value={dfStatus} onChange={setDfStatus} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>}
+            {!dashLayout.isHidden("dept") && <div className="space-y-1.5" style={{ order: dfo("dept") }}><FilterLabel>Department</FilterLabel><MultiSelect ariaLabel="Department" value={dfDept} onChange={setDfDept} options={deptOpts} placeholder="All" searchPlaceholder="Search…" /></div>}
+            {!dashLayout.isHidden("office") && <div className="space-y-1.5" style={{ order: dfo("office") }}><FilterLabel>Office</FilterLabel><MultiSelect ariaLabel="Office" value={dfOffice} onChange={setDfOffice} options={officeOpts} placeholder="All" searchPlaceholder="Search…" /></div>}
+            {!dashLayout.isHidden("assign") && <div className="space-y-1.5" style={{ order: dfo("assign") }}><FilterLabel>Assign</FilterLabel><MultiSelect ariaLabel="Assign" value={dfAssign} onChange={setDfAssign} options={assignOpts} placeholder="Everyone" searchPlaceholder="Search team…" /></div>}
           </FilterRail>
 
           {dashLoading && !dash ? (
@@ -728,7 +753,7 @@ export default function ClientCalls() {
         </div>
       ) : (
         // ============================ CALL LOG VIEW ============================
-        <div className={`space-y-4 ${filterRailPad(filterOpen)}`}>
+        <div className={`space-y-4 ${filterRailPad(filterOpen, logLayout.placement)}`}>
           {/* Filters — a Filters toggle opens the right-side rail; the search stays instant. */}
           <FilterRail
             open={filterOpen}
@@ -739,17 +764,18 @@ export default function ClientCalls() {
             onApply={applyLogFilters}
             applyDisabled={!logDirty}
             applyLabel="Apply"
+            placement={logLayout.placement}
           >
-            <div className="space-y-1.5"><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={dlStatus} onChange={setDlStatus} options={CSTATUS_OPTS} placeholder="All statuses" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={dlType} onChange={setDlType} options={TYPE_OPTS} placeholder="All types" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Source</FilterLabel><MultiSelect ariaLabel="Source" value={dlSource} onChange={setDlSource} options={SRC_OPTS} placeholder="All sources" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Connected</FilterLabel><MultiSelect ariaLabel="Connected" value={dlConn} onChange={setDlConn} options={CONN_OPTS} placeholder="Any" searchPlaceholder="Search…" /></div>
-            <div className="space-y-1.5"><FilterLabel>Call date</FilterLabel><DateRangeFilter ariaLabel="Call date" value={dlDate} onChange={setDlDate} /></div>
+            {!logLayout.isHidden("status") && <div className="space-y-1.5" style={{ order: lfo("status") }}><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={dlStatus} onChange={setDlStatus} options={CSTATUS_OPTS} placeholder="All statuses" searchPlaceholder="Search…" /></div>}
+            {!logLayout.isHidden("type") && <div className="space-y-1.5" style={{ order: lfo("type") }}><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={dlType} onChange={setDlType} options={TYPE_OPTS} placeholder="All types" searchPlaceholder="Search…" /></div>}
+            {!logLayout.isHidden("source") && <div className="space-y-1.5" style={{ order: lfo("source") }}><FilterLabel>Source</FilterLabel><MultiSelect ariaLabel="Source" value={dlSource} onChange={setDlSource} options={SRC_OPTS} placeholder="All sources" searchPlaceholder="Search…" /></div>}
+            {!logLayout.isHidden("connected") && <div className="space-y-1.5" style={{ order: lfo("connected") }}><FilterLabel>Connected</FilterLabel><MultiSelect ariaLabel="Connected" value={dlConn} onChange={setDlConn} options={CONN_OPTS} placeholder="Any" searchPlaceholder="Search…" /></div>}
+            {!logLayout.isHidden("date") && <div className="space-y-1.5" style={{ order: lfo("date") }}><FilterLabel>Call date</FilterLabel><DateRangeFilter ariaLabel="Call date" value={dlDate} onChange={setDlDate} /></div>}
           </FilterRail>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-1 items-center gap-2">
-              <div className="flex-shrink-0"><FilterToggle open={filterOpen} count={logCount} onClick={() => { if (!filterOpen) syncLogDraft(); setFilterOpen((o) => !o); }} /></div>
+              <div className="flex flex-shrink-0 items-center gap-2"><FilterToggle open={filterOpen} count={logCount} onClick={() => { if (!filterOpen) syncLogDraft(); setFilterOpen((o) => !o); }} />{isAdmin && <FilterLayoutMenu api={logLayout} defs={LOG_LAYOUT_DEFS} />}</div>
               <div className="relative w-full max-w-sm">
                 <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
                 <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search lead, number, staff…" className={`${selCls} w-full pl-9`} />

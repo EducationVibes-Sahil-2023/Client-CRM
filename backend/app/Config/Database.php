@@ -51,6 +51,42 @@ class Database extends Config
         ],
     ];
 
+    /**
+     * SECONDARY (read-only) database — a separate MySQL server queried for
+     * SELECTs only. Configure it entirely from .env under database.secondary.*
+     * (host/port/user/password/database). Left blank here so nothing connects
+     * until it's configured; {@see \App\Libraries\SecondaryDb} enforces
+     * SELECT-only access at the app layer.
+     *
+     * @var array<string, mixed>
+     */
+    public array $secondary = [
+        'DSN'          => '',
+        'hostname'     => '',
+        'username'     => '',
+        'password'     => '',
+        'database'     => '',
+        'DBDriver'     => 'MySQLi',
+        'DBPrefix'     => '',
+        'pConnect'     => false,
+        'DBDebug'      => true,
+        'charset'      => 'utf8mb4',
+        'DBCollat'     => 'utf8mb4_general_ci',
+        'swapPre'      => '',
+        'encrypt'      => false,
+        'compress'     => false,
+        'strictOn'     => false,
+        'failover'     => [],
+        'port'         => 3306,
+        'numberNative' => false,
+        'foundRows'    => false,
+        'dateFormat'   => [
+            'date'     => 'Y-m-d',
+            'datetime' => 'Y-m-d H:i:s',
+            'time'     => 'H:i:s',
+        ],
+    ];
+
     //    /**
     //     * Sample database connection for SQLite3.
     //     *

@@ -14,6 +14,15 @@ import { DataTable, IconButton, type Column } from "../../admin/DataTable";
 import { MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { DateRangeFilter, inDateRange, rangeActive, EMPTY_RANGE, type DateRange } from "../../admin/dateFilter";
 import { FilterRail, FilterToggle, FilterLabel, filterRailPad } from "../FilterRail";
+import { useClient } from "../ClientContext";
+import { useFilterLayout, FilterLayoutMenu, orderFilters } from "../../admin/tableConfig";
+
+const FILTER_LAYOUT_DEFS: { id: string; label: string }[] = [
+  { id: "date", label: "Visitor date" },
+  { id: "type", label: "Type" },
+  { id: "status", label: "Status" },
+  { id: "assign", label: "Assigned to" },
+];
 import VisitorModal, { blankVisitorDraft, type VDraft } from "./VisitorModal";
 import { PerfSummary } from "./DateSummary";
 
@@ -37,6 +46,14 @@ type Filters = typeof FILTERS;
 export default function VisitorsTab() {
   const toast = useToast();
   const confirm = useConfirm();
+  const { isAdmin } = useClient();
+  const filterLayout = useFilterLayout("visitors_filters", isAdmin);
+  const filterOrderIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    orderFilters(FILTER_LAYOUT_DEFS, filterLayout.order).forEach((d, i) => { m[d.id] = i; });
+    return m;
+  }, [filterLayout.order]);
+  const fo = (id: string): number => filterOrderIndex[id] ?? 0;
   const [rows, setRows] = useState<Visitor[]>([]);
   const [loading, setLoading] = useState(true);
   const [types, setTypes] = useState<VisitorType[]>([]);
@@ -115,11 +132,11 @@ export default function VisitorsTab() {
   ];
 
   return (
-    <div className={filterRailPad(railOpen)}>
+    <div className={filterRailPad(railOpen, filterLayout.placement)}>
       {/* Toolbar */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-1 items-center gap-2">
-          <div className="flex-shrink-0"><FilterToggle open={railOpen} count={appliedCount} onClick={() => { setDraftF(applied); setRailOpen((o) => !o); }} /></div>
+          <div className="flex flex-shrink-0 items-center gap-2"><FilterToggle open={railOpen} count={appliedCount} onClick={() => { setDraftF(applied); setRailOpen((o) => !o); }} />{isAdmin && <FilterLayoutMenu api={filterLayout} defs={FILTER_LAYOUT_DEFS} />}</div>
           <div className="relative w-full max-w-sm">
             <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" strokeLinecap="round" /></svg>
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, phone, purpose…" className={`${field} pl-9`} />
@@ -184,11 +201,12 @@ export default function VisitorsTab() {
         open={railOpen} onClose={() => setRailOpen(false)} dirty={dirty}
         onReset={() => setDraftF(FILTERS)} resetDisabled={!draftSet}
         onApply={() => { setApplied(draftF); setRailOpen(false); }} applyDisabled={!dirty} applyLabel="Apply"
+        placement={filterLayout.placement}
       >
-        <div className="space-y-1.5"><FilterLabel>Visitor date</FilterLabel><DateRangeFilter ariaLabel="Visitor date" value={draftF.date} onChange={(v) => setDraftF((d) => ({ ...d, date: v }))} /></div>
-        <div className="space-y-1.5"><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={draftF.type} onChange={(v) => setDraftF((d) => ({ ...d, type: v }))} options={typeOpts} placeholder="All types" searchPlaceholder="Search…" /></div>
-        <div className="space-y-1.5"><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={draftF.status} onChange={(v) => setDraftF((d) => ({ ...d, status: v }))} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>
-        <div className="space-y-1.5"><FilterLabel>Assigned to</FilterLabel><MultiSelect ariaLabel="Assigned" value={draftF.assign} onChange={(v) => setDraftF((d) => ({ ...d, assign: v }))} options={staffOpts} placeholder="Anyone" searchPlaceholder="Search team…" /></div>
+        {!filterLayout.isHidden("date") && <div className="space-y-1.5" style={{ order: fo("date") }}><FilterLabel>Visitor date</FilterLabel><DateRangeFilter ariaLabel="Visitor date" value={draftF.date} onChange={(v) => setDraftF((d) => ({ ...d, date: v }))} /></div>}
+        {!filterLayout.isHidden("type") && <div className="space-y-1.5" style={{ order: fo("type") }}><FilterLabel>Type</FilterLabel><MultiSelect ariaLabel="Type" value={draftF.type} onChange={(v) => setDraftF((d) => ({ ...d, type: v }))} options={typeOpts} placeholder="All types" searchPlaceholder="Search…" /></div>}
+        {!filterLayout.isHidden("status") && <div className="space-y-1.5" style={{ order: fo("status") }}><FilterLabel>Status</FilterLabel><MultiSelect ariaLabel="Status" value={draftF.status} onChange={(v) => setDraftF((d) => ({ ...d, status: v }))} options={statusOpts} placeholder="All statuses" searchPlaceholder="Search…" /></div>}
+        {!filterLayout.isHidden("assign") && <div className="space-y-1.5" style={{ order: fo("assign") }}><FilterLabel>Assigned to</FilterLabel><MultiSelect ariaLabel="Assigned" value={draftF.assign} onChange={(v) => setDraftF((d) => ({ ...d, assign: v }))} options={staffOpts} placeholder="Anyone" searchPlaceholder="Search team…" /></div>}
       </FilterRail>
 
       {/* Add / edit visitor — shared with the per-lead "Log visitor" action */}

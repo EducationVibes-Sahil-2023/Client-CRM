@@ -15,10 +15,10 @@ class LeadModel extends TenantModel
     protected $primaryKey    = 'id';
     protected $allowedFields = [
         'client_id', 'name', 'phone', 'alt_phone', 'status_id', 'sub_status_id',
-        'lead_type_id', 'source_id',
+        'lead_type_id', 'source_id', 'web_form_id', 'fb_leadgen_id',
         'reference_id', 'reference_name', 'email', 'assigned_to', 'created_by', 'assigned_date', 'city', 'state',
         'first_response_seconds', 'first_response_at',
-        'follow_date', 'created_date', 'pending_transfer', 'custom_fields',
+        'follow_date', 'created_date', 'pending_transfer', 'custom_fields', 'description',
     ];
 
     protected $useSoftDeletes = true;

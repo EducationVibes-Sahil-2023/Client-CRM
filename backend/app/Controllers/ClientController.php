@@ -9,6 +9,7 @@ use App\Libraries\HtmlSanitizer;
 use App\Libraries\MailerService;
 use App\Libraries\PasswordPolicy;
 use App\Libraries\PushService;
+use App\Libraries\SecondaryDb;
 use App\Libraries\TenantManager;
 use App\Models\ActivityLogModel;
 use App\Models\AnnouncementModel;
@@ -52,6 +53,8 @@ use App\Models\UserTablePrefModel;
 use App\Models\VisitorModel;
 use App\Models\VisitorStatusModel;
 use App\Models\VisitorTypeModel;
+use App\Models\WebFormIndexModel;
+use App\Models\WebFormModel;
 
 /**
  * Client-admin endpoints. The whole group is protected by the
@@ -89,10 +92,21 @@ class ClientController extends ApiController
         'font_family'   => 'inter',        // inter | poppins | slab | mono | system
         'font_size'     => 'base',         // sm | base | lg
         'loader_style'  => 'spinner',      // loading animation: see LOADER_STYLES
+        // Surface & table colours (light mode) — hex, validated as colours below.
+        'panel_bg'        => '#f8fafc',    // page background behind the cards
+        'surface_bg'      => '#ffffff',    // cards / topbar / table / filter panel
+        'sidebar_bg'      => '#ffffff',    // left navigation menu background
+        'sidebar_text'    => '#475569',    // inactive sidebar item text
+        'sidebar_icon'    => '#94a3b8',    // sidebar menu icon colour (inactive)
+        'table_header_bg' => '#f8fafc',    // data-table header row
+        'table_accent'    => '#6366f1',    // table hover / selection / sort / links
     ];
 
     /** Allowed loading-animation styles for the loader_style setting. */
     public const LOADER_STYLES = ['spinner', 'ring', 'dots', 'bars', 'pulse', 'grid'];
+
+    /** Branding keys validated as hex colours (run through sanitizeHexColor). */
+    public const BRANDING_COLOR_KEYS = ['brand_color', 'panel_bg', 'surface_bg', 'sidebar_bg', 'sidebar_text', 'sidebar_icon', 'table_header_bg', 'table_accent'];
 
     /**
      * Branding keys that may be saved blank on purpose. For these, an empty saved
@@ -864,6 +878,12 @@ class ClientController extends ApiController
     private const TABLE_PREF_KEYS = [
         'leads', 'leads_filters', 'calls',
         'team', 'office_locations', 'assets', 'followups', 'billing',
+        'applicant-tracker',
+        // Per-section filter-layout keys (shared bucket = admin's client-wide
+        // filter order/placement; per-user bucket = that user's show/hide).
+        'followups_filters', 'calls_filters', 'calls_log_filters', 'tasks_filters', 'team_filters',
+        'assets_filters', 'reports_filters', 'announcements_filters',
+        'visitors_filters', 'transfers_filters', 'applicant_filters',
     ];
 
     /** The signed-in user's own auth id — the per-user key for saved layouts. */
@@ -883,7 +903,10 @@ class ClientController extends ApiController
             return $this->failNotFound('Unknown table.');
         }
 
-        $row    = (new UserTablePrefModel())->forUser($this->clientId(), $this->userId(), $key);
+        // shared=1 → the CLIENT-WIDE layout (stored under user 0), so the admin's
+        // arrangement applies to everyone; otherwise the caller's own layout.
+        $uid    = $this->request->getGet('shared') === '1' ? 0 : $this->userId();
+        $row    = (new UserTablePrefModel())->forUser($this->clientId(), $uid, $key);
         $config = $row ? json_decode((string) $row['config'], true) : null;
 
         return $this->respond(['config' => is_array($config) ? $config : null]);
@@ -905,16 +928,23 @@ class ClientController extends ApiController
             return $this->failValidationErrors('A config object is required.');
         }
 
+        // A client-wide (shared) layout may only be changed by the client admin.
+        $shared = $this->request->getGet('shared') === '1';
+        if ($shared && ! $this->isAdmin()) {
+            return $this->fail('Only the client admin can change the shared layout.', 403);
+        }
+
         $model = new UserTablePrefModel();
         $cid   = $this->clientId();
-        $uid   = $this->userId();
+        $uid   = $shared ? 0 : $this->userId();
         $json  = json_encode($config);
 
         $existing = $model->forUser($cid, $uid, $key);
         if ($existing) {
             $model->skipValidation(true)->update($existing['id'], ['config' => $json]);
         } else {
-            $model->insert(['client_id' => $cid, 'user_id' => $uid, 'table_key' => $key, 'config' => $json]);
+            // skipValidation so the shared bucket (user_id 0) is allowed.
+            $model->skipValidation(true)->insert(['client_id' => $cid, 'user_id' => $uid, 'table_key' => $key, 'config' => $json]);
         }
 
         return $this->respond(['message' => 'Layout saved', 'config' => $config]);
@@ -1192,8 +1222,9 @@ class ClientController extends ApiController
                     }
                 }
                 $value = json_encode($clean);
-            } elseif ($key === 'brand_color') {
-                $value = $this->sanitizeHexColor((string) $value);
+            } elseif (in_array($key, self::BRANDING_COLOR_KEYS, true)) {
+                // Each colour key falls back to its own default (not the brand green).
+                $value = $this->sanitizeHexColor((string) $value, (string) $_default);
             } elseif ($key === 'default_page_size') {
                 $n     = (int) $value;
                 $value = (string) (in_array($n, self::PAGE_SIZE_OPTIONS, true) ? $n : self::BRANDING_DEFAULTS['default_page_size']);
@@ -1261,14 +1292,14 @@ class ClientController extends ApiController
         }
     }
 
-    /** Validate a #rrggbb colour, falling back to the default brand colour. */
-    private function sanitizeHexColor(string $hex): string
+    /** Validate a #rrggbb colour, falling back to $fallback (default: brand colour). */
+    private function sanitizeHexColor(string $hex, ?string $fallback = null): string
     {
         $hex = trim($hex);
 
         return preg_match('/^#[0-9a-fA-F]{6}$/', $hex) === 1
             ? strtolower($hex)
-            : self::BRANDING_DEFAULTS['brand_color'];
+            : ($fallback ?? self::BRANDING_DEFAULTS['brand_color']);
     }
 
     /**
@@ -1919,8 +1950,10 @@ class ClientController extends ApiController
         $connTimesByPhone = [];
         $callCountByPhone = [];      // total calls per number (any staff, any status)
         $callCountByPhoneStaff = []; // calls per number, per calling staff id
+        $durByPhone       = [];      // total talk seconds per number (any staff)
+        $durByPhoneStaff  = [];      // talk seconds per number, per calling staff id
         if ($pagePhones) {
-            foreach ((new CallLogModel())->select('contact, call_start, connected, staff_id')->where('client_id', $cid)->whereIn('contact', $pagePhones)->findAll() as $row) {
+            foreach ((new CallLogModel())->select('contact, call_start, connected, staff_id, duration')->where('client_id', $cid)->whereIn('contact', $pagePhones)->findAll() as $row) {
                 $k = (string) ($row['contact'] ?? '');
                 if ($k === '') {
                     continue;
@@ -1928,9 +1961,12 @@ class ClientController extends ApiController
                 // Total call count is by phone number only — independent of the
                 // lead link or who the lead is assigned to.
                 $callCountByPhone[$k] = ($callCountByPhone[$k] ?? 0) + 1;
+                $dur = (int) ($row['duration'] ?? 0);
+                $durByPhone[$k] = ($durByPhone[$k] ?? 0) + $dur;
                 $sid = (int) ($row['staff_id'] ?? 0);
                 if ($sid > 0) {
                     $callCountByPhoneStaff[$k][$sid] = ($callCountByPhoneStaff[$k][$sid] ?? 0) + 1;
+                    $durByPhoneStaff[$k][$sid]       = ($durByPhoneStaff[$k][$sid] ?? 0) + $dur;
                 }
                 if ($row['call_start'] === null) {
                     continue;
@@ -1947,6 +1983,10 @@ class ClientController extends ApiController
             }
         }
         $today = date('Y-m-d'); // IST (app timezone)
+        // Optional "Reporting Person": when a staff id is passed, the per-lead
+        // person call-count/duration columns reflect THAT person's own calls
+        // instead of the lead's assigned rep. It does NOT filter which leads show.
+        $reportPerson = (int) ($this->request->getGet('report_person') ?: 0);
 
         foreach ($rows as &$r) {
             $r['status']           = $r['status_id'] ? ($statusNames[(int) $r['status_id']] ?? null) : null;
@@ -1981,12 +2021,26 @@ class ClientController extends ApiController
             // page-bar lead count set above and is returned in the response.
             $callTotal    = 0;
             $callAssigned = 0;
+            $durTotal     = 0;
+            // The "contribution" person for the dynamic columns: the selected
+            // reporting person if one is chosen, else this lead's assigned rep.
+            $person       = $reportPerson > 0 ? $reportPerson : $assignedTo;
+            $personCalls  = 0;
+            $personDur    = 0;
             foreach ($nums as $n) {
                 $callTotal    += $callCountByPhone[$n] ?? 0;
+                $durTotal     += $durByPhone[$n] ?? 0;
                 $callAssigned += $assignedTo > 0 ? ($callCountByPhoneStaff[$n][$assignedTo] ?? 0) : 0;
+                if ($person > 0) {
+                    $personCalls += $callCountByPhoneStaff[$n][$person] ?? 0;
+                    $personDur   += $durByPhoneStaff[$n][$person] ?? 0;
+                }
             }
-            $r['call_count']          = $callTotal;
-            $r['assigned_call_count'] = $callAssigned;
+            $r['call_count']           = $callTotal;         // Total Calls (all callers)
+            $r['assigned_call_count']  = $callAssigned;      // legacy "Assigned calls" column
+            $r['total_duration']       = $durTotal;          // Total Duration seconds (all callers)
+            $r['person_call_count']    = $personCalls;       // Call Count (reporting person, else assigned)
+            $r['person_call_duration'] = $personDur;         // Duration seconds (reporting person, else assigned)
             $r['custom_fields']    = $this->decodeCustom($r['custom_fields'] ?? null);
         }
         unset($r);
@@ -2078,6 +2132,76 @@ class ClientController extends ApiController
                 $cw .= " AND c.call_start <= '{$uTo} 23:59:59'";
             }
             $q->where("EXISTS(SELECT 1 FROM calls c WHERE {$cw})", null, false);
+        }
+
+        // "Connected date" range: keep leads that have at least one CONNECTED call
+        // (matched by contact = phone/alt_phone) whose call_start is in range.
+        $cFrom = $get('connected_from');
+        $cTo   = $get('connected_to');
+        if (($cFrom !== '' && $isDate($cFrom)) || ($cTo !== '' && $isDate($cTo))) {
+            $cc = 'c.deleted_at IS NULL AND c.connected = 1 AND (c.contact = leads.phone OR c.contact = leads.alt_phone)';
+            if ($cFrom !== '' && $isDate($cFrom)) {
+                $cc .= " AND c.call_start >= '{$cFrom} 00:00:00'";
+            }
+            if ($cTo !== '' && $isDate($cTo)) {
+                $cc .= " AND c.call_start <= '{$cTo} 23:59:59'";
+            }
+            $q->where("EXISTS(SELECT 1 FROM calls c WHERE {$cc})", null, false);
+        }
+
+        // "Ghosted leads": duration since the last CONNECTED call, as a Hours+Mins
+        // window (sent as total minutes). Op "gt" (≥) = ghosted (not connected for
+        // at least that long, incl. never connected); "lt" (≤) = connected within.
+        // NOW() is IST (the session timezone), matching how call_start is stored.
+        $ghostMin = (int) $get('ghost_minutes');
+        if ($ghostMin > 0) {
+            $recent = "EXISTS(SELECT 1 FROM calls c WHERE c.deleted_at IS NULL AND c.connected = 1 "
+                    . "AND (c.contact = leads.phone OR c.contact = leads.alt_phone) "
+                    . "AND c.call_start >= (NOW() - INTERVAL {$ghostMin} MINUTE))";
+            $q->where(($get('ghost_op') === 'lt' ? '' : 'NOT ') . $recent, null, false);
+        }
+
+        // Number of calls the lead's ASSIGNED user made to it (by contact), within
+        // a [min, max] range — e.g. select 1–3 to see leads their rep called 1–3 times.
+        $aMin = $get('acalls_min');
+        $aMax = $get('acalls_max');
+        if (ctype_digit($aMin) || ctype_digit($aMax)) {
+            $cnt = '(SELECT COUNT(*) FROM calls c WHERE c.deleted_at IS NULL AND c.staff_id = leads.assigned_to '
+                 . 'AND (c.contact = leads.phone OR c.contact = leads.alt_phone))';
+            if (ctype_digit($aMin)) {
+                $q->where("{$cnt} >= " . (int) $aMin, null, false);
+            }
+            if (ctype_digit($aMax)) {
+                $q->where("{$cnt} <= " . (int) $aMax, null, false);
+            }
+        }
+
+        // Total call talk-time (SUM of duration in seconds across the lead's calls,
+        // matched by contact) within a [min, max] range. Sent from the "Call talk
+        // time" filter as hours+mins collapsed to seconds.
+        $tMin = $get('talk_min');
+        $tMax = $get('talk_max');
+        if (ctype_digit($tMin) || ctype_digit($tMax)) {
+            $talk = '(SELECT COALESCE(SUM(c.duration), 0) FROM calls c WHERE c.deleted_at IS NULL '
+                  . 'AND (c.contact = leads.phone OR c.contact = leads.alt_phone))';
+            if (ctype_digit($tMin)) {
+                $q->where("{$talk} >= " . (int) $tMin, null, false);
+            }
+            if (ctype_digit($tMax)) {
+                $q->where("{$talk} <= " . (int) $tMax, null, false);
+            }
+        }
+
+        // "Last connect date": leads NOT connected after this date — i.e. no
+        // CONNECTED call (matched by contact) later than the given day. Finds
+        // stale leads with no recent successful contact.
+        if (($nca = $get('no_connect_after')) !== '' && $isDate($nca)) {
+            $q->where("NOT EXISTS(SELECT 1 FROM calls c WHERE c.deleted_at IS NULL AND c.connected = 1 AND (c.contact = leads.phone OR c.contact = leads.alt_phone) AND c.call_start > '{$nca} 23:59:59')", null, false);
+        }
+        // "Last update date": leads NOT updated after this date (the lead row
+        // itself hasn't changed since then, or was never updated).
+        if (($nua = $get('no_update_after')) !== '' && $isDate($nua)) {
+            $q->where("(leads.updated_at <= '{$nua} 23:59:59' OR leads.updated_at IS NULL)", null, false);
         }
 
         // Follow-up status (upcoming / overdue / done) via EXISTS — a lead is
@@ -2407,6 +2531,1038 @@ class ClientController extends ApiController
             'by_source'     => $sortDesc($bySource),
             'by_marketing'  => $sortDesc($byMarketing),
             'by_conversion' => $byConversion, // keep configured stage order
+        ]);
+    }
+
+    /**
+     * GET /client/external-clients — read-only view of the SECONDARY database:
+     * tblclients LEFT JOIN tblbasic_details ON userid, surfacing the applicant's
+     * basic details (name, contact, university, etc.). Server-paginated + search
+     * (page, per_page, q). Admin-only, since it exposes an external data source.
+     */
+    public function externalClients()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can view external clients.', 403);
+        }
+
+        $sdb = new SecondaryDb();
+        if (! $sdb->isConfigured()) {
+            return $this->fail('The secondary database is not configured.', 503);
+        }
+
+        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
+        $offset  = ($page - 1) * $perPage;
+        $q       = trim((string) ($this->request->getGet('q') ?? ''));
+
+        // Shared WHERE + binds for both the count and the page query. Search spans
+        // the basic-details name/contact fields and the client company.
+        $where = '';
+        $binds = [];
+        if ($q !== '') {
+            $like  = '%' . $q . '%';
+            $where = 'WHERE (b.first_name LIKE ? OR b.last_name LIKE ? OR b.email LIKE ? OR b.mobile LIKE ? '
+                   . 'OR b.university_name LIKE ? OR b.country LIKE ? OR c.company LIKE ? OR c.phonenumber LIKE ?)';
+            $binds = [$like, $like, $like, $like, $like, $like, $like, $like];
+        }
+
+        try {
+            $countRow = $sdb->selectRow(
+                "SELECT COUNT(*) AS n FROM tblclients c LEFT JOIN tblbasic_details b ON b.userid = c.userid {$where}",
+                $binds,
+            );
+            $total = (int) ($countRow['n'] ?? 0);
+
+            // LIMIT/OFFSET are validated ints (not user strings), so they're inlined.
+            $rows = $sdb->select(
+                "SELECT c.userid, c.company, c.phonenumber, c.city, c.state, c.datecreated,
+                        b.title, b.first_name, b.last_name, b.email, b.mobile, b.dob, b.gender,
+                        b.father_name, b.mother_name, b.university_name, b.country AS applicant_country
+                 FROM tblclients c
+                 LEFT JOIN tblbasic_details b ON b.userid = c.userid
+                 {$where}
+                 ORDER BY c.userid DESC
+                 LIMIT {$perPage} OFFSET {$offset}",
+                $binds,
+            );
+        } catch (\Throwable $e) {
+            log_message('error', 'externalClients query failed: ' . $e->getMessage());
+
+            return $this->fail('Could not read the secondary database.', 502);
+        }
+
+        // Trim stray whitespace the source data carries in name fields.
+        foreach ($rows as &$r) {
+            $r['first_name'] = trim((string) ($r['first_name'] ?? ''));
+            $r['last_name']  = trim((string) ($r['last_name'] ?? ''));
+            $r['full_name']  = trim($r['first_name'] . ' ' . $r['last_name']);
+        }
+        unset($r);
+
+        return $this->respond([
+            'rows'     => $rows,
+            'total'    => $total,
+            'page'     => $page,
+            'per_page' => $perPage,
+        ]);
+    }
+
+    /**
+     * The fixed JOIN block for the Applicant Tracker (secondary/Perfex DB),
+     * ported from the legacy datatable. Admin view: staff/partner scoping is
+     * dropped (the whole tracker is visible), so the counsellor/partner joins
+     * simplify to a direct key match. The derived apostille + ticket subqueries
+     * mirror the legacy ones so config columns referencing those aliases resolve.
+     */
+    private const APPLICANT_TRACKER_FROM = <<<'SQL'
+        FROM tblclients
+        LEFT JOIN tblbasic_details ON tblbasic_details.userid = tblclients.userid
+        LEFT JOIN tblapplicant_status ON tblapplicant_status.id = tblclients.active
+        LEFT JOIN tblleads ON tblleads.id = tblclients.leadid
+        LEFT JOIN tblstaff ON tblleads.assigned = tblstaff.staffid
+        LEFT JOIN tblleads_status ON tblleads_status.id = tblleads.status
+        LEFT JOIN tblleads_type ON tblleads_type.id = tblleads.type
+        LEFT JOIN tblleads_sources ON tblleads_sources.id = tblleads.source
+        LEFT JOIN tblapplicant_tracker ON tblapplicant_tracker.id = (tblclients.applicant_status + 1)
+        LEFT JOIN tbladmission_preferences ON tbladmission_preferences.userid = tblclients.userid
+        LEFT JOIN tblclient_university_shortlisting ON tblclient_university_shortlisting.client_id = tblclients.userid AND tblclient_university_shortlisting.university_name = tbladmission_preferences.primary_university
+        LEFT JOIN tblorignal_document_status ON tblorignal_document_status.id = tblclients.orignal_document_status
+        LEFT JOIN tblorignal_documents_received ON tblorignal_documents_received.userid = tblclients.userid
+        LEFT JOIN tbloffice_location ON tbloffice_location.id = tblorignal_documents_received.location_id
+        LEFT JOIN tblorignal_documents ON tblorignal_documents.id = tblorignal_documents_received.doc_id
+        LEFT JOIN tblapplicant_stages stage_category ON stage_category.id = tblclients.applicant_stage
+        LEFT JOIN tblapplication_sub_category_mbbs stage_sub_category ON stage_sub_category.id = tblclients.applicant_sub_status
+        LEFT JOIN tblclient_passport_details ON tblclient_passport_details.client_id = tblclients.userid
+        LEFT JOIN tblpassport_stages ON tblpassport_stages.id = tblclient_passport_details.passport_status
+        LEFT JOIN tblacademic_details ON tblacademic_details.userid = tblclients.userid
+        LEFT JOIN tblneet_status ON tblneet_status.id = tblacademic_details.neet_status
+        LEFT JOIN tblvisa_details ON tblvisa_details.userid = tblclients.userid
+        LEFT JOIN tblvisa_status ON tblvisa_status.id = tblvisa_details.status
+        LEFT JOIN tblvendor_list visa_vendor ON visa_vendor.id = tblvisa_details.vendor_id
+        LEFT JOIN tblpayment_mode visa_p_mode ON visa_p_mode.id = tblvisa_details.payment_mode
+        LEFT JOIN tblev_partner ev_partner ON ev_partner.id = tblclients.agent_id
+        LEFT JOIN (
+            SELECT userid, SUM(apostille_cost) AS Total_cost, MAX(courier_date) AS courier_date,
+                   MAX(payment_date) AS payment_date, GROUP_CONCAT(vendor_id) AS vendor_id,
+                   GROUP_CONCAT(doc_id) AS doc_id, MAX(apostille_received) AS apostille_received,
+                   CASE WHEN COUNT(*) = 0 THEN 'Pending'
+                        WHEN SUM(received_status = 0) > 0 THEN 'Sent'
+                        WHEN SUM(received_status = 1) = COUNT(*) THEN 'Received'
+                        ELSE 'Pending' END AS apostille_status
+            FROM tblclient_apostille_data GROUP BY userid
+        ) AS apostille_summary ON apostille_summary.userid = tblclients.userid
+        LEFT JOIN (
+            SELECT td1.*, td2.total_cost FROM tblticket_data td1
+            INNER JOIN (
+                SELECT MAX(IF(ticket_status != 6, id, NULL)) AS max_id, client_id,
+                       SUM(IF(ticket_status != 6, ticket_cost, -ticket_cost)) AS total_cost
+                FROM tblticket_data GROUP BY client_id
+            ) td2 ON td1.id = td2.max_id
+        ) td ON td.client_id = tblclients.userid
+        LEFT JOIN tblticket_status ts ON ts.id = td.ticket_status
+        LEFT JOIN tblvendor_list tc ON tc.id = td.vendor_id
+        LEFT JOIN tblpayment_mode tm ON tm.id = td.payment_mode
+        LEFT JOIN tbldeparture_location dl ON dl.id = td.departure_location
+        LEFT JOIN tblticket_batch tb ON tb.id = td.batch_id
+        LEFT JOIN tbluniversity_partner u_p ON u_p.id = tblclient_university_shortlisting.partner
+        SQL;
+
+    /**
+     * LEAN join set for counting + selecting the page's applicant ids — only the
+     * tables the filters touch (no display-only / one-to-many aggregation joins).
+     * Every WHERE column the tracker supports lives here, so it returns the exact
+     * same filtered set as the full FROM but far cheaper. The page's heavy display
+     * columns are then hydrated for just those ids via {@see self::APPLICANT_TRACKER_FROM}.
+     */
+    private const APPLICANT_TRACKER_LEAN_FROM = <<<'SQL'
+        FROM tblclients
+        LEFT JOIN tblbasic_details ON tblbasic_details.userid = tblclients.userid
+        LEFT JOIN tblleads ON tblleads.id = tblclients.leadid
+        LEFT JOIN tbladmission_preferences ON tbladmission_preferences.userid = tblclients.userid
+        LEFT JOIN tblacademic_details ON tblacademic_details.userid = tblclients.userid
+        LEFT JOIN tblclient_passport_details ON tblclient_passport_details.client_id = tblclients.userid
+        LEFT JOIN tblclient_university_shortlisting ON tblclient_university_shortlisting.client_id = tblclients.userid AND tblclient_university_shortlisting.university_name = tbladmission_preferences.primary_university
+        LEFT JOIN tblvisa_details ON tblvisa_details.userid = tblclients.userid
+        LEFT JOIN (
+            SELECT userid, MAX(courier_date) AS courier_date, MAX(payment_date) AS payment_date,
+                   GROUP_CONCAT(vendor_id) AS vendor_id, MAX(apostille_received) AS apostille_received,
+                   CASE WHEN COUNT(*) = 0 THEN 'Pending'
+                        WHEN SUM(received_status = 0) > 0 THEN 'Sent'
+                        WHEN SUM(received_status = 1) = COUNT(*) THEN 'Received'
+                        ELSE 'Pending' END AS apostille_status
+            FROM tblclient_apostille_data GROUP BY userid
+        ) AS apostille_summary ON apostille_summary.userid = tblclients.userid
+        LEFT JOIN (
+            SELECT td1.*, td2.total_cost FROM tblticket_data td1
+            INNER JOIN (
+                SELECT MAX(IF(ticket_status != 6, id, NULL)) AS max_id, client_id,
+                       SUM(IF(ticket_status != 6, ticket_cost, -ticket_cost)) AS total_cost
+                FROM tblticket_data GROUP BY client_id
+            ) td2 ON td1.id = td2.max_id
+        ) td ON td.client_id = tblclients.userid
+        LEFT JOIN tblticket_batch tb ON tb.id = td.batch_id
+        SQL;
+
+    /**
+     * Config column_names that expand into MANY sub-columns via legacy helper
+     * functions (per-currency fees, per-document YES/NO). Skipped in this
+     * data-driven v1 — they need the original helper logic to reproduce.
+     */
+    private const APPLICANT_TRACKER_SKIP = [
+        'fees', 'original_documents', 'original_documents_rest', 'original_documents_georgia',
+        'apostille_documents', 'orignal_document_visa_rest', 'orignal_document_visa_georgia',
+    ];
+
+    /**
+     * Source lists for the dynamic-expansion columns (secondary DB, cached 1h):
+     * the MBBS fee heads and the document master lists per document-set type.
+     * These drive the per-fee and per-document YES/NO columns.
+     *
+     * @return array<string, array<int, array<string, mixed>>>
+     */
+    private function applicantTrackerExpansions(SecondaryDb $sdb): array
+    {
+        $exp = cache('applicant_tracker_expansions');
+        if (is_array($exp)) {
+            return $exp;
+        }
+        $docs = static fn (string $where): array => $sdb->select("SELECT id, short_name FROM tblorignal_documents WHERE {$where} ORDER BY id");
+        $exp  = [
+            'fees'                          => $sdb->select('SELECT id, name FROM tblapplicant_fees WHERE lead_type = 2 AND status = 1 ORDER BY sequence'),
+            'original_documents'            => $docs('status = 1'),
+            'original_documents_rest'       => $docs('rest = 1'),
+            'original_documents_georgia'    => $docs('georgia = 1'),
+            'apostille_documents'           => $docs('apostile_status = 1 OR (visa_apostile = 1 AND status = 0)'),
+            'orignal_document_visa_rest'    => $docs('visa_rest = 1'),
+            'orignal_document_visa_georgia' => $docs('visa_georgia = 1'),
+        ];
+        cache()->save('applicant_tracker_expansions', $exp, 3600);
+
+        return $exp;
+    }
+
+    /**
+     * Build the Applicant Tracker's SELECT column list from the secondary-DB
+     * config table (tblma_applicant_tracker). Each enabled column contributes
+     * `<expr> AS <alias>` (its sql_condition or a safe tbl.column); the special
+     * "fees" and document-set columns expand into one column per fee / document.
+     * Returns [selectSql[], meta[{key,label,selected}]].
+     *
+     * @return array{0: array<int,string>, 1: array<int,array{key:string,label:string,selected:bool}>}
+     */
+    private function applicantTrackerColumns(SecondaryDb $sdb): array
+    {
+        $cfg = $sdb->select(
+            "SELECT tbl, column_name, label_name, sql_condition, selected
+             FROM tblma_applicant_tracker
+             WHERE status = 1 AND show_column = 1
+             ORDER BY IF(sequence = 0, 999999, sequence), tbl_sequence, id",
+        );
+
+        $exp = $this->applicantTrackerExpansions($sdb);
+
+        // Each document set gets its OWN full set of columns, grouped by this
+        // prefix (so "Original Doc" shows all original docs, "AP Doc" all
+        // apostille docs, etc. — even where the same document appears in more
+        // than one set).
+        $docSetLabel = [
+            'original_documents'            => 'Doc',
+            'original_documents_rest'       => 'Doc (Rest)',
+            'original_documents_georgia'    => 'Doc (Georgia)',
+            'apostille_documents'           => 'AP Doc',
+            'orignal_document_visa_rest'    => 'Visa Doc (Rest)',
+            'orignal_document_visa_georgia' => 'Visa Doc (Georgia)',
+        ];
+
+        $cands    = [];   // normal columns, in config order
+        $docCands = [];   // document columns — appended AFTER everything else
+        $used     = [];
+        $expUsed  = [];   // fee ids already added
+        $setDone  = [];   // document sets already expanded
+        // Build a candidate with a unique key; caller pushes it to the right list.
+        $mk = function (string $expr, string $label, bool $sel) use (&$used): array {
+            $key  = preg_replace('/[^a-z0-9]+/', '_', strtolower($label)) ?: 'col';
+            $key  = trim($key, '_') ?: 'col';
+            $base = $key;
+            $i    = 2;
+            while (isset($used[$key])) {
+                $key = $base . '_' . $i++;
+            }
+            $used[$key] = true;
+
+            return ['sql' => "({$expr}) AS `{$key}`", 'key' => $key, 'label' => $label, 'sel' => $sel];
+        };
+        $add = function (string $expr, string $label, bool $sel) use (&$cands, $mk): void {
+            $cands[] = $mk($expr, $label, $sel);
+        };
+
+        foreach ($cfg as $c) {
+            $colName = trim((string) ($c['column_name'] ?? ''));
+            $sel     = ((int) ($c['selected'] ?? 0) === 1);
+
+            // Fees → one column per fee (Registration Amount, One time Charge, …),
+            // as a correlated lookup of this client's amount + currency symbol.
+            if ($colName === 'fees') {
+                foreach ($exp['fees'] as $f) {
+                    if (isset($expUsed['fee:' . $f['id']])) {
+                        continue;
+                    }
+                    $expUsed['fee:' . $f['id']] = true;
+                    $id   = (int) $f['id'];
+                    $expr = "SELECT CONCAT(COALESCE(cur.symbol,''), IFNULL(fd.amount,0)) FROM tblapplicant_fees_details fd "
+                          . "LEFT JOIN tblcurrencies cur ON cur.id = fd.currency_id "
+                          . "WHERE fd.fees_id = {$id} AND fd.client_id = tblclients.userid ORDER BY fd.id DESC LIMIT 1";
+                    $add($expr, (string) $f['name'], $sel);
+                }
+                continue;
+            }
+            // Document sets → a YES/NO column per document in THAT set (Passport,
+            // 12th MS, …), grouped by the set's label so every set is complete.
+            // Reuses the orignal_documents joins already in FROM.
+            if (in_array($colName, self::APPLICANT_TRACKER_SKIP, true)) {
+                if (isset($setDone[$colName])) {
+                    continue; // this set was already expanded (config lists it twice)
+                }
+                $setDone[$colName] = true;
+                $prefix            = $docSetLabel[$colName] ?? 'Doc';
+                foreach (($exp[$colName] ?? []) as $d) {
+                    $sn = trim((string) $d['short_name']);
+                    if ($sn === '') {
+                        continue;
+                    }
+                    $lit  = $sdb->db()->escape($sn); // safe-quoted literal
+                    $expr = "MAX(CASE WHEN tblorignal_documents.short_name = {$lit} THEN 'YES' ELSE 'NO' END)";
+                    // Document columns are collected separately so they all sit at
+                    // the END of the table, after every other column.
+                    $docCands[] = $mk($expr, "{$prefix} - {$sn}", $sel);
+                }
+                continue;
+            }
+
+            // Plain config column: use its sql_condition, else a safe tbl.column.
+            $expr = trim((string) ($c['sql_condition'] ?? ''));
+            if ($expr === '') {
+                $tbl = trim((string) ($c['tbl'] ?? ''));
+                if (! preg_match('/^[a-z0-9_]+$/i', $tbl) || ! preg_match('/^[a-z_][a-z0-9_]*$/i', $colName)) {
+                    continue;
+                }
+                $expr = "{$tbl}.{$colName}";
+            }
+            // Show date + time on date columns: extend the config's date-only
+            // format token so the underlying datetime's time is displayed too.
+            $expr = str_replace("'%d-%m-%Y'", "'%d-%m-%Y %h:%i %p'", $expr);
+            $add($expr, trim((string) ($c['label_name'] ?? '')) ?: $colName, $sel);
+        }
+
+        // All document columns go last, after every other column.
+        $cands = array_merge($cands, $docCands);
+
+        // Some stored sql_condition values have typos (e.g. a missing space) that
+        // would break the whole query. Validate the set once (dropping any that
+        // fail to parse) and cache it — the admin column config is near-static.
+        // Probe under the SAME session mode as the real query so validation is
+        // deterministic and doesn't drop otherwise-valid columns.
+        $cacheKey = 'appl_tracker_cols_v4_' . md5(json_encode(array_column($cands, 'sql')));
+        $good     = cache($cacheKey);
+        if (! is_array($good)) {
+            // The read session (sql_mode='' for GROUP BY) is configured by
+            // SecondaryDb on connect, so probing matches the real query.
+            $good = $this->validColumns($sdb, $cands);
+            cache()->save($cacheKey, $good, 86400);
+        }
+
+        return [array_column($good, 'sql'), array_map(static fn ($c) => ['key' => $c['key'], 'label' => $c['label'], 'selected' => ! empty($c['sel'])], $good)];
+    }
+
+    /** True when every column expression parses against the tracker join set. */
+    private function probeColumns(SecondaryDb $sdb, array $sqlExprs): bool
+    {
+        if (empty($sqlExprs)) {
+            return true;
+        }
+        try {
+            // Match the real query shape (GROUP BY) so a column valid at run time
+            // validates here too — LIMIT 0 keeps it a plan-only, no-row check.
+            // Goes through the read-only guard like every other query.
+            $sdb->select('SELECT ' . implode(', ', $sqlExprs) . ' ' . self::APPLICANT_TRACKER_FROM . ' GROUP BY tblclients.userid LIMIT 0');
+
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Return only the candidate columns whose SQL parses, found by bisecting the
+     * set (so a couple of bad expressions cost a handful of probes, not one each).
+     *
+     * @param array<int,array{sql:string,key:string,label:string}> $cands
+     *
+     * @return array<int,array{sql:string,key:string,label:string}>
+     */
+    private function validColumns(SecondaryDb $sdb, array $cands): array
+    {
+        if ($this->probeColumns($sdb, array_column($cands, 'sql'))) {
+            return $cands; // whole batch is fine
+        }
+        if (count($cands) <= 1) {
+            return []; // the lone column is the bad one
+        }
+        $mid = intdiv(count($cands), 2);
+
+        return array_merge(
+            $this->validColumns($sdb, array_slice($cands, 0, $mid)),
+            $this->validColumns($sdb, array_slice($cands, $mid)),
+        );
+    }
+
+    /**
+     * GET /client/applicant-tracker — the config-driven Applicant Tracker from
+     * the secondary (Perfex) DB: tblclients + the full tracker join set, with the
+     * visible columns read live from tblma_applicant_tracker. Admin-only,
+     * read-only, server-paginated (page, per_page, q). Mirrors the legacy
+     * datatable's listing (write actions — status change / delete / download —
+     * are intentionally excluded).
+     */
+    /**
+     * Applicant userids (secondary DB) whose phone matches a lead in THIS tenant's
+     * leads table — matched by normalized phone (last 10 digits) across the
+     * applicant's mobile/phonenumber and the lead's phone/alt_phone. The two live
+     * on different servers, so the match is computed in PHP and reduced to a
+     * bounded userid list (≤ the applicant count). Cached briefly.
+     *
+     * @return array<int,int>
+     */
+    private function localLeadApplicantIds(SecondaryDb $sdb): array
+    {
+        $cached = cache('applicant_local_lead_ids_' . $this->clientId());
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $norm = static function ($v): string {
+            $d = preg_replace('/\D+/', '', (string) $v);
+
+            return strlen($d) >= 10 ? substr($d, -10) : '';
+        };
+
+        // Local lead phones (tenant DB) → set of normalized numbers.
+        $leadPhones = [];
+        foreach ((new LeadModel())->select('phone, alt_phone')->where('client_id', $this->clientId())->findAll() as $l) {
+            foreach ([$l['phone'] ?? '', $l['alt_phone'] ?? ''] as $p) {
+                $n = $norm($p);
+                if ($n !== '') {
+                    $leadPhones[$n] = true;
+                }
+            }
+        }
+        if (! $leadPhones) {
+            cache()->save('applicant_local_lead_ids_' . $this->clientId(), [], 120);
+
+            return [];
+        }
+
+        // Applicant phones (secondary DB) → keep userids matching a local lead.
+        $ids = [];
+        foreach ($sdb->select('SELECT tblclients.userid AS uid, tblbasic_details.mobile AS m, tblclients.phonenumber AS p FROM tblclients LEFT JOIN tblbasic_details ON tblbasic_details.userid = tblclients.userid') as $r) {
+            foreach ([$r['m'] ?? '', $r['p'] ?? ''] as $ph) {
+                $n = $norm($ph);
+                if ($n !== '' && isset($leadPhones[$n])) {
+                    $ids[] = (int) $r['uid'];
+                    break;
+                }
+            }
+        }
+        $ids = array_values(array_unique($ids));
+        cache()->save('applicant_local_lead_ids_' . $this->clientId(), $ids, 120);
+
+        return $ids;
+    }
+
+    /**
+     * Normalize the Secondary university column in-place. When a lead has no
+     * university_priority, the SQL falls back to the raw admission_preferences
+     * .university value — a {"Country":"Uni1,Uni2"} JSON map that also contains
+     * the primary. Decode it, split on commas, drop the primary, and join the
+     * rest (matching the legacy datatable's PHP post-processing). Values that are
+     * already a clean name (from the priority path) are left untouched.
+     *
+     * @param array<int,array<string,mixed>> $rows
+     */
+    private function cleanSecondaryUniversity(array &$rows): void
+    {
+        foreach ($rows as &$row) {
+            if (! array_key_exists('secondary_university', $row)) {
+                continue;
+            }
+            $sec = trim((string) ($row['secondary_university'] ?? ''));
+            if ($sec === '' || $sec[0] !== '{') {
+                continue; // already a clean name (or blank)
+            }
+            $decoded = json_decode($sec, true);
+            if (! is_array($decoded)) {
+                $row['secondary_university'] = '';
+                continue;
+            }
+            $primary = trim((string) ($row['primary_university'] ?? ''));
+            $unis    = [];
+            foreach ($decoded as $value) {
+                foreach (explode(',', (string) $value) as $u) {
+                    $u = trim($u);
+                    if ($u !== '' && strcasecmp($u, $primary) !== 0) {
+                        $unis[$u] = true; // dedupe, drop the primary
+                    }
+                }
+            }
+            $row['secondary_university'] = implode(', ', array_keys($unis));
+        }
+        unset($row);
+    }
+
+    public function applicantTracker()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can view the applicant tracker.', 403);
+        }
+        $sdb = new SecondaryDb();
+        if (! $sdb->isConfigured()) {
+            return $this->fail('The secondary database is not configured.', 503);
+        }
+
+        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
+        $offset  = ($page - 1) * $perPage;
+        $q       = trim((string) ($this->request->getGet('q') ?? ''));
+
+        // Build the WHERE from search + the leads-style filters. Numeric IN-lists
+        // are cast to ints (safe to inline); free-text values go through binds.
+        $conds = [];
+        $binds = [];
+        if ($q !== '') {
+            $like    = '%' . $q . '%';
+            $conds[] = "(CONCAT(tblbasic_details.first_name,' ',tblbasic_details.last_name) LIKE ? "
+                     . "OR tblbasic_details.email LIKE ? OR tblbasic_details.mobile LIKE ?)";
+            array_push($binds, $like, $like, $like);
+        }
+
+        // Helper: read a GET param as an array (accepts array or comma string).
+        $arr = function (string $param): array {
+            $raw = $this->request->getGet($param);
+
+            return is_array($raw) ? $raw : ($raw !== null && $raw !== '' ? explode(',', (string) $raw) : []);
+        };
+        $intIn = static function (array $vals): array {
+            return array_values(array_filter(array_map('intval', $vals), static fn ($n) => $n > 0));
+        };
+        $strIn = static function (array $vals): array {
+            return array_values(array_filter(array_map('trim', $vals), static fn ($v) => $v !== ''));
+        };
+
+        // Multi-select id filters → column IN (ints).
+        foreach ([
+            'status'         => 'tblclients.active',
+            'stage'          => 'tblclients.applicant_stage',
+            'sub_stage'      => 'tblclients.applicant_sub_status',
+            'lead_type'      => 'tblleads.type',
+            'source'         => 'tblleads.source',
+            'client_type'    => 'tblclients.client_type',
+            'neet_status'    => 'tblacademic_details.neet_status',
+            'pcc_status'     => 'tblclients.pcc_status',
+            'passport_status' => 'tblclient_passport_details.passport_status',
+            'doc_status'     => 'tblclients.orignal_document_status',
+            'ev_partner'     => 'tblclients.agent_id',
+            'counsellor'     => 'tblleads.assigned',
+            'fly_departure'  => 'td.departure_location',
+            'fly_vendors'    => 'td.vendor_id',
+        ] as $param => $col) {
+            $ids = $intIn($arr($param));
+            if ($ids) {
+                $conds[] = "{$col} IN (" . implode(',', $ids) . ')';
+            }
+        }
+
+        // Multi-select free-text filters → column IN (?, …).
+        foreach ([
+            'university' => 'tbladmission_preferences.primary_university',
+            'country'    => 'tbladmission_preferences.primary_country',
+            'fly_batch'  => 'tb.name',
+        ] as $param => $col) {
+            $vals = $strIn($arr($param));
+            if ($vals) {
+                $conds[] = "{$col} IN (" . implode(',', array_fill(0, count($vals), '?')) . ')';
+                array_push($binds, ...$vals);
+            }
+        }
+
+        // Apostille status (Pending / Sent / Received) → COALESCE default Pending.
+        $apo = $strIn($arr('apostille_status'));
+        if ($apo) {
+            $conds[] = "COALESCE(apostille_summary.apostille_status,'Pending') IN (" . implode(',', array_fill(0, count($apo), '?')) . ')';
+            array_push($binds, ...$apo);
+        }
+
+        // Vendor filters stored as comma lists → match any id via REGEXP.
+        foreach ([
+            'apostille_vendors' => 'apostille_summary.vendor_id',
+            'visa_vendors'      => 'tblvisa_details.vendor_id',
+        ] as $param => $col) {
+            $ids = $intIn($arr($param));
+            if ($ids) {
+                $pattern = implode('|', array_map(static fn ($v) => '(^|,)' . $v . '(,|$)', $ids));
+                $conds[] = "({$col} IS NOT NULL AND {$col} REGEXP ?)";
+                $binds[] = $pattern;
+            }
+        }
+
+        // Yes/No flags.
+        $minor = trim((string) ($this->request->getGet('minor') ?? ''));
+        if ($minor === 'Yes' || $minor === 'No') {
+            $op      = $minor === 'Yes' ? '<' : '>=';
+            $conds[] = "TIMESTAMPDIFF(YEAR, tblbasic_details.dob, CURDATE()) {$op} 18";
+        }
+        $tf = trim((string) ($this->request->getGet('tf_status') ?? ''));
+        if ($tf === 'Yes') {
+            $conds[] = "tblclient_university_shortlisting.fees_deposite_slip <> ''";
+        } elseif ($tf === 'No') {
+            $conds[] = "(tblclient_university_shortlisting.fees_deposite_slip IS NULL OR tblclient_university_shortlisting.fees_deposite_slip = '')";
+        }
+
+        // Academic year → the two session intakes (YYYY-09 and (YYYY+1)-02).
+        $year = (int) ($this->request->getGet('academic_year') ?: 0);
+        if ($year > 2000) {
+            $conds[] = "(tbladmission_preferences.session_intake IN (?, ?) OR tbladmission_preferences.session_intake IS NULL)";
+            array_push($binds, $year . '-09', ($year + 1) . '-02');
+        }
+
+        // Single-date equals filters.
+        $isDate = static fn (string $s): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $s);
+        foreach ([
+            'courier_date'      => 'apostille_summary.courier_date',
+            'apostille_received' => 'apostille_summary.apostille_received',
+            'visa_payment_date' => 'tblvisa_details.payment_date',
+            'fly_date'          => 'td.fly_date',
+        ] as $param => $col) {
+            $d = trim((string) ($this->request->getGet($param) ?? ''));
+            if ($isDate($d)) {
+                $conds[] = "DATE({$col}) = ?";
+                $binds[] = $d;
+            }
+        }
+
+        // Date-range filters (from/to pairs).
+        foreach ([
+            'from'      => ['to', 'tblclients.datecreated'],       // Applicant date
+            'last_from' => ['last_to', 'tblclients.last_update'],  // Last update
+        ] as $fromParam => [$toParam, $col]) {
+            $f = trim((string) ($this->request->getGet($fromParam) ?? ''));
+            $t = trim((string) ($this->request->getGet($toParam) ?? ''));
+            if ($isDate($f) && $isDate($t)) {
+                $conds[] = "DATE({$col}) BETWEEN ? AND ?";
+                array_push($binds, $f, $t);
+            }
+        }
+
+        // Only applicants whose phone matches a lead in THIS tenant's leads table
+        // (on by default; pass all=1 to see every applicant). Cross-DB, so the
+        // match is resolved to a bounded userid list in PHP.
+        if (trim((string) ($this->request->getGet('all') ?? '')) !== '1') {
+            $ids     = $this->localLeadApplicantIds($sdb);
+            $conds[] = 'tblclients.userid IN (' . ($ids ? implode(',', $ids) : '0') . ')';
+        }
+
+        $where = $conds ? 'WHERE ' . implode(' AND ', $conds) : '';
+
+        try {
+            [$select, $meta] = $this->applicantTrackerColumns($sdb);
+
+            // 1) Count + this page's applicant ids over the LEAN join set (only
+            //    filter tables) — cheap, no heavy per-column aggregation.
+            $leanFrom = self::APPLICANT_TRACKER_LEAN_FROM . "\n{$where}";
+            $countRow = $sdb->selectRow("SELECT COUNT(DISTINCT tblclients.userid) AS n {$leanFrom}", $binds);
+            $total    = (int) ($countRow['n'] ?? 0);
+
+            $idRows = $sdb->select(
+                "SELECT DISTINCT tblclients.userid AS uid {$leanFrom} ORDER BY tblclients.userid DESC LIMIT {$perPage} OFFSET {$offset}",
+                $binds,
+            );
+            $ids = array_map(static fn ($r) => (int) $r['uid'], $idRows);
+
+            // 2) Hydrate ONLY the page's applicants with the full (heavy) column
+            //    set — the ~87 columns + one-to-many joins now aggregate over just
+            //    this page's rows, not the whole table. No binds (ids inlined,
+            //    filters already applied, column exprs are literals). ORDER BY
+            //    keeps the page order stable.
+            $rows = [];
+            if ($ids) {
+                // __status_color drives the Status badge colour on the frontend
+                // (not shown as its own column — it's not in the column meta).
+                $cols = array_merge(['tblclients.userid AS `userid`', 'tblapplicant_status.color AS `__status_color`'], $select);
+                $rows = $sdb->select(
+                    'SELECT ' . implode(', ', $cols) . ' ' . self::APPLICANT_TRACKER_FROM
+                    . ' WHERE tblclients.userid IN (' . implode(',', $ids) . ')'
+                    . ' GROUP BY tblclients.userid ORDER BY tblclients.userid DESC',
+                );
+                $this->cleanSecondaryUniversity($rows);
+            }
+        } catch (\Throwable $e) {
+            log_message('error', 'applicantTracker query failed: ' . $e->getMessage());
+
+            return $this->fail('Could not read the applicant tracker: ' . $e->getMessage(), 502);
+        }
+
+        return $this->respond([
+            'columns'  => $meta,
+            'rows'     => $rows,
+            'total'    => $total,
+            'page'     => $page,
+            'per_page' => $perPage,
+        ]);
+    }
+
+    /**
+     * GET /client/applicant-tracker-filters — dropdown options for the Applicant
+     * Tracker filters (status, stage, sub-stage, lead type, university), read from
+     * the secondary DB. Admin-only. Cached 1h (near-static lookups).
+     */
+    public function applicantTrackerFilters()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can view this.', 403);
+        }
+        $sdb = new SecondaryDb();
+        if (! $sdb->isConfigured()) {
+            return $this->fail('The secondary database is not configured.', 503);
+        }
+
+        $cached = cache('applicant_tracker_filters_v2');
+        if (is_array($cached)) {
+            return $this->respond($cached);
+        }
+
+        try {
+            $opts = static fn (array $rows): array => array_map(
+                static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']],
+                $rows,
+            );
+            $distinct = static fn (array $rows): array => array_values(array_filter(array_map(
+                static fn ($r) => (string) $r['v'],
+                $rows,
+            ), static fn ($v) => $v !== ''));
+
+            $data = [
+                'status'          => $opts($sdb->select('SELECT id, name FROM tblapplicant_status ORDER BY name')),
+                'stage'           => $opts($sdb->select('SELECT id, name FROM tblapplicant_stages ORDER BY name')),
+                'sub_stage'       => $opts($sdb->select('SELECT id, name FROM tblapplication_sub_category_mbbs ORDER BY name')),
+                'lead_type'       => $opts($sdb->select('SELECT id, name FROM tblleads_type ORDER BY name')),
+                'source'          => $opts($sdb->select('SELECT id, name FROM tblleads_sources ORDER BY name')),
+                'neet_status'     => $opts($sdb->select('SELECT id, name FROM tblneet_status ORDER BY name')),
+                'passport_status' => $opts($sdb->select('SELECT id, name FROM tblpassport_stages ORDER BY name')),
+                'doc_status'      => $opts($sdb->select('SELECT id, name FROM tblorignal_document_status ORDER BY name')),
+                'ev_partner'      => $opts($sdb->select('SELECT id, name FROM tblev_partner ORDER BY name')),
+                'fly_departure'   => $opts($sdb->select('SELECT id, name FROM tbldeparture_location ORDER BY name')),
+                'vendors'         => $opts($sdb->select('SELECT id, name FROM tblvendor_list ORDER BY name')),
+                'counsellor'      => $opts($sdb->select("SELECT staffid AS id, CONCAT(firstname,' ',lastname) AS name FROM tblstaff WHERE active = 1 ORDER BY firstname")),
+                'university'      => $distinct($sdb->select("SELECT DISTINCT primary_university AS v FROM tbladmission_preferences WHERE primary_university IS NOT NULL AND primary_university <> '' ORDER BY primary_university")),
+                'country'         => $distinct($sdb->select("SELECT DISTINCT primary_country AS v FROM tbladmission_preferences WHERE primary_country IS NOT NULL AND primary_country <> '' ORDER BY primary_country")),
+                'fly_batch'       => $distinct($sdb->select("SELECT DISTINCT name AS v FROM tblticket_batch WHERE name <> '' ORDER BY name")),
+                // Static option sets.
+                'apostille_status' => ['Pending', 'Sent', 'Received'],
+                'client_type'      => [['id' => 1, 'name' => 'Client'], ['id' => 2, 'name' => 'EV Partner'], ['id' => 3, 'name' => 'Other']],
+                'minor'            => ['Yes', 'No'],
+                'tf_status'        => ['Yes', 'No'],
+            ];
+        } catch (\Throwable $e) {
+            log_message('error', 'applicantTrackerFilters failed: ' . $e->getMessage());
+
+            return $this->fail('Could not read filter options.', 502);
+        }
+
+        cache()->save('applicant_tracker_filters_v2', $data, 3600);
+
+        return $this->respond($data);
+    }
+
+    /** Default label + URL slug for the Applicant section (before admin edits). */
+    private const APPLICANT_DEFAULTS = ['label' => 'Applicant', 'slug' => 'applicant'];
+
+    /**
+     * Client-panel URL slugs that already belong to built-in sections — the
+     * Applicant slug can't collide with any of these.
+     */
+    private const RESERVED_SLUGS = [
+        'me', 'leads', 'calls', 'followups', 'team', 'org-chart', 'assets', 'tasks',
+        'reports', 'announcements', 'chat', 'notifications', 'activity', 'docs',
+        'billing', 'roles', 'departments', 'office-locations', 'leads-setup',
+        'form-setup', 'email-config', 'appearance', 'settings', 'profile',
+        'external-clients', 'visitors', 'transfers', 'dashboard',
+    ];
+
+    /** The Applicant section's configured label + slug (with defaults applied). */
+    private function applicantConfigMap(): array
+    {
+        $map    = $this->settingsMap();
+        $label  = trim((string) ($map['applicant_label'] ?? ''));
+        $slug   = trim((string) ($map['applicant_slug'] ?? ''));
+        $colors = json_decode((string) ($map['applicant_colors'] ?? ''), true);
+
+        return [
+            'label'  => $label !== '' ? $label : self::APPLICANT_DEFAULTS['label'],
+            'slug'   => $slug !== '' ? $slug : self::APPLICANT_DEFAULTS['slug'],
+            // Admin-defined value → hex colour map (e.g. {"YES":"#16a34a"}). The
+            // frontend colours a cell whose value matches (case-insensitive).
+            'colors' => is_array($colors) ? $colors : (object) [],
+            // How many leading columns stay frozen (pinned) while scrolling (0–5).
+            // Defaults to 1 so the Name column is pinned out of the box.
+            'frozen' => max(0, min(5, (int) ($map['applicant_frozen'] ?? 1))),
+        ];
+    }
+
+    /**
+     * GET /client/applicant-config — the Applicant section's label + URL slug.
+     * Readable by any signed-in client user (the sidebar needs it to build the
+     * nav link + route).
+     */
+    public function applicantConfig()
+    {
+        return $this->respond($this->applicantConfigMap());
+    }
+
+    /**
+     * POST /client/applicant-config — rename the Applicant section and/or change
+     * its URL slug. Admin-only. Slug must be url-safe and not collide with a
+     * built-in section.
+     */
+    public function saveApplicantConfig()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can edit this section.', 403);
+        }
+
+        $label = trim((string) $this->input('label'));
+        $slug  = strtolower(trim((string) $this->input('slug')));
+
+        if ($label === '' || mb_strlen($label) > 40) {
+            return $this->failValidationErrors('The section name must be 1–40 characters.');
+        }
+        // A tidy, url-safe slug: starts with a letter, then letters/digits/hyphens.
+        if (! preg_match('/^[a-z][a-z0-9-]{0,30}$/', $slug)) {
+            return $this->failValidationErrors('The URL must be lowercase letters, numbers and hyphens (e.g. "applicant" or "customer").');
+        }
+        if (in_array($slug, self::RESERVED_SLUGS, true)) {
+            return $this->failValidationErrors("The URL \"{$slug}\" is already used by another section — pick a different one.");
+        }
+
+        // Value → colour map: keys are cell values (max 60 chars), values are
+        // #rgb/#rrggbb hex. Anything malformed is dropped.
+        $colorsIn  = $this->input('colors');
+        $colorsOut = [];
+        if (is_array($colorsIn)) {
+            foreach ($colorsIn as $k => $v) {
+                $k = trim((string) $k);
+                $v = trim((string) $v);
+                if ($k !== '' && mb_strlen($k) <= 60 && preg_match('/^#([0-9a-f]{3}|[0-9a-f]{6})$/i', $v)) {
+                    $colorsOut[$k] = strtolower($v);
+                    if (count($colorsOut) >= 100) {
+                        break; // sane cap
+                    }
+                }
+            }
+        }
+
+        $frozen = max(0, min(5, (int) $this->input('frozen')));
+
+        $this->setSetting('applicant_label', $label);
+        $this->setSetting('applicant_slug', $slug);
+        $this->setSetting('applicant_colors', json_encode($colorsOut));
+        $this->setSetting('applicant_frozen', (string) $frozen);
+        $this->logActivity('updated', 'settings', null, 'Updated the Applicant section', $this->clientId());
+
+        return $this->respond($this->applicantConfigMap());
+    }
+
+    // ========================================================= LEAD → APPLICANT
+    //
+    // Admin-configurable "Convert to Applicant" action on a lead: an admin sets
+    // the button label, the form fields, the external API endpoint to POST them
+    // to (the applicant system's own API), and the lead status to move to on
+    // success. Clicking the button opens that form; submitting forwards it to
+    // the API and flips the lead's status.
+
+    /** The convert-to-applicant config (parsed). $full includes the API settings. */
+    private function convertConfigMap(bool $full = false): array
+    {
+        $map    = $this->settingsMap();
+        $fields = json_decode((string) ($map['convert_fields'] ?? ''), true);
+        $fields = is_array($fields) ? array_values($fields) : [];
+
+        $out = [
+            'enabled'   => (string) ($map['convert_enabled'] ?? '0') === '1',
+            'label'     => trim((string) ($map['convert_label'] ?? '')) ?: 'Convert to Applicant',
+            'status_id' => (int) ($map['convert_status_id'] ?? 0),
+            'fields'    => $fields,
+        ];
+        if ($full) {
+            $headers = json_decode((string) ($map['convert_api_headers'] ?? ''), true);
+            $out['api_url']     = (string) ($map['convert_api_url'] ?? '');
+            $out['api_method']  = strtoupper((string) ($map['convert_api_method'] ?? 'POST')) === 'PUT' ? 'PUT' : 'POST';
+            $out['api_type']    = (string) ($map['convert_api_type'] ?? 'json') === 'form' ? 'form' : 'json';
+            $out['api_headers'] = is_array($headers) ? $headers : (object) [];
+        }
+
+        return $out;
+    }
+
+    /**
+     * GET /client/convert-config — the convert-to-applicant config. Any leads
+     * user gets the button label + form fields; the admin also gets the API
+     * settings (url/method/headers) for editing.
+     */
+    public function convertConfig()
+    {
+        if ($resp = $this->requirePermission('leads')) {
+            return $resp;
+        }
+
+        return $this->respond($this->convertConfigMap($this->isAdmin()));
+    }
+
+    /** POST /client/convert-config — save the convert-to-applicant config (admin). */
+    public function saveConvertConfig()
+    {
+        if (! $this->isAdmin()) {
+            return $this->fail('Only the client admin can configure this.', 403);
+        }
+
+        // Form fields: [{key,label,type,required}] — key is a safe slug.
+        $fieldsIn  = $this->input('fields');
+        $fieldsOut = [];
+        if (is_array($fieldsIn)) {
+            foreach ($fieldsIn as $f) {
+                $key = preg_replace('/[^a-z0-9_]/i', '', (string) ($f['key'] ?? ''));
+                if ($key === '') {
+                    continue;
+                }
+                $type = in_array(($f['type'] ?? 'text'), ['text', 'email', 'number', 'date', 'textarea', 'tel'], true) ? $f['type'] : 'text';
+                $fieldsOut[] = [
+                    'key'      => $key,
+                    'label'    => mb_substr(trim((string) ($f['label'] ?? $key)), 0, 60) ?: $key,
+                    'type'     => $type,
+                    'required' => ! empty($f['required']),
+                ];
+                if (count($fieldsOut) >= 60) {
+                    break;
+                }
+            }
+        }
+
+        // Headers: string→string map.
+        $headersIn  = $this->input('api_headers');
+        $headersOut = [];
+        if (is_array($headersIn)) {
+            foreach ($headersIn as $k => $v) {
+                $k = trim((string) $k);
+                if ($k !== '') {
+                    $headersOut[$k] = (string) $v;
+                }
+            }
+        }
+
+        $url = trim((string) $this->input('api_url'));
+        if ($url !== '' && ! preg_match('#^https?://#i', $url)) {
+            return $this->failValidationErrors('The API URL must start with http:// or https://.');
+        }
+
+        $this->setSetting('convert_enabled', ! empty($this->input('enabled')) ? '1' : '0');
+        $this->setSetting('convert_label', mb_substr(trim((string) $this->input('label')), 0, 40));
+        $this->setSetting('convert_status_id', (string) (int) $this->input('status_id'));
+        $this->setSetting('convert_api_url', $url);
+        $this->setSetting('convert_api_method', strtoupper((string) $this->input('api_method')) === 'PUT' ? 'PUT' : 'POST');
+        $this->setSetting('convert_api_type', (string) $this->input('api_type') === 'form' ? 'form' : 'json');
+        $this->setSetting('convert_api_headers', json_encode($headersOut));
+        $this->setSetting('convert_fields', json_encode($fieldsOut));
+        $this->logActivity('updated', 'settings', null, 'Updated the lead-conversion config', $this->clientId());
+
+        return $this->respond($this->convertConfigMap(true));
+    }
+
+    /**
+     * POST /client/leads/{id}/convert — submit the convert form for a lead:
+     * forward the values to the configured external API, and on success move the
+     * lead to the configured status. Body: { values: {key:value,...} }.
+     */
+    public function convertLead(int $id)
+    {
+        if ($resp = $this->requirePermission('leads', 'update')) {
+            return $resp;
+        }
+        $cid  = $this->clientId();
+        $lead = (new LeadModel())->where('client_id', $cid)->find($id);
+        if (! $lead || ! $this->canSeeLead($lead)) {
+            return $this->failNotFound('Lead not found');
+        }
+
+        $cfg = $this->convertConfigMap(true);
+        if (! $cfg['enabled']) {
+            return $this->fail('Lead conversion is not enabled.', 400);
+        }
+        if ($cfg['api_url'] === '') {
+            return $this->fail('No conversion API endpoint is configured.', 400);
+        }
+
+        $valuesIn = $this->input('values');
+        $values   = is_array($valuesIn) ? $valuesIn : [];
+
+        // Validate the admin-defined required fields.
+        $missing = [];
+        foreach ($cfg['fields'] as $f) {
+            if (! empty($f['required']) && trim((string) ($values[$f['key']] ?? '')) === '') {
+                $missing[] = $f['label'] ?? $f['key'];
+            }
+        }
+        if ($missing) {
+            return $this->failValidationErrors('Please fill: ' . implode(', ', $missing) . '.');
+        }
+
+        // Only forward the configured fields (+ the lead id for reference).
+        $payload = ['lead_id' => $id];
+        foreach ($cfg['fields'] as $f) {
+            $payload[$f['key']] = (string) ($values[$f['key']] ?? '');
+        }
+
+        // Forward to the external API.
+        try {
+            $client  = \Config\Services::curlrequest(['timeout' => 20, 'http_errors' => false]);
+            $options = ['headers' => array_merge(['Accept' => 'application/json'], (array) $cfg['api_headers'])];
+            if ($cfg['api_type'] === 'form') {
+                $options['form_params'] = $payload;
+            } else {
+                $options['json'] = $payload;
+            }
+            $res    = $client->request($cfg['api_method'], $cfg['api_url'], $options);
+            $status = $res->getStatusCode();
+            $body   = (string) $res->getBody();
+        } catch (\Throwable $e) {
+            log_message('error', 'convertLead API call failed: ' . $e->getMessage());
+
+            return $this->fail('Could not reach the conversion API: ' . $e->getMessage(), 502);
+        }
+
+        if ($status < 200 || $status >= 300) {
+            return $this->fail("The conversion API returned {$status}: " . mb_substr($body, 0, 300), 502);
+        }
+
+        // Success → move the lead to the configured "customer/converted" status.
+        if ($cfg['status_id'] > 0) {
+            (new LeadModel())->update($id, ['status_id' => $cfg['status_id']]);
+        }
+        $this->logActivity('converted', 'lead', $id, 'Converted lead to applicant');
+
+        return $this->respond([
+            'ok'         => true,
+            'message'    => 'Lead converted.',
+            'api_status' => $status,
+            'api_body'   => json_decode($body, true) ?? $body,
         ]);
     }
 
@@ -3134,8 +4290,9 @@ class ClientController extends ApiController
         $cid    = $this->clientId();
         $model  = new LeadModel();
         $data   = $this->leadData($cid);
-        $custom = $this->formCustomValues('lead', (array) $this->input());
-        if ($errs = $this->formFieldErrors('lead', $data, $custom)) {
+        $scope  = $this->leadFormScope((int) ($data['lead_type_id'] ?? 0));
+        $custom = $this->formCustomValues('lead', (array) $this->input(), $scope);
+        if ($errs = $this->formFieldErrors('lead', $data, $custom, $scope)) {
             return $this->failValidationErrors($errs);
         }
         $rules = $this->leadPhoneRules();
@@ -3164,6 +4321,9 @@ class ClientController extends ApiController
         if ($id === false) {
             return $this->failValidationErrors($model->errors());
         }
+        // Attach any calls already made to this number (ingested before the lead
+        // existed, so lead_id was null) to the new lead.
+        $this->linkCallsToLead($cid, (int) $id, (string) $data['phone'], $data['alt_phone'] ?? null);
         $this->logActivity('created', 'lead', (int) $id, 'Added lead ' . ($data['name'] ?: $data['phone']));
 
         // Notify the assignee (in-app + web push) when a lead is created already
@@ -3191,8 +4351,9 @@ class ClientController extends ApiController
         }
 
         $data   = $this->leadData($cid);
-        $custom = $this->formCustomValues('lead', (array) $this->input());
-        if ($errs = $this->formFieldErrors('lead', $data, $custom)) {
+        $scope  = $this->leadFormScope((int) ($data['lead_type_id'] ?? 0));
+        $custom = $this->formCustomValues('lead', (array) $this->input(), $scope);
+        if ($errs = $this->formFieldErrors('lead', $data, $custom, $scope)) {
             return $this->failValidationErrors($errs);
         }
         // Only re-check uniqueness for a phone the user actually changed, so
@@ -3221,6 +4382,11 @@ class ClientController extends ApiController
 
         if ($model->update($id, $data) === false) {
             return $this->failValidationErrors($model->errors());
+        }
+        // If the phone number changed, attach any existing calls for the new
+        // number to this lead (calls for the old number keep their link).
+        if ((string) ($data['phone'] ?? '') !== (string) ($old['phone'] ?? '') || (string) ($data['alt_phone'] ?? '') !== (string) ($old['alt_phone'] ?? '')) {
+            $this->linkCallsToLead($cid, $id, (string) $data['phone'], $data['alt_phone'] ?? null);
         }
 
         // Record each meaningful change on the lead's activity timeline as its
@@ -3350,8 +4516,22 @@ class ClientController extends ApiController
         if (! empty($in['change_type'])) {
             $common['lead_type_id'] = (int) ($in['lead_type_id'] ?? 0) ?: null;
         }
-        if (! empty($in['change_created']) && trim((string) ($in['created_date'] ?? '')) !== '') {
-            $common['created_date'] = substr(trim((string) $in['created_date']), 0, 10);
+        // Created date: a choice, not a free-text date — "new" stamps today,
+        // "keep" leaves it untouched.
+        if (! empty($in['change_created']) && ($in['created_mode'] ?? 'new') === 'new') {
+            $common['created_date'] = date('Y-m-d');
+        }
+        // Reference: resolve the chosen reference's stable id + a name snapshot.
+        if (! empty($in['change_reference'])) {
+            $refId   = (int) ($in['reference_id'] ?? 0) ?: null;
+            $refName = trim((string) ($in['reference_name'] ?? '')) ?: null;
+            if ($refId) {
+                $ref     = (new LeadReferenceModel())->where('client_id', $cid)->find($refId);
+                $refId   = $ref ? (int) $ref['id'] : null;
+                $refName = $ref ? $ref['name'] : $refName;
+            }
+            $common['reference_id']   = $refId;
+            $common['reference_name'] = $refName;
         }
 
         // Assignment: single (one member) or round-robin across many.
@@ -3369,28 +4549,50 @@ class ClientController extends ApiController
             $assignees = array_slice($assignees, 0, 1);
         }
 
-        if (! $common && ! $changeAssign) {
+        // "Mass assignation" — treat each lead as fresh: clear the previous rep's
+        // reminders/notes/follow-up/first-response so the new assignee starts clean.
+        $massAssign = ! empty($in['mass_assign']);
+
+        // Assignment date+time (optional) — defaults to now when not provided.
+        $assignedAtIn = trim((string) ($in['assigned_at'] ?? ''));
+        $now          = date('Y-m-d H:i:s');
+        $assignWhen   = $now;
+        if (preg_match('/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/', $assignedAtIn, $m)) {
+            $assignWhen = $m[1] . ' ' . $m[2] . ':00';
+        } elseif (preg_match('/^\d{4}-\d{2}-\d{2}$/', $assignedAtIn)) {
+            $assignWhen = $assignedAtIn . ' 00:00:00';
+        }
+
+        if (! $common && ! $changeAssign && ! $massAssign) {
             return $this->fail('Choose at least one field to change.', 422);
         }
 
         $notify      = ! empty($in['notify']);
-        $now         = date('Y-m-d H:i:s');
         $updated     = 0;
         $cursor      = 0; // round-robin position
         $perAssignee = [];
 
         foreach ($leads as $lead) {
-            $data = $common;
+            $data   = $common;
+            $leadId = (int) $lead['id'];
             if ($changeAssign) {
                 $assignTo = $assignees ? $assignees[$cursor % count($assignees)] : null;
                 $cursor++;
                 $data['assigned_to']   = $assignTo;
-                $data['assigned_date'] = $assignTo ? $now : null;
+                $data['assigned_date'] = $assignTo ? $assignWhen : null;
                 if ($assignTo && $assignTo !== (int) ($lead['assigned_to'] ?? 0)) {
                     $perAssignee[$assignTo] = ($perAssignee[$assignTo] ?? 0) + 1;
                 }
             }
-            $model->skipValidation(true)->update((int) $lead['id'], $data);
+            if ($massAssign) {
+                (new LeadReminderModel())->where('client_id', $cid)->where('lead_id', $leadId)->delete();
+                (new LeadNoteModel())->where('client_id', $cid)->where('lead_id', $leadId)->delete();
+                $data['follow_date']            = null;
+                $data['first_response_seconds'] = null;
+                $data['first_response_at']      = null;
+                $data['description']            = null;
+            }
+            $model->skipValidation(true)->update($leadId, $data);
             $updated++;
         }
 
@@ -3636,6 +4838,270 @@ class ClientController extends ApiController
         return $this->respond(['message' => 'Saved', 'columns' => $this->leadImportColumns()]);
     }
 
+    // ============================================= EXCEL DATA HUB (import) ===
+    //
+    // Generic spreadsheet import for TASKS and TEAM (leads keep their own richer
+    // path above). Each entity has a locked required column + fixed data columns +
+    // its custom fields; the include/mandatory flags live in the settings key
+    // `<entity>_import_fields`. The frontend Excel hub maps sheet headers to these
+    // keys, previews issues, then posts `{ rows, options }` here.
+
+    private const IMPORT_ENTITIES = [
+        'task' => [
+            'locked'  => ['key' => 'title', 'label' => 'Title'],
+            'columns' => ['description' => 'Description', 'priority' => 'Priority', 'type' => 'Type', 'status' => 'Status', 'start_date' => 'Start date', 'due_date' => 'Due date'],
+            'form'    => 'task',
+            'perm'    => 'tasks',
+        ],
+        'team' => [
+            'locked'  => ['key' => 'name', 'label' => 'Name'],
+            'columns' => ['email' => 'Email', 'phone' => 'Phone', 'alt_phone' => 'Alternative phone', 'designation' => 'Designation', 'emp_code' => 'Employee code'],
+            'form'    => 'staff',
+            'perm'    => 'team',
+        ],
+    ];
+
+    /** Import template columns for an entity (locked key + fixed cols + custom fields), with saved flags. */
+    private function genericImportColumns(string $entity): array
+    {
+        $spec = self::IMPORT_ENTITIES[$entity];
+        $cfg  = [];
+        foreach ((array) json_decode((string) ($this->settingsMap()[$entity . '_import_fields'] ?? '[]'), true) as $c) {
+            if (is_array($c) && isset($c['key'])) {
+                $cfg[(string) $c['key']] = ['include' => ! empty($c['include']), 'required' => ! empty($c['required'])];
+            }
+        }
+        $cols = [['key' => $spec['locked']['key'], 'label' => $spec['locked']['label'], 'include' => true, 'required' => true, 'custom' => false, 'locked' => true]];
+        foreach ($spec['columns'] as $k => $label) {
+            $cols[] = ['key' => $k, 'label' => $label, 'include' => $cfg[$k]['include'] ?? true, 'required' => $cfg[$k]['required'] ?? false, 'custom' => false, 'locked' => false];
+        }
+        foreach ($this->formCustomFields($spec['form']) as $f) {
+            $k      = $f['key'];
+            $cols[] = ['key' => $k, 'label' => $f['label'], 'include' => $cfg[$k]['include'] ?? true, 'required' => $cfg[$k]['required'] ?? ! empty($f['required']), 'custom' => true, 'locked' => false];
+        }
+
+        return $cols;
+    }
+
+    /** GET /client/import-setup/{entity} — columns for lead|task|team (lead reuses the leads config). */
+    public function importSetup(string $entity)
+    {
+        if ($entity === 'lead') {
+            return $this->leadImportSetup();
+        }
+        if (! isset(self::IMPORT_ENTITIES[$entity])) {
+            return $this->failNotFound('Unknown import type');
+        }
+        if (! $this->can(self::IMPORT_ENTITIES[$entity]['perm']) && ! $this->isAdmin()) {
+            return $this->failForbidden('You do not have permission to view the import setup.');
+        }
+
+        return $this->respond(['columns' => $this->genericImportColumns($entity), 'can_manage' => $this->isAdmin()]);
+    }
+
+    /** POST /client/import-setup/{entity} — save include/mandatory column config (admin). */
+    public function saveImportSetup(string $entity)
+    {
+        if ($entity === 'lead') {
+            return $this->saveLeadImportSetup();
+        }
+        if (! isset(self::IMPORT_ENTITIES[$entity])) {
+            return $this->failNotFound('Unknown import type');
+        }
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can change import columns.');
+        }
+        $locked = self::IMPORT_ENTITIES[$entity]['locked']['key'];
+        $clean  = [];
+        foreach ((array) $this->input('columns') as $c) {
+            if (! is_array($c) || ! isset($c['key']) || (string) $c['key'] === $locked) {
+                continue;
+            }
+            $clean[] = ['key' => (string) $c['key'], 'include' => ! empty($c['include']), 'required' => ! empty($c['required'])];
+        }
+        $this->setSetting($entity . '_import_fields', json_encode($clean));
+        $this->logActivity('updated', 'settings', null, "Updated {$entity} import columns");
+
+        return $this->respond(['message' => 'Saved', 'columns' => $this->genericImportColumns($entity)]);
+    }
+
+    /** Keep only real (non-deleted) staff ids of this client, preserving order. */
+    private function validStaffIds(int $cid, array $ids): array
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), static fn ($v) => $v > 0)));
+        if (! $ids) {
+            return [];
+        }
+        $valid = [];
+        foreach ((new ClientStaffModel())->where('client_id', $cid)->findAll() as $st) {
+            $valid[(int) $st['id']] = true;
+        }
+
+        return array_values(array_filter($ids, static fn ($id) => isset($valid[$id])));
+    }
+
+    /** Pull + coerce this entity's custom-field values out of a mapped import row. */
+    private function importCustomValues(string $form, array $row): string
+    {
+        $custom = [];
+        foreach ($this->formCustomFields($form) as $f) {
+            if (array_key_exists($f['key'], $row)) {
+                $v                 = $row[$f['key']];
+                $custom[$f['key']] = $f['type'] === 'number'
+                    ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                    : trim((string) $v);
+            }
+        }
+
+        return json_encode($custom);
+    }
+
+    /** POST /client/tasks/import — bulk-create tasks from a mapped sheet. */
+    public function importTasks()
+    {
+        if ($resp = $this->requirePermission('tasks', 'create')) {
+            return $resp;
+        }
+        $cid  = $this->clientId();
+        $rows = $this->input('rows');
+        if (! is_array($rows) || $rows === []) {
+            return $this->failValidationErrors(['rows' => 'No rows to import.']);
+        }
+
+        $opt       = (array) ($this->input('options') ?? []);
+        $mode      = ($opt['assign_mode'] ?? 'single') === 'robin' ? 'robin' : 'single';
+        $assignees = $this->validStaffIds($cid, (array) ($opt['assignees'] ?? []));
+        if ($mode === 'single') {
+            $assignees = array_slice($assignees, 0, 1);
+        }
+        $notify    = ! empty($opt['notify']);
+        $mandatory = array_values(array_filter($this->genericImportColumns('task'), static fn ($c) => ! empty($c['required']) && $c['key'] !== 'title'));
+
+        $model = new ClientTaskModel();
+        $inserted = 0;
+        $errors   = [];
+        $perAssignee = [];
+        $n = 0;
+
+        foreach ($rows as $i => $row) {
+            $line  = (int) $i + 2;
+            $row   = is_array($row) ? $row : [];
+            $title = trim((string) ($row['title'] ?? ''));
+            if ($title === '') {
+                $errors[] = ['row' => $line, 'message' => 'Title is required.'];
+                continue;
+            }
+            $missing = [];
+            foreach ($mandatory as $c) {
+                if (trim((string) ($row[$c['key']] ?? '')) === '') {
+                    $missing[] = $c['label'];
+                }
+            }
+            if ($missing) {
+                $errors[] = ['row' => $line, 'message' => implode(', ', $missing) . (count($missing) > 1 ? ' are required.' : ' is required.')];
+                continue;
+            }
+
+            $assignTo = $assignees ? $assignees[$n % count($assignees)] : null;
+            $data     = [
+                'client_id'       => $cid,
+                'title'           => $title,
+                'description'     => trim((string) ($row['description'] ?? '')) !== '' ? HtmlSanitizer::clean((string) $row['description']) : null,
+                'assigned_to'     => $assignTo,
+                'due_date'        => trim((string) ($row['due_date'] ?? '')) ?: null,
+                'start_date'      => trim((string) ($row['start_date'] ?? '')) ?: null,
+                'priority'        => trim((string) ($row['priority'] ?? '')) ?: 'medium',
+                'type'            => trim((string) ($row['type'] ?? '')) ?: 'task',
+                'status'          => trim((string) ($row['status'] ?? '')) ?: 'open',
+                'custom_fields'   => $this->importCustomValues('task', $row),
+                'created_by'      => $this->actorId() ?: null,
+                'created_by_name' => $this->actorName(),
+            ];
+            if ($model->insert($data) === false) {
+                $first    = $model->errors();
+                $errors[] = ['row' => $line, 'message' => $first ? reset($first) : 'Could not save row.'];
+                continue;
+            }
+            $inserted++;
+            $n++;
+            if ($assignTo) {
+                $perAssignee[$assignTo] = ($perAssignee[$assignTo] ?? 0) + 1;
+            }
+        }
+
+        if ($notify && $perAssignee) {
+            foreach ($perAssignee as $sid => $cnt) {
+                $this->notifyStaff((int) $sid, 'task_created', 'New tasks assigned', "{$cnt} new task(s) assigned to you", '/client/tasks');
+            }
+        }
+        $this->logActivity('created', 'task', null, "Imported {$inserted} task(s)" . ($errors ? ', ' . count($errors) . ' skipped' : ''));
+
+        return $this->respond(['inserted' => $inserted, 'failed' => count($errors), 'errors' => array_slice($errors, 0, 50), 'assigned' => $perAssignee]);
+    }
+
+    /** POST /client/team/import — bulk-create staff directory records from a mapped sheet. */
+    public function importTeam()
+    {
+        if ($resp = $this->requirePermission('team', 'create')) {
+            return $resp;
+        }
+        $cid  = $this->clientId();
+        $rows = $this->input('rows');
+        if (! is_array($rows) || $rows === []) {
+            return $this->failValidationErrors(['rows' => 'No rows to import.']);
+        }
+        $mandatory = array_values(array_filter($this->genericImportColumns('team'), static fn ($c) => ! empty($c['required']) && $c['key'] !== 'name'));
+
+        $model = new ClientStaffModel();
+        $inserted = 0;
+        $errors   = [];
+
+        foreach ($rows as $i => $row) {
+            $line = (int) $i + 2;
+            $row  = is_array($row) ? $row : [];
+            $name = trim((string) ($row['name'] ?? ''));
+            if (mb_strlen($name) < 2) {
+                $errors[] = ['row' => $line, 'message' => 'Name is required (min 2 characters).'];
+                continue;
+            }
+            $email = trim((string) ($row['email'] ?? ''));
+            if ($email !== '' && ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $errors[] = ['row' => $line, 'message' => 'Invalid email address.'];
+                continue;
+            }
+            $missing = [];
+            foreach ($mandatory as $c) {
+                if (trim((string) ($row[$c['key']] ?? '')) === '') {
+                    $missing[] = $c['label'];
+                }
+            }
+            if ($missing) {
+                $errors[] = ['row' => $line, 'message' => implode(', ', $missing) . (count($missing) > 1 ? ' are required.' : ' is required.')];
+                continue;
+            }
+            $data = [
+                'client_id'     => $cid,
+                'name'          => $name,
+                'email'         => $email !== '' ? $email : null,
+                'phone'         => preg_replace('/\D/', '', (string) ($row['phone'] ?? '')) ?: null,
+                'alt_phone'     => preg_replace('/\D/', '', (string) ($row['alt_phone'] ?? '')) ?: null,
+                'designation'   => trim((string) ($row['designation'] ?? '')) ?: null,
+                'emp_code'      => trim((string) ($row['emp_code'] ?? '')) ?: null,
+                'status'        => 'active',
+                'custom_fields' => $this->importCustomValues('staff', $row),
+            ];
+            if ($model->insert($data) === false) {
+                $first    = $model->errors();
+                $errors[] = ['row' => $line, 'message' => $first ? reset($first) : 'Could not save row.'];
+                continue;
+            }
+            $inserted++;
+        }
+        $this->logActivity('created', 'staff', null, "Imported {$inserted} team member(s)" . ($errors ? ', ' . count($errors) . ' skipped' : ''));
+
+        return $this->respond(['inserted' => $inserted, 'failed' => count($errors), 'errors' => array_slice($errors, 0, 50)]);
+    }
+
     /** Build a lead row from the request body, sanitising phones and dates. */
     /** Admin-configured lead phone rules (client setting; both default off). */
     private function leadPhoneRules(): array
@@ -3688,6 +5154,25 @@ class ClientController extends ApiController
         return $errors;
     }
 
+    /**
+     * Attach existing call logs for a phone number to a lead — used on lead
+     * create/phone-change so calls ingested BEFORE the lead existed (lead_id
+     * null) link up. Only claims unlinked calls (lead_id null/0), never steals
+     * calls already tied to another lead.
+     */
+    private function linkCallsToLead(int $cid, int $leadId, string $phone, ?string $altPhone): void
+    {
+        $phones = array_values(array_unique(array_filter([$phone, (string) $altPhone], static fn ($p) => $p !== '')));
+        if (! $phones || $leadId <= 0) {
+            return;
+        }
+        (new CallLogModel())->builder()
+            ->where('client_id', $cid)
+            ->whereIn('contact', $phones)
+            ->groupStart()->where('lead_id', null)->orWhere('lead_id', 0)->groupEnd()
+            ->update(['lead_id' => $leadId]);
+    }
+
     private function leadData(int $cid): array
     {
         $phone    = preg_replace('/\D/', '', (string) $this->input('phone'));
@@ -3728,6 +5213,9 @@ class ClientController extends ApiController
             'assigned_date'  => $this->normalizeDate($this->input('assigned_date')),
             'city'           => trim((string) $this->input('city')) ?: null,
             'state'          => trim((string) $this->input('state')) ?: null,
+            // Rich-text description — sanitized (same policy as notes) to strip
+            // scripts/handlers; stored as NULL when empty.
+            'description'    => HtmlSanitizer::clean((string) $this->input('description')) ?: null,
             'follow_date'    => $this->normalizeDate($this->input('follow_date')),
             'created_date'   => $this->normalizeDate($this->input('created_date')),
         ];
@@ -3814,10 +5302,20 @@ class ClientController extends ApiController
 
         // Call logs matched to this lead, newest first — only for users granted the
         // call-tracking permission (others get an empty list and no Calls tab).
+        // Match by lead_id OR the lead's phone number(s), so calls made BEFORE the
+        // lead existed (ingested with a null lead_id) still show up — consistent
+        // with the list/summary, which also match by contact.
         $calls = [];
         if ($this->can('calls')) {
-            $calls = (new CallLogModel())->where('client_id', $cid)->where('lead_id', $id)
-                ->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll();
+            $phones = array_values(array_unique(array_filter([
+                (string) ($lead['phone'] ?? ''),
+                (string) ($lead['alt_phone'] ?? ''),
+            ], static fn ($p) => $p !== '')));
+            $callsQ = (new CallLogModel())->where('client_id', $cid)->groupStart()->where('lead_id', $id);
+            if ($phones) {
+                $callsQ->orWhereIn('contact', $phones);
+            }
+            $calls = $callsQ->groupEnd()->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll();
             foreach ($calls as &$c) {
                 $c['staff_name'] = $c['staff_id'] ? ($staffNames[(int) $c['staff_id']] ?? null) : null;
                 $c['connected']  = (bool) $c['connected'];
@@ -5179,19 +6677,84 @@ class ClientController extends ApiController
         'staff'   => ['phone' => 'Phone', 'alt_phone' => 'Alternative phone', 'designation' => 'Designation', 'role_id' => 'Role', 'reports_to' => 'Reports to', 'department_id' => 'Department', 'office_location_id' => 'Office'],
     ];
 
-    /** Built-in fields the client has marked mandatory on $form. */
-    private function formRequiredFields(string $form): array
+    /**
+     * The settings-key prefix for a form. Leads can be customized PER LEAD TYPE:
+     * pass a type id to target that type's override (e.g. "lead__t5"); other forms
+     * (and lead with no type) use the base form name.
+     */
+    private function formScope(string $form, $type): string
+    {
+        $t = (int) $type;
+
+        return ($form === 'lead' && $t > 0) ? "{$form}__t{$t}" : $form;
+    }
+
+    /**
+     * The EFFECTIVE lead-form scope for a lead type: the type's own override when
+     * one has been configured, else the base "lead" config (types inherit base).
+     */
+    private function leadFormScope(int $typeId): string
+    {
+        if ($typeId > 0) {
+            $map = $this->settingsMap();
+            if (isset($map["lead__t{$typeId}_required_fields"]) || isset($map["lead__t{$typeId}_custom_fields"])) {
+                return "lead__t{$typeId}";
+            }
+        }
+
+        return 'lead';
+    }
+
+    /** Built-in fields the client has marked mandatory on $form (optionally scoped). */
+    private function formRequiredFields(string $form, ?string $scope = null): array
     {
         $allowed = self::FORM_REQUIRABLE[$form] ?? [];
-        $keys    = json_decode((string) ($this->settingsMap()[$form . '_required_fields'] ?? '[]'), true);
+        $keys    = json_decode((string) ($this->settingsMap()[($scope ?? $form) . '_required_fields'] ?? '[]'), true);
 
         return is_array($keys) ? array_values(array_intersect(array_map('strval', $keys), $allowed)) : [];
     }
 
-    /** The client's admin-defined custom fields for $form (sanitized definitions). */
-    private function formCustomFields(string $form): array
+    /** Admin-customized field hint/tagline overrides for $form (fieldKey → text). */
+    private function formHints(string $form, ?string $scope = null): array
     {
-        $defs = json_decode((string) ($this->settingsMap()[$form . '_custom_fields'] ?? '[]'), true);
+        $h = json_decode((string) ($this->settingsMap()[($scope ?? $form) . '_hints'] ?? '{}'), true);
+        if (! is_array($h)) {
+            return [];
+        }
+        $out = [];
+        foreach ($h as $k => $v) {
+            $k = preg_replace('/[^a-z0-9_]/', '', (string) $k);
+            $v = mb_substr(trim((string) $v), 0, 300);
+            if ($k !== '' && $v !== '') {
+                $out[$k] = $v;
+            }
+        }
+
+        return $out;
+    }
+
+    /** Admin-defined field display order for $form (list of field keys; optionally scoped). */
+    private function formFieldOrder(string $form, ?string $scope = null): array
+    {
+        $ord = json_decode((string) ($this->settingsMap()[($scope ?? $form) . '_field_order'] ?? '[]'), true);
+        if (! is_array($ord)) {
+            return [];
+        }
+        $out = [];
+        foreach ($ord as $k) {
+            $k = preg_replace('/[^a-z0-9_]/', '', (string) $k);
+            if ($k !== '' && ! in_array($k, $out, true)) {
+                $out[] = $k;
+            }
+        }
+
+        return $out;
+    }
+
+    /** The client's admin-defined custom fields for $form (sanitized; optionally scoped). */
+    private function formCustomFields(string $form, ?string $scope = null): array
+    {
+        $defs = json_decode((string) ($this->settingsMap()[($scope ?? $form) . '_custom_fields'] ?? '[]'), true);
         if (! is_array($defs)) {
             return [];
         }
@@ -5219,8 +6782,35 @@ class ClientController extends ApiController
         return $out;
     }
 
+    /**
+     * Every lead custom field the client has defined — the base "lead" scope PLUS
+     * each per-lead-type override (lead__t{id}) — deduped by key (first wins). The
+     * Web-to-Lead builder uses this so type-specific custom fields are selectable
+     * too, not just base-scope ones.
+     */
+    private function allLeadCustomFields(int $cid): array
+    {
+        $byKey = [];
+        foreach ($this->formCustomFields('lead', 'lead') as $f) {
+            $byKey[$f['key']] = $f;
+        }
+        foreach ($this->lookupRows(LeadTypeModel::class, $cid) as $t) {
+            $tid = (int) ($t['id'] ?? 0);
+            if ($tid <= 0) {
+                continue;
+            }
+            foreach ($this->formCustomFields('lead', "lead__t{$tid}") as $f) {
+                if (! isset($byKey[$f['key']])) {
+                    $byKey[$f['key']] = $f;
+                }
+            }
+        }
+
+        return array_values($byKey);
+    }
+
     /** Pull + sanitize custom-field values from request input, keyed by field key. */
-    private function formCustomValues(string $form, array $in): array
+    private function formCustomValues(string $form, array $in, ?string $scope = null): array
     {
         $raw = $in['custom_fields'] ?? [];
         if (is_string($raw)) {
@@ -5230,7 +6820,7 @@ class ClientController extends ApiController
             $raw = [];
         }
         $out = [];
-        foreach ($this->formCustomFields($form) as $f) {
+        foreach ($this->formCustomFields($form, $scope) as $f) {
             if (! array_key_exists($f['key'], $raw)) {
                 continue;
             }
@@ -5243,18 +6833,18 @@ class ClientController extends ApiController
         return $out;
     }
 
-    /** Validation errors for $form's mandatory built-in + custom fields. */
-    private function formFieldErrors(string $form, array $data, array $customValues): array
+    /** Validation errors for $form's mandatory built-in + custom fields (optionally scoped). */
+    private function formFieldErrors(string $form, array $data, array $customValues, ?string $scope = null): array
     {
         $errors = [];
         $labels = self::FORM_LABELS[$form] ?? [];
-        foreach ($this->formRequiredFields($form) as $key) {
+        foreach ($this->formRequiredFields($form, $scope) as $key) {
             $val = $data[$key] ?? null;
             if ($val === null || $val === '' || $val === 0) {
                 $errors[$key] = ($labels[$key] ?? $key) . ' is required.';
             }
         }
-        foreach ($this->formCustomFields($form) as $f) {
+        foreach ($this->formCustomFields($form, $scope) as $f) {
             if (! empty($f['required'])) {
                 $v = $customValues[$f['key']] ?? null;
                 if ($v === null || $v === '') {
@@ -5274,18 +6864,30 @@ class ClientController extends ApiController
         return (object) (is_array($v) ? $v : []);
     }
 
-    /** GET /client/form-setup/{form} — requirable fields + current required + custom defs. */
+    /**
+     * GET /client/form-setup/{form} — requirable fields + current required + custom
+     * defs. For the lead form, `?type=<id>` targets that lead type's config; add
+     * `&effective=1` to resolve inheritance (type override, else base) — the lead
+     * form uses that, while the admin editor edits the type's own override.
+     */
     public function formSetup(string $form)
     {
         if (! isset(self::FORM_REQUIRABLE[$form])) {
             return $this->failNotFound('Unknown form');
         }
+        $type  = (int) ($this->request->getGet('type') ?? 0);
+        $scope = ($form === 'lead' && $this->request->getGet('effective') === '1')
+            ? $this->leadFormScope($type)
+            : $this->formScope($form, $type);
 
         return $this->respond([
             'form'            => $form,
+            'type'            => $type,
             'requirable'      => array_map(fn ($k) => ['key' => $k, 'label' => self::FORM_LABELS[$form][$k] ?? $k], self::FORM_REQUIRABLE[$form]),
-            'required_fields' => $this->formRequiredFields($form),
-            'custom_fields'   => $this->formCustomFields($form),
+            'required_fields' => $this->formRequiredFields($form, $scope),
+            'custom_fields'   => $this->formCustomFields($form, $scope),
+            'hints'           => (object) $this->formHints($form, $scope),
+            'order'           => $this->formFieldOrder($form, $scope),
             'can_manage'      => $this->isAdmin(),
         ]);
     }
@@ -5300,6 +6902,7 @@ class ClientController extends ApiController
             return $this->failForbidden('Only an admin can change form fields.');
         }
         $in       = (array) $this->input();
+        $scope    = $this->formScope($form, $in['type'] ?? 0); // lead: per-type override
         $allowed  = self::FORM_REQUIRABLE[$form];
         $required = is_array($in['required_fields'] ?? null)
             ? array_values(array_intersect(array_map('strval', $in['required_fields']), $allowed))
@@ -5333,11 +6936,329 @@ class ClientController extends ApiController
             ];
         }
 
-        $this->setSetting($form . '_required_fields', json_encode($required));
-        $this->setSetting($form . '_custom_fields', json_encode($custom));
+        // Field hint/tagline overrides (fieldKey → text; blanks dropped).
+        $hintsIn  = $in['hints'] ?? [];
+        $hintsOut = [];
+        if (is_array($hintsIn)) {
+            foreach ($hintsIn as $k => $v) {
+                $k = preg_replace('/[^a-z0-9_]/', '', (string) $k);
+                $v = mb_substr(trim((string) $v), 0, 300);
+                if ($k !== '' && $v !== '') {
+                    $hintsOut[$k] = $v;
+                }
+            }
+        }
+
+        // Field display order (list of field keys, sanitized + de-duplicated).
+        $orderOut = [];
+        foreach ((array) ($in['order'] ?? []) as $k) {
+            $k = preg_replace('/[^a-z0-9_]/', '', (string) $k);
+            if ($k !== '' && ! in_array($k, $orderOut, true)) {
+                $orderOut[] = $k;
+            }
+        }
+
+        $this->setSetting($scope . '_required_fields', json_encode($required));
+        $this->setSetting($scope . '_custom_fields', json_encode($custom));
+        $this->setSetting($scope . '_hints', json_encode((object) $hintsOut));
+        $this->setSetting($scope . '_field_order', json_encode($orderOut));
         $this->logActivity('updated', 'settings', null, "Updated {$form} form fields");
 
-        return $this->respond(['message' => 'Saved', 'required_fields' => $required, 'custom_fields' => $custom]);
+        return $this->respond(['message' => 'Saved', 'required_fields' => $required, 'custom_fields' => $custom, 'order' => $orderOut]);
+    }
+
+    // ========================================================= WEB TO LEAD
+    //
+    // Admin-built embeddable forms. A form's definition lives in this client's
+    // `web_forms` table; a main-DB `web_form_index` row maps its public token to
+    // this client so the sessionless /public/forms/{token} endpoint can resolve
+    // the tenant. Submissions land in `leads` (stamped with `web_form_id`), and
+    // `submission_count` tracks how many leads each form has produced.
+
+    /** Built-in lead fields a web form may place (mirrors the frontend LEAD_FORM_FIELDS subset). */
+    private const WEB_BUILTIN_FIELDS = [
+        ['key' => 'name', 'label' => 'Full Name', 'type' => 'text'],
+        ['key' => 'phone', 'label' => 'Mobile Number', 'type' => 'tel'],
+        ['key' => 'alt_phone', 'label' => 'Alternative Phone', 'type' => 'tel'],
+        ['key' => 'email', 'label' => 'Email Address', 'type' => 'email'],
+        ['key' => 'city', 'label' => 'City', 'type' => 'text'],
+        ['key' => 'state', 'label' => 'State', 'type' => 'text'],
+        ['key' => 'description', 'label' => 'Description', 'type' => 'textarea'],
+    ];
+
+    /** GET /client/web-forms — list forms (+ the builder's available fields & lookups). */
+    public function webForms()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can manage web forms.');
+        }
+        $cid   = $this->clientId();
+        $forms = (new WebFormModel())->where('client_id', $cid)->orderBy('id', 'DESC')->findAll();
+
+        return $this->respond([
+            'forms'          => array_map([$this, 'webFormOut'], $forms),
+            'builder_fields' => $this->webFormBuilderFields($cid),
+        ]);
+    }
+
+    /** GET /client/web-forms/{id} — one form (+ builder fields & lookups). */
+    public function webForm(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can manage web forms.');
+        }
+        $cid  = $this->clientId();
+        $model = new WebFormModel();
+        $form  = $model->where('client_id', $cid)->find($id);
+        if (! $form) {
+            return $this->failNotFound('Form not found');
+        }
+        // Backfill an API key for forms created before this feature existed.
+        if (empty($form['api_key'])) {
+            $form['api_key'] = bin2hex(random_bytes(24));
+            $model->skipValidation(true)->update($id, ['api_key' => $form['api_key']]);
+        }
+
+        return $this->respond([
+            'form'           => $this->webFormOut($form),
+            'builder_fields' => $this->webFormBuilderFields($cid),
+        ]);
+    }
+
+    /** POST /client/web-forms/{id}/api-key — regenerate the form's server-to-server API key (admin). */
+    public function regenerateWebFormApiKey(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can manage web forms.');
+        }
+        $cid   = $this->clientId();
+        $model = new WebFormModel();
+        $form  = $model->where('client_id', $cid)->find($id);
+        if (! $form) {
+            return $this->failNotFound('Form not found');
+        }
+        $key = bin2hex(random_bytes(24));
+        $model->skipValidation(true)->update($id, ['api_key' => $key]);
+        $this->logActivity('updated', 'web_form', $id, 'Regenerated API key for web form ' . $form['name']);
+
+        return $this->respond(['message' => 'Regenerated', 'api_key' => $key]);
+    }
+
+    /** POST /client/web-forms — create a form (generates the public token). */
+    public function createWebForm()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can manage web forms.');
+        }
+        $cid   = $this->clientId();
+        $model = new WebFormModel();
+        $data  = $this->webFormPayload($cid);
+        $data['token']   = bin2hex(random_bytes(16));
+        $data['api_key'] = bin2hex(random_bytes(24)); // server-to-server (Postman) key
+
+        $id = $model->insert($data);
+        if ($id === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->syncWebFormIndex($data['token'], $cid, (int) $id, (int) $data['enabled']);
+        $this->logActivity('created', 'web_form', (int) $id, 'Created web form ' . $data['name']);
+
+        return $this->respondCreated(['message' => 'Created', 'id' => (int) $id, 'token' => $data['token']]);
+    }
+
+    /** POST /client/web-forms/{id} — update a form. */
+    public function updateWebForm(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can manage web forms.');
+        }
+        $cid   = $this->clientId();
+        $model = new WebFormModel();
+        $form  = $model->where('client_id', $cid)->find($id);
+        if (! $form) {
+            return $this->failNotFound('Form not found');
+        }
+        $data = $this->webFormPayload($cid);
+        unset($data['token']); // token is immutable once issued
+
+        if ($model->update($id, $data) === false) {
+            return $this->failValidationErrors($model->errors());
+        }
+        $this->syncWebFormIndex((string) $form['token'], $cid, $id, (int) $data['enabled']);
+        $this->logActivity('updated', 'web_form', $id, 'Updated web form ' . $data['name']);
+
+        return $this->respond(['message' => 'Saved', 'id' => $id]);
+    }
+
+    /** POST /client/web-forms/{id}/delete — soft-delete a form (disables its public token). */
+    public function deleteWebForm(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can manage web forms.');
+        }
+        $cid   = $this->clientId();
+        $model = new WebFormModel();
+        $form  = $model->where('client_id', $cid)->find($id);
+        if (! $form) {
+            return $this->failNotFound('Form not found');
+        }
+        $model->delete($id); // soft delete
+        // Disable the public token so the embedded form stops accepting submissions.
+        (new WebFormIndexModel())->where('token', $form['token'])->set(['enabled' => 0])->update();
+        $this->logActivity('deleted', 'web_form', $id, 'Deleted web form ' . $form['name']);
+
+        return $this->respond(['message' => 'Deleted']);
+    }
+
+    /** Build a sanitized web_forms row from request input (shared by create/update). */
+    private function webFormPayload(int $cid): array
+    {
+        $in = (array) $this->input();
+
+        $intList = static function ($v): array {
+            $v = is_array($v) ? $v : [];
+
+            return array_values(array_unique(array_filter(array_map('intval', $v))));
+        };
+
+        // Ordered field definitions — keep only known built-in keys + this client's
+        // custom-field keys; sanitize labels/placeholders.
+        $customKeys = array_column($this->allLeadCustomFields($cid), 'key');
+        $builtinKey = array_column(self::WEB_BUILTIN_FIELDS, 'key');
+        $fields     = [];
+        foreach ((array) ($in['fields'] ?? []) as $f) {
+            if (! is_array($f)) {
+                continue;
+            }
+            $key = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($f['key'] ?? '')));
+            if ($key === '' || (! in_array($key, $builtinKey, true) && ! in_array($key, $customKeys, true))) {
+                continue;
+            }
+            $builtin  = in_array($key, $builtinKey, true);
+            // `param` is the parameter/JSON name external callers send (Postman,
+            // their own site). Admin-chosen; defaults to the field key. The lead
+            // mapping still uses `key`, so built-in fields keep working.
+            $param = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($f['param'] ?? $key)));
+            if ($param === '') {
+                $param = $key;
+            }
+            $fields[] = [
+                'key'         => $key,
+                'param'       => $param,
+                'label'       => mb_substr(trim((string) ($f['label'] ?? $key)), 0, 120),
+                'type'        => (string) ($f['type'] ?? 'text'),
+                'required'    => ! empty($f['required']),
+                'placeholder' => mb_substr(trim((string) ($f['placeholder'] ?? '')), 0, 150),
+                'builtin'     => $builtin,
+                'options'     => is_array($f['options'] ?? null) ? array_values(array_map(static fn ($o) => (string) $o, $f['options'])) : [],
+            ];
+        }
+
+        // State → counsellors map: each state maps to one or MANY staff ids
+        // (round-robined at ingest). Keep only non-empty states with ≥1 staff id.
+        $stateMap = [];
+        foreach ((array) ($in['state_assignee_map'] ?? []) as $state => $ids) {
+            $state = trim((string) $state);
+            $list  = $intList(is_array($ids) ? $ids : [$ids]);
+            if ($state !== '' && $list) {
+                $stateMap[$state] = $list;
+            }
+        }
+
+        return [
+            'client_id'                => $cid,
+            'name'                     => mb_substr(trim((string) ($in['name'] ?? '')), 0, 150) ?: 'Untitled form',
+            'language'                 => mb_substr(trim((string) ($in['language'] ?? 'en')), 0, 20) ?: 'en',
+            'submit_text'              => mb_substr(trim((string) ($in['submit_text'] ?? 'Submit')), 0, 100) ?: 'Submit',
+            'success_message'          => mb_substr(trim((string) ($in['success_message'] ?? '')), 0, 2000) ?: null,
+            'fields'                   => json_encode($fields),
+            'source_id'                => (int) ($in['source_id'] ?? 0) ?: null,
+            'status_id'                => (int) ($in['status_id'] ?? 0) ?: null,
+            'assigned_to'              => (int) ($in['assigned_to'] ?? 0) ?: null,
+            'lead_type_id'             => (int) ($in['lead_type_id'] ?? 0) ?: null,
+            'auto_assignee'            => json_encode($intList($in['auto_assignee'] ?? [])),
+            'auto_assign_state_wise'   => ! empty($in['auto_assign_state_wise']) ? 1 : 0,
+            'state_assignee_map'       => json_encode((object) $stateMap),
+            'auto_mark_public'         => ! empty($in['auto_mark_public']) ? 1 : 0,
+            'allow_location_fields'    => ! empty($in['allow_location_fields']) ? 1 : 0,
+            'notify_on_transfer'       => ! empty($in['notify_on_transfer']) ? 1 : 0,
+            'allow_duplicate'          => ! empty($in['allow_duplicate']) ? 1 : 0,
+            'prevent_duplicate_field'  => mb_substr(trim((string) ($in['prevent_duplicate_field'] ?? 'phone')), 0, 40) ?: null,
+            'prevent_duplicate_field2' => mb_substr(trim((string) ($in['prevent_duplicate_field2'] ?? '')), 0, 40) ?: null,
+            'create_duplicate_as_task' => ! empty($in['create_duplicate_as_task']) ? 1 : 0,
+            'notify_on_import'         => ! empty($in['notify_on_import']) ? 1 : 0,
+            'notify_type'              => in_array($in['notify_type'] ?? '', ['specific', 'roles', 'responsible'], true) ? $in['notify_type'] : 'responsible',
+            'notify_staff'             => json_encode($intList($in['notify_staff'] ?? [])),
+            'enabled'                  => array_key_exists('enabled', $in) ? (! empty($in['enabled']) ? 1 : 0) : 1,
+        ];
+    }
+
+    /** Shape a web_forms row for the admin API (decode JSON columns, add helpers). */
+    private function webFormOut(array $f): array
+    {
+        $decodeArr = static fn ($v) => (is_array($j = json_decode((string) $v, true)) ? $j : []);
+
+        return [
+            'id'                       => (int) $f['id'],
+            'name'                     => $f['name'],
+            'token'                    => $f['token'],
+            'api_key'                  => $f['api_key'] ?? null,
+            'language'                 => $f['language'],
+            'submit_text'              => $f['submit_text'],
+            'success_message'          => $f['success_message'],
+            'fields'                   => $decodeArr($f['fields']),
+            'source_id'                => $f['source_id'] !== null ? (int) $f['source_id'] : null,
+            'status_id'                => $f['status_id'] !== null ? (int) $f['status_id'] : null,
+            'assigned_to'              => $f['assigned_to'] !== null ? (int) $f['assigned_to'] : null,
+            'lead_type_id'             => $f['lead_type_id'] !== null ? (int) $f['lead_type_id'] : null,
+            'auto_assignee'            => array_map('intval', $decodeArr($f['auto_assignee'])),
+            'auto_assign_state_wise'   => (int) $f['auto_assign_state_wise'],
+            // Normalise to {state: number[]} — legacy single-id maps become 1-item arrays.
+            'state_assignee_map'       => (object) array_map(
+                static fn ($ids) => array_values(array_map('intval', is_array($ids) ? $ids : [$ids])),
+                $decodeArr($f['state_assignee_map']),
+            ),
+            'auto_mark_public'         => (int) $f['auto_mark_public'],
+            'allow_location_fields'    => (int) $f['allow_location_fields'],
+            'notify_on_transfer'       => (int) $f['notify_on_transfer'],
+            'allow_duplicate'          => (int) $f['allow_duplicate'],
+            'prevent_duplicate_field'  => $f['prevent_duplicate_field'],
+            'prevent_duplicate_field2' => $f['prevent_duplicate_field2'],
+            'create_duplicate_as_task' => (int) $f['create_duplicate_as_task'],
+            'notify_on_import'         => (int) $f['notify_on_import'],
+            'notify_type'              => $f['notify_type'] ?: 'responsible',
+            'notify_staff'             => array_map('intval', $decodeArr($f['notify_staff'])),
+            'submission_count'         => (int) $f['submission_count'],
+            'enabled'                  => (int) $f['enabled'],
+            'created_at'               => $f['created_at'] ?? null,
+        ];
+    }
+
+    /** Palette + lookups the form builder needs (built-in fields, custom fields, dropdown options). */
+    private function webFormBuilderFields(int $cid): array
+    {
+        $mapIdName = static fn (array $rows) => array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => $r['name']], $rows);
+
+        return [
+            'builtin'    => self::WEB_BUILTIN_FIELDS,
+            'custom'     => $this->allLeadCustomFields($cid),
+            'sources'    => $mapIdName($this->lookupRows(LeadSourceModel::class, $cid)),
+            'statuses'   => $mapIdName(array_values(array_filter($this->lookupRows(LeadStatusModel::class, $cid), static fn ($r) => empty($r['parent_id'])))),
+            'lead_types' => $mapIdName($this->lookupRows(LeadTypeModel::class, $cid)),
+            'staff'      => array_map(static fn ($s) => ['id' => (int) $s['id'], 'name' => $s['name']], (new ClientStaffModel())->where('client_id', $cid)->orderBy('name', 'ASC')->findAll()),
+            'states'     => array_map(static fn ($r) => $r['name'], $this->lookupRows(StateModel::class, $cid)),
+        ];
+    }
+
+    /** Upsert the main-DB token → client/form registry used by the public endpoint. */
+    private function syncWebFormIndex(string $token, int $cid, int $formId, int $enabled): void
+    {
+        $model = new WebFormIndexModel();
+        if ($model->where('token', $token)->first()) {
+            $model->where('token', $token)->set(['client_id' => $cid, 'form_id' => $formId, 'enabled' => $enabled])->update();
+        } else {
+            $model->insert(['token' => $token, 'client_id' => $cid, 'form_id' => $formId, 'enabled' => $enabled]);
+        }
     }
 
     // --- Lead statuses ---------------------------------------------------

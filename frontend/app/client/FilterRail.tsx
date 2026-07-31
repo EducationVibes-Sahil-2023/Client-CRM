@@ -27,6 +27,7 @@ export function FilterRail({
   applyDisabled,
   applying,
   applyLabel = "Apply filters",
+  placement = "right",
   children,
 }: {
   open: boolean;
@@ -40,23 +41,38 @@ export function FilterRail({
   applyDisabled?: boolean;
   applying?: boolean;
   applyLabel?: string;
+  /** Where the panel sits (admin-configurable): right (default), left, or a top bar. */
+  placement?: "right" | "left" | "top";
   children: React.ReactNode;
 }) {
-  const { setCollapsed, setContentFull } = useClient();
+  const { setCollapsed, setContentFull, collapsed } = useClient();
 
   // While the rail is open: collapse the main sidebar and let the content span
   // full width (no max-width cap) so the list fills the space beside the rail.
   // Both are restored on close (or when the page unmounts with the rail open).
+  // A top panel overlays the content, so it doesn't need the extra room.
+  const side = placement !== "top";
   useEffect(() => {
-    if (!open) return;
+    if (!open || !side) return;
     setCollapsed(true);
     setContentFull(true);
     return () => { setCollapsed(false); setContentFull(false); };
-  }, [open, setCollapsed, setContentFull]);
+  }, [open, side, setCollapsed, setContentFull]);
+
+  // Left/top panels must clear the left navigation sidebar, so they start at its
+  // live width on desktop (w-20 collapsed / w-64 expanded); full-bleed on mobile
+  // where the sidebar is off-canvas. Right panel is unaffected.
+  const leftOffset = collapsed ? "lg:left-20" : "lg:left-64";
+  const asideCls = placement === "top"
+    ? `fixed top-16 left-0 right-0 ${leftOffset} z-40 flex max-h-[75vh] flex-col border-b border-slate-200 shadow-xl transition-transform duration-200 ${open ? "translate-y-0" : "-translate-y-[200%]"}`
+    : placement === "left"
+      ? `fixed top-16 left-0 ${leftOffset} z-40 flex h-[calc(100vh-4rem)] w-80 max-w-[85vw] flex-col border-r border-slate-200 shadow-xl transition-transform duration-200 ${open ? "translate-x-0" : "-translate-x-[200%]"}`
+      : `fixed right-0 top-16 z-30 flex h-[calc(100vh-4rem)] w-80 max-w-[85vw] flex-col border-l border-slate-200 shadow-xl transition-transform duration-200 ${open ? "translate-x-0" : "translate-x-full"}`;
 
   return (
     <aside
-      className={`fixed right-0 top-16 z-30 flex h-[calc(100vh-4rem)] w-80 max-w-[85vw] flex-col border-l border-slate-200 bg-white shadow-xl transition-transform duration-200 ${open ? "translate-x-0" : "translate-x-full"}`}
+      className={asideCls}
+      style={{ background: "var(--surface-bg)" }}
       aria-hidden={!open}
     >
       <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
@@ -69,7 +85,7 @@ export function FilterRail({
         </button>
       </div>
 
-      <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">{children}</div>
+      <div className={placement === "top" ? "grid flex-1 content-start items-start gap-x-5 gap-y-4 overflow-y-auto p-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" : "flex flex-1 flex-col gap-4 overflow-y-auto p-4"}>{children}</div>
 
       <div className="flex items-center justify-between gap-2 border-t border-slate-100 px-4 py-3">
         <button
@@ -119,8 +135,12 @@ export function FilterToggle({
   );
 }
 
-/** Content-wrapper className that pads the page so the list clears the open rail. */
-export const filterRailPad = (open: boolean) => `transition-all duration-200 ${open ? "lg:pr-[21rem]" : ""}`;
+/** Content-wrapper className that pads the page so the list clears the open rail.
+ *  A left/right side panel pushes the content aside; a top panel overlays it. */
+export const filterRailPad = (open: boolean, placement: "right" | "left" | "top" = "right") => {
+  if (!open || placement === "top") return "transition-all duration-200";
+  return `transition-all duration-200 ${placement === "left" ? "lg:pl-[21rem]" : "lg:pr-[21rem]"}`;
+};
 
 /** Standard label above a filter control in the rail body. */
 export function FilterLabel({ children }: { children: React.ReactNode }) {

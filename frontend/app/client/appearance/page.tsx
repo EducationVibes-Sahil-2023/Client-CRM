@@ -8,14 +8,17 @@ import { clientUpload, saveBranding } from "../../lib/client";
 import { API_URL } from "../../lib/api";
 import {
   brandCssVars,
+  surfaceCssVars,
   readableOn,
   shadeScale,
   fontStack,
   fontSizePx,
   resolveLogoSize,
+  resolveDark,
   LOGO_WIDTH_RANGE,
   LOGO_HEIGHT_RANGE,
   DEFAULT_BRANDING,
+  SURFACE_COLOR_FIELDS,
   PAGE_SIZE_OPTIONS,
   FONT_FAMILY_OPTIONS,
   FONT_SIZE_OPTIONS,
@@ -178,6 +181,33 @@ export default function AppearancePage() {
                 <div key={s} className="h-8 flex-1" style={{ background: scale[s] }} title={`${s}: ${scale[s]}`} />
               ))}
             </div>
+          </Card>
+
+          {/* Surfaces & table colours */}
+          <Card>
+            <h3 className="font-semibold text-slate-900">Surfaces &amp; table colours</h3>
+            <p className="mt-0.5 text-sm text-slate-500">
+              Recolour the page background, sidebar, cards and data tables. These apply in <b>light</b> mode; dark mode uses a fixed dark palette.
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              {SURFACE_COLOR_FIELDS.map((f) => (
+                <ColorField
+                  key={String(f.key)}
+                  label={f.label}
+                  hint={f.hint}
+                  value={String(draft[f.key] ?? "")}
+                  fallback={String(DEFAULT_BRANDING[f.key])}
+                  onChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setDraft((d) => ({ ...d, ...surfaceDefaults() }))}
+              className="mt-4 text-xs font-medium text-emerald-600 hover:underline"
+            >
+              Reset surface colours to default
+            </button>
           </Card>
 
           {/* Logo + identity */}
@@ -386,6 +416,43 @@ function IconPicker({ value, onPick }: { value: string; onPick: (icon: string) =
   );
 }
 
+/** The surface-colour keys reset to their defaults (for the "reset" button). */
+function surfaceDefaults(): Partial<Branding> {
+  const out: Partial<Branding> = {};
+  for (const f of SURFACE_COLOR_FIELDS) (out as Record<string, string>)[String(f.key)] = String(DEFAULT_BRANDING[f.key]);
+  return out;
+}
+
+/** A labelled colour picker: swatch + hex text, with a revert-to-default dot. */
+function ColorField({ label, hint, value, fallback, onChange }: {
+  label: string; hint: string; value: string; fallback: string; onChange: (v: string) => void;
+}) {
+  const hex = /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+  const isDefault = hex.toLowerCase() === fallback.toLowerCase();
+  return (
+    <div className="rounded-xl border border-slate-200 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-slate-700">{label}</div>
+          <div className="text-[11px] text-slate-400">{hint}</div>
+        </div>
+        {!isDefault && (
+          <button type="button" onClick={() => onChange(fallback)} title="Reset to default" className="flex-shrink-0 text-[11px] font-medium text-slate-400 hover:text-slate-600">Reset</button>
+        )}
+      </div>
+      <div className="mt-2.5 flex items-center gap-2">
+        <input type="color" value={hex} onChange={(e) => onChange(e.target.value)} className="h-9 w-11 flex-shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white p-1" aria-label={`Pick ${label}`} />
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={fallback}
+          className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 font-mono text-xs focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15"
+        />
+      </div>
+    </div>
+  );
+}
+
 function SegRow({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: [string, string][] }) {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -400,7 +467,7 @@ function SegRow({ label, value, onChange, options }: { label: string; value: str
 }
 
 function Preview({ draft, logoSrc, menu }: { draft: Branding; logoSrc: string; menu: typeof MAIN_NAV }) {
-  const dark = draft.theme_mode === "dark";
+  const dark = resolveDark(draft.theme_mode);
   const solid = draft.sidebar_style === "solid";
   const onBrand = readableOn(draft.brand_color);
   return (
@@ -408,11 +475,11 @@ function Preview({ draft, logoSrc, menu }: { draft: Branding; logoSrc: string; m
       className={`client-shell overflow-hidden rounded-2xl border border-slate-200 shadow-sm ${dark ? "dark" : ""}`}
       data-density={draft.density}
       data-sidebar={draft.sidebar_style}
-      style={{ ...brandCssVars(draft.brand_color), "--app-font": fontStack(draft.font_family), fontFamily: fontStack(draft.font_family) } as React.CSSProperties}
+      style={{ ...brandCssVars(draft.brand_color), ...surfaceCssVars(draft, dark), "--app-font": fontStack(draft.font_family), fontFamily: fontStack(draft.font_family) } as React.CSSProperties}
     >
-      <div className="flex bg-slate-50" style={{ minHeight: 320 }}>
+      <div className="flex" style={{ minHeight: 320, background: "var(--panel-bg)" }}>
         {/* mini sidebar */}
-        <div className="w-40 flex-shrink-0 border-r border-slate-200 bg-white p-2.5">
+        <div className="w-40 flex-shrink-0 border-r border-slate-200 p-2.5" style={{ background: "var(--sidebar-bg)" }}>
           <div className="mb-3 flex items-center gap-2 px-1">
             {logoSrc ? <img src={logoSrc} alt="" className="rounded-lg object-contain" style={{ width: Math.min(resolveLogoSize(draft.logo_width, draft.logo_height).width, 120), height: Math.min(resolveLogoSize(draft.logo_width, draft.logo_height).height, 32) }} /> : <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-600 text-[10px] font-bold text-white">{(draft.app_name || "C").slice(0, 1)}</span>}
             <div className="min-w-0 leading-tight"><div className="truncate text-[11px] font-bold text-slate-900">{draft.app_name || "My CRM"}</div></div>
@@ -421,8 +488,8 @@ function Preview({ draft, logoSrc, menu }: { draft: Branding; logoSrc: string; m
             const active = idx === 0;
             const activeCls = solid ? "text-white" : "bg-emerald-50 text-emerald-700";
             return (
-              <div key={m.key} className={`mb-0.5 flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] font-medium ${active ? activeCls : "text-slate-500"}`} style={active && solid ? { background: "var(--color-emerald-600)" } : undefined}>
-                <svg className="h-3.5 w-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={icons[draft.menu_icons[m.key] ?? ""] ?? icons[m.icon]} strokeLinecap="round" strokeLinejoin="round" /></svg>
+              <div key={m.key} className={`mb-0.5 flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] font-medium ${active ? activeCls : ""}`} style={active ? (solid ? { background: "var(--color-emerald-600)" } : undefined) : { color: "var(--sidebar-text)" }}>
+                <svg className="h-3.5 w-3.5 flex-shrink-0" style={active ? undefined : { color: "var(--sidebar-icon)" }} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={icons[draft.menu_icons[m.key] ?? ""] ?? icons[m.icon]} strokeLinecap="round" strokeLinejoin="round" /></svg>
                 <span className="truncate">{draft.menu_labels[m.key] || m.label}</span>
               </div>
             );
@@ -430,13 +497,19 @@ function Preview({ draft, logoSrc, menu }: { draft: Branding; logoSrc: string; m
         </div>
         {/* mini content */}
         <div className="flex-1 p-3">
-          <div className="rounded-xl bg-white p-3 shadow-sm">
+          <div className="rounded-xl p-3 shadow-sm" style={{ background: "var(--surface-bg)" }}>
             <div className="text-sm font-semibold text-slate-900">Dashboard</div>
             <div className="mt-0.5 text-[11px] text-slate-500">Welcome back 👋</div>
             <button className="mt-3 rounded-lg px-3 py-1.5 text-xs font-semibold" style={{ background: "var(--color-emerald-600)", color: onBrand }}>Primary action</button>
             <div className="mt-3 flex gap-1.5">
               <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">Badge</span>
               <span className="text-[11px] font-medium text-emerald-600">A themed link</span>
+            </div>
+            {/* mini table — shows header + row-hover / accent colours */}
+            <div className="mt-3 overflow-hidden rounded-lg border border-slate-200">
+              <div className="flex px-2 py-1 text-[9px] font-semibold uppercase text-slate-400" style={{ background: "var(--table-header-bg)" }}><span className="flex-1">Name</span><span className="w-12">Status</span></div>
+              <div className="flex px-2 py-1 text-[10px] text-slate-600" style={{ background: "var(--table-accent-soft)" }}><span className="flex-1">Jane Doe</span><span className="w-12" style={{ color: "var(--table-accent)" }}>Hot</span></div>
+              <div className="flex px-2 py-1 text-[10px] text-slate-600"><span className="flex-1">John Roe</span><span className="w-12 text-slate-400">Warm</span></div>
             </div>
           </div>
         </div>

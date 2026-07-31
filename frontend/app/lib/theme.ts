@@ -39,7 +39,37 @@ export interface Branding {
   font_size: FontSize;
   /** Loading-animation style shown across the dashboard. */
   loader_style: LoaderStyle;
+
+  // ---- Surface & table colours (light mode) --------------------------------
+  // Each is a hex string that overrides a hard-coded surface. They apply in
+  // LIGHT mode only; dark mode uses the fixed dark palette in globals.css.
+  /** App/page background behind the cards (default slate-50). */
+  panel_bg: string;
+  /** Card / panel / topbar / filter-rail surface (default white). */
+  surface_bg: string;
+  /** Sidebar background (default white). */
+  sidebar_bg: string;
+  /** Sidebar inactive item text (default slate-600). */
+  sidebar_text: string;
+  /** Sidebar menu icon colour, inactive items (default slate-400). */
+  sidebar_icon: string;
+  /** Data-table header row background (default slate-50). */
+  table_header_bg: string;
+  /** Data-table highlight accent — hover, selected row, sort, links (default indigo). */
+  table_accent: string;
 }
+
+/** The surface-colour keys (Branding fields that map to a `--var`). Kept in one
+ *  place so the backend whitelist, the picker, and the CSS builder stay in sync. */
+export const SURFACE_COLOR_FIELDS: { key: keyof Branding; var: string; label: string; hint: string }[] = [
+  { key: "panel_bg", var: "--panel-bg", label: "Page background", hint: "Behind the cards and tables" },
+  { key: "surface_bg", var: "--surface-bg", label: "Card / panel surface", hint: "Cards, topbar, table & filter panel" },
+  { key: "sidebar_bg", var: "--sidebar-bg", label: "Sidebar background", hint: "The left navigation menu" },
+  { key: "sidebar_text", var: "--sidebar-text", label: "Sidebar text", hint: "Inactive menu item colour" },
+  { key: "sidebar_icon", var: "--sidebar-icon", label: "Sidebar icons", hint: "Menu icon colour (inactive items)" },
+  { key: "table_header_bg", var: "--table-header-bg", label: "Table header", hint: "The column-header row" },
+  { key: "table_accent", var: "--table-accent", label: "Table accent", hint: "Row hover, selection, sort & links" },
+];
 
 /** Selectable loader styles, with a label for the picker. */
 export const LOADER_STYLE_OPTIONS: { value: LoaderStyle; label: string }[] = [
@@ -122,6 +152,13 @@ export const DEFAULT_BRANDING: Branding = {
   font_family: "inter",
   font_size: "base",
   loader_style: "spinner",
+  panel_bg: "#f8fafc",
+  surface_bg: "#ffffff",
+  sidebar_bg: "#ffffff",
+  sidebar_text: "#475569",
+  sidebar_icon: "#94a3b8",
+  table_header_bg: "#f8fafc",
+  table_accent: "#6366f1",
 };
 
 // The Tailwind shade stops we generate. The picked colour anchors 600 (the
@@ -184,6 +221,22 @@ export function brandCssVars(hex: string): React.CSSProperties {
   const vars: Record<string, string> = { "--brand": hex };
   for (const [stop, value] of Object.entries(scale)) {
     vars[`--color-emerald-${stop}`] = value;
+  }
+  return vars as React.CSSProperties;
+}
+
+/**
+ * CSS variables for the customizable surface/table colours (light mode).
+ * Returns `{}` when `dark` is true so the fixed dark palette in globals.css
+ * wins — the inline vars are only emitted in light mode. Any field that is
+ * blank/invalid is skipped, falling back to its globals.css default.
+ */
+export function surfaceCssVars(b: Branding, dark: boolean): React.CSSProperties {
+  if (dark) return {};
+  const vars: Record<string, string> = {};
+  for (const f of SURFACE_COLOR_FIELDS) {
+    const v = String(b[f.key] ?? "").trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) vars[f.var] = v;
   }
   return vars as React.CSSProperties;
 }
