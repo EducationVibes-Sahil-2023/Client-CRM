@@ -2429,6 +2429,9 @@ class ClientController extends ApiController
 
     public function leadAnalytics()
     {
+        if ($resp = $this->requirePermission('leads')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
         $model = new LeadModel();
 
@@ -10839,8 +10842,27 @@ class ClientController extends ApiController
         if ($resp = $this->requirePermission('assets')) {
             return $resp;
         }
-        $cid    = $this->clientId();
-        $assets = (new AssetModel())->where('client_id', $cid)->orderBy('id', 'DESC')->findAll();
+        $cid = $this->clientId();
+        $aq  = (new AssetModel())->where('client_id', $cid);
+
+        // Reporting-hierarchy scope: a non-admin sees assets they manage OR that
+        // are currently allocated to someone in their reporting sub-tree. Admins
+        // (scope null) see everything.
+        $scope = $this->visibleStaffIds();
+        if ($scope !== null) {
+            $allocatedIds = array_column(
+                (new AssetAllocationModel())->select('asset_id')
+                    ->where(['client_id' => $cid, 'status' => 'allocated'])
+                    ->whereIn('staff_id', $scope ?: [0])->findAll(),
+                'asset_id',
+            );
+            $aq->groupStart()->whereIn('managed_by', $scope ?: [0]);
+            if ($allocatedIds) {
+                $aq->orWhereIn('id', $allocatedIds);
+            }
+            $aq->groupEnd();
+        }
+        $assets = $aq->orderBy('id', 'DESC')->findAll();
         $staff  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
 
         // Current (active) allocation per asset.
@@ -10871,6 +10893,11 @@ class ClientController extends ApiController
         $code  = trim((string) ($this->input('asset_code') ?? '')) ?: $this->nextAssetCode($cid);
 
         $data         = $this->assetData($cid) + ['asset_code' => $code];
+        // A non-admin creator who didn't pick a manager owns it themselves, so the
+        // new asset stays inside their reporting-scoped view (see canSeeAsset).
+        if (! $this->isAdmin() && empty($data['managed_by']) && $this->staffId()) {
+            $data['managed_by'] = $this->staffId();
+        }
         $customValues = $this->assetCustomValues((array) $this->input());
         $data['custom_fields'] = json_encode($customValues);
         if ($errs = $this->assetFieldErrors($data, $customValues)) {
@@ -10895,7 +10922,7 @@ class ClientController extends ApiController
         $cid   = $this->clientId();
         $model = new AssetModel();
         $before = $model->where('client_id', $cid)->find($id);
-        if (! $before) {
+        if (! $before || ! $this->canSeeAsset($before)) {
             return $this->failNotFound('Asset not found');
         }
         $in   = (array) $this->input();
@@ -10932,7 +10959,8 @@ class ClientController extends ApiController
 
         $cid   = $this->clientId();
         $model = new AssetModel();
-        if (! $model->where('client_id', $cid)->find($id)) {
+        $asset = $model->where('client_id', $cid)->find($id);
+        if (! $asset || ! $this->canSeeAsset($asset)) {
             return $this->failNotFound('Asset not found');
         }
 
@@ -10963,7 +10991,7 @@ class ClientController extends ApiController
         }
         $cid   = $this->clientId();
         $asset = (new AssetModel())->where('client_id', $cid)->find($id);
-        if (! $asset) {
+        if (! $asset || ! $this->canSeeAsset($asset)) {
             return $this->failNotFound('Asset not found');
         }
         $staffId = (int) $this->input('staff_id');
@@ -10989,7 +11017,7 @@ class ClientController extends ApiController
         }
         $cid   = $this->clientId();
         $asset = (new AssetModel())->where('client_id', $cid)->find($id);
-        if (! $asset) {
+        if (! $asset || ! $this->canSeeAsset($asset)) {
             return $this->failNotFound('Asset not found');
         }
         $toStaff = (int) $this->input('staff_id');
@@ -11016,8 +11044,9 @@ class ClientController extends ApiController
         if ($resp = $this->requirePermission('assets', 'update')) {
             return $resp;
         }
-        $cid = $this->clientId();
-        if (! (new AssetModel())->where('client_id', $cid)->find($id)) {
+        $cid   = $this->clientId();
+        $asset = (new AssetModel())->where('client_id', $cid)->find($id);
+        if (! $asset || ! $this->canSeeAsset($asset)) {
             return $this->failNotFound('Asset not found');
         }
         $from = $this->currentAllocStaff($cid, $id);
@@ -11036,8 +11065,9 @@ class ClientController extends ApiController
         if ($resp = $this->requirePermission('assets', 'update')) {
             return $resp;
         }
-        $cid = $this->clientId();
-        if (! (new AssetModel())->where('client_id', $cid)->find($id)) {
+        $cid   = $this->clientId();
+        $asset = (new AssetModel())->where('client_id', $cid)->find($id);
+        if (! $asset || ! $this->canSeeAsset($asset)) {
             return $this->failNotFound('Asset not found');
         }
         $note = trim((string) ($this->input('note') ?? ''));
@@ -11055,7 +11085,14 @@ class ClientController extends ApiController
      */
     public function assetHistory(int $id)
     {
+        if ($resp = $this->requirePermission('assets')) {
+            return $resp;
+        }
         $cid   = $this->clientId();
+        $asset = (new AssetModel())->where('client_id', $cid)->find($id);
+        if (! $asset || ! $this->canSeeAsset($asset)) {
+            return $this->failNotFound('Asset not found');
+        }
         $staff = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
         $rows  = (new AssetLogModel())
             ->where(['client_id' => $cid, 'asset_id' => $id])
@@ -11067,6 +11104,25 @@ class ClientController extends ApiController
         }
 
         return $this->respond(['history' => $rows]);
+    }
+
+    /**
+     * Whether the current user may see/act on one asset under the reporting
+     * hierarchy: admins always; otherwise they manage it (managed_by in their
+     * sub-tree) OR it's currently allocated to someone in their sub-tree.
+     */
+    private function canSeeAsset(array $asset): bool
+    {
+        $scope = $this->visibleStaffIds();
+        if ($scope === null) {
+            return true; // admin
+        }
+        if (in_array((int) ($asset['managed_by'] ?? 0), $scope, true)) {
+            return true;
+        }
+        $holder = $this->currentAllocStaff((int) ($asset['client_id'] ?? $this->clientId()), (int) ($asset['id'] ?? 0));
+
+        return $holder !== null && in_array($holder, $scope, true);
     }
 
     /** Current active allocation's staff id, or null. */
