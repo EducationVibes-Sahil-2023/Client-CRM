@@ -6,7 +6,7 @@ import { SearchSelect, MultiSelect, type SelectOption } from "../../admin/Search
 import { useClient } from "../ClientContext";
 import { useToast } from "../../components/toast/ToastProvider";
 import { exportXlsx, exportCsvGrid } from "../../lib/xlsxExport";
-import { parseFile, mapGrid, validateRows } from "./importEngine";
+import { parseFile, mapGrid, validateRows, importTemplate } from "./importEngine";
 import {
   getImportSetup, importLeads, importTasks, importTeam,
   getLeads, getTasks, getStaff, getLeadStatuses, getLeadSources, getLeadTypes,
@@ -177,10 +177,8 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
   }
 
   async function downloadTemplate() {
-    const cols = columns.filter((c) => c.include);
-    const headers = cols.map((c) => c.label);
-    const example = cols.map((c) => (c.key === "phone" ? "9876543210" : c.key === "email" ? "name@example.com" : c.key === "name" || c.key === "title" ? "Sample" : ""));
-    await exportXlsx(`${entity}-import-template`, headers, [example], "Template");
+    const { headers, rows } = importTemplate(columns);
+    await exportXlsx(`${entity}-import-template`, headers, rows, "Template");
   }
 
   if (loading) return <div className="flex justify-center py-16"><Spinner /></div>;

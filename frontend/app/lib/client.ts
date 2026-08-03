@@ -812,6 +812,10 @@ export interface LeadImportColumn {
   required: boolean;
   custom: boolean;
   locked?: boolean;
+  /** Field type — "select" for lookup/dropdown columns (status/source/…), else text/number/date/email. */
+  type?: string;
+  /** Allowed values for a "select" column (statuses, sources, …), shown in the sample download. */
+  options?: string[];
 }
 export const getLeadImportSetup = () =>
   clientGet<{ columns: LeadImportColumn[]; can_manage: boolean }>("/lead-import-setup");
@@ -1400,6 +1404,20 @@ export const saveFbForm = (body: Record<string, unknown>) =>
 export const deleteFbForm = (id: number) => clientPost(`/facebook/forms/${id}/delete`);
 export const syncFbForm = (id: number) => clientPost<{ inserted: number; skipped: number }>(`/facebook/forms/${id}/sync`);
 export const disconnectFacebook = () => clientPost("/facebook/disconnect");
+/** One incoming Facebook lead delivery (from the webhook log). */
+export interface FbLogEntry {
+  ts: string;
+  event: string;            // "received" | "skipped"
+  reason?: string;          // why it was skipped
+  form?: string;
+  form_id?: string;
+  page_id?: string;
+  leadgen_id?: string;
+  data?: Record<string, string>;   // the FB field values that arrived
+  result?: string;          // "created" | "duplicate_leadgen" | "skipped_no_phone" | …
+  lead_id?: number | null;
+}
+export const getFacebookLogs = () => clientGet<{ entries: FbLogEntry[] }>("/facebook/logs");
 
 // ---- Google Sheets → Leads sync ----
 /** A connected Google Sheet + how its columns map onto leads. */

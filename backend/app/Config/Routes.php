@@ -279,6 +279,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->post('facebook/config', 'FacebookController::saveConfig');
     $routes->get('facebook/oauth-url', 'FacebookController::oauthUrl');
     $routes->post('facebook/connect', 'FacebookController::connect');
+    $routes->get('facebook/logs', 'FacebookController::logs');
     $routes->get('facebook/pages/(:num)/forms', 'FacebookController::pageForms/$1');
     $routes->post('facebook/forms', 'FacebookController::saveForm');
     $routes->post('facebook/forms/(:num)/delete', 'FacebookController::deleteForm/$1');

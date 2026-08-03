@@ -8,8 +8,8 @@ import { useToast } from "../../components/toast/ToastProvider";
 import { API_URL } from "../../lib/api";
 import {
   getFacebook, saveFacebookConfig, facebookOauthUrl, connectFacebook, getPageForms,
-  saveFbForm, deleteFbForm, syncFbForm, disconnectFacebook, listWebForms,
-  type FacebookState, type FbForm, type FbPage, type FbLiveForm, type WebFormBuilderFields,
+  saveFbForm, deleteFbForm, syncFbForm, disconnectFacebook, listWebForms, getFacebookLogs,
+  type FacebookState, type FbForm, type FbPage, type FbLiveForm, type WebFormBuilderFields, type FbLogEntry,
 } from "../../lib/client";
 
 const inp = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
@@ -124,6 +124,7 @@ export default function FacebookPage() {
           {fb.pages.map((page) => (
             <PageCard key={page.id} page={page} onAdd={(live) => setEditing(scaffold(page, live))} onEdit={setEditing} onSync={sync} onDelete={setDel} />
           ))}
+          <LeadLog />
           <AppSettings fb={fb} redirectUri={redirectUri} onSaved={reload} />
         </div>
       )}
@@ -140,6 +141,69 @@ export default function FacebookPage() {
       <ConfirmDialog open={confirmDisconnect} title="Disconnect Facebook?" message="This removes all connected pages and stops new Facebook leads. Existing leads are kept." confirmLabel="Disconnect" busy={busy} onConfirm={doDisconnect} onClose={() => setConfirmDisconnect(false)} />
       <ConfirmDialog open={!!del} title="Remove this form?" message={<>The mapping for <b>{del?.form_name}</b> will be removed and its leads will stop syncing.</>} confirmLabel="Remove" busy={busy} onConfirm={confirmDelete} onClose={() => setDel(null)} />
     </div>
+  );
+}
+
+/** Live log of leads Facebook has delivered (raw values + outcome) for this client. */
+function LeadLog() {
+  const toast = useToast();
+  const [entries, setEntries] = useState<FbLogEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const load = async () => {
+    setLoading(true);
+    try { setEntries((await getFacebookLogs()).entries); }
+    catch (e) { toast.error((e as Error).message); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resultBadge = (r?: string) => {
+    const map: Record<string, string> = {
+      created: "bg-emerald-50 text-emerald-700", duplicate_leadgen: "bg-amber-50 text-amber-700",
+      skipped_no_phone: "bg-rose-50 text-rose-700",
+    };
+    const cls = r ? (map[r] ?? "bg-slate-100 text-slate-600") : "bg-slate-100 text-slate-500";
+    return <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${cls}`}>{r ?? "—"}</span>;
+  };
+
+  return (
+    <Card>
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800">Lead delivery log</h3>
+          <p className="text-xs text-slate-400">What Facebook sent and whether it became a lead. Newest first.</p>
+        </div>
+        <button onClick={load} disabled={loading} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-60">{loading ? "Loading…" : "Refresh"}</button>
+      </div>
+      {entries === null ? (
+        <p className="py-6 text-center text-sm text-slate-400">Loading…</p>
+      ) : entries.length === 0 ? (
+        <p className="rounded-lg bg-slate-50 py-6 text-center text-sm text-slate-400">No Facebook leads received yet. Submit a test lead from Meta&apos;s Lead Ads Testing Tool, then Refresh.</p>
+      ) : (
+        <div className="max-h-96 space-y-2 overflow-y-auto">
+          {entries.map((e, i) => (
+            <div key={i} className="rounded-lg border border-slate-200 p-2.5 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-slate-400">{e.ts}</span>
+                {e.form && <span className="font-medium text-slate-700">{e.form}</span>}
+                {e.event === "received" ? resultBadge(e.result) : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">skipped: {e.reason}</span>}
+                {e.lead_id ? <span className="text-slate-400">→ lead #{e.lead_id}</span> : null}
+              </div>
+              {e.data && Object.keys(e.data).length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-slate-600">
+                  {Object.entries(e.data).map(([k, v]) => (
+                    <span key={k}><span className="text-slate-400">{k}:</span> {v || "—"}</span>
+                  ))}
+                </div>
+              )}
+              {(e.leadgen_id || e.page_id) && (
+                <div className="mt-1 font-mono text-[10px] text-slate-300">leadgen {e.leadgen_id} · page {e.page_id}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

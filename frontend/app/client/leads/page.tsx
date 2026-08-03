@@ -33,6 +33,7 @@ import { useHiddenPrefs, VisibilityMenu, useFilterLayout, FilterLayoutMenu, orde
 import { FieldRow, inputCls, isEmail } from "../../admin/clients/formKit";
 import { INDIA_STATES, INDIA_CITIES } from "../../lib/india";
 import { CallActivityItem } from "../../admin/CallActivity";
+import { importTemplate } from "../excel/importEngine";
 
 // The full leads filter set. `draft` is what the user is editing; `applied` is
 // what actually filters the table — they sync only when the user clicks Apply.
@@ -1564,15 +1565,9 @@ export default function ClientLeads() {
   }
 
   // Template = only the columns the admin chose to include.
-  function templateParts() {
-    const cols = importCols.filter((c) => c.include);
-    const headers = cols.map((c) => c.label);
-    const example = cols.map((c) => (c.key === "phone" ? "9876543210" : c.key === "email" ? "john@example.com" : c.key === "name" ? "John Doe" : c.key === "city" ? "Mumbai" : ""));
-    return { headers, example };
-  }
   function downloadTemplateCsv() {
-    const { headers, example } = templateParts();
-    const csv = headers.map(csvCell).join(",") + "\n" + example.map(csvCell).join(",") + "\n";
+    const { headers, rows } = importTemplate(importCols);
+    const csv = [headers, ...rows].map((r) => r.map(csvCell).join(",")).join("\n") + "\n";
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
     const a = document.createElement("a");
     a.href = url; a.download = "leads-import-template.csv";
@@ -1580,9 +1575,9 @@ export default function ClientLeads() {
     URL.revokeObjectURL(url);
   }
   async function downloadTemplateXlsx() {
-    const { headers, example } = templateParts();
+    const { headers, rows } = importTemplate(importCols);
     const XLSX = await import("xlsx");
-    const ws = XLSX.utils.aoa_to_sheet([headers, example]);
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Leads");
     XLSX.writeFile(wb, "leads-import-template.xlsx");
@@ -2665,7 +2660,7 @@ export default function ClientLeads() {
       <Modal open={importOpen} onClose={closeImport} title="Import leads from Excel / CSV">
         <div className="space-y-4">
           <p className="text-sm text-slate-500">
-            Upload an <b>.xlsx</b> or <b>.csv</b> file. Status, source, type and assignment are chosen below — not columns in the sheet. Every row needs a valid <b>10-digit phone</b>; emails are validated. Invalid rows are skipped and reported.
+            Upload an <b>.xlsx</b> or <b>.csv</b> file. The choices below (status, source, type, assignment) are the <b>default</b> — a row&apos;s own Status/Source/Type/Assigned-to column (if enabled in Leads Setup → Import) overrides them, matched by name. Every row needs a valid <b>10-digit phone</b>; emails are validated. Invalid rows are skipped and reported.
           </p>
 
           <div className="flex flex-wrap gap-4 text-sm font-medium text-emerald-600">

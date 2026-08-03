@@ -116,26 +116,62 @@ class FbWebhook extends ApiController
     {
         $idx = (new FbPageIndexModel())->where('page_id', $pageId)->first();
         if (! $idx || empty($idx['enabled'])) {
+            $this->fbLog(0, ['event' => 'skipped', 'reason' => 'page not connected/enabled', 'page_id' => $pageId, 'form_id' => $formId, 'leadgen_id' => $leadgenId]);
+
             return;
         }
         $cid    = (int) $idx['client_id'];
         $client = (new ClientModel())->find($cid);
         if (! $client || ! ClientModel::statusAllowsAccess($client['status'] ?? null)) {
+            $this->fbLog($cid, ['event' => 'skipped', 'reason' => 'client inactive', 'page_id' => $pageId, 'form_id' => $formId, 'leadgen_id' => $leadgenId]);
+
             return;
         }
 
         $db   = (new TenantManager())->forClient($cid);
         $page = (new FbPageModel($db))->where('client_id', $cid)->where('page_id', $pageId)->first();
         if (! $page) {
+            $this->fbLog($cid, ['event' => 'skipped', 'reason' => 'page not found for client', 'page_id' => $pageId, 'form_id' => $formId, 'leadgen_id' => $leadgenId]);
+
             return;
         }
         // Only ingest for a form the client has mapped + enabled.
         $form = (new FbFormModel($db))->where('client_id', $cid)->where('form_id', $formId)->where('enabled', 1)->first();
         if (! $form) {
+            $this->fbLog($cid, ['event' => 'skipped', 'reason' => 'form not mapped/enabled', 'page_id' => $pageId, 'form_id' => $formId, 'leadgen_id' => $leadgenId]);
+
             return;
         }
 
-        $lead = FacebookGraph::getLead($leadgenId, (string) $page['access_token']);
-        FbLeadIngest::ingest($cid, $db, $form, (array) ($lead['field_data'] ?? []), $leadgenId);
+        $lead      = FacebookGraph::getLead($leadgenId, (string) $page['access_token']);
+        $fieldData = (array) ($lead['field_data'] ?? []);
+        // Flatten FB's [{name, values:[...]}] into a readable {name: value} map.
+        $flat = [];
+        foreach ($fieldData as $f) {
+            $flat[(string) ($f['name'] ?? '')] = implode(', ', (array) ($f['values'] ?? []));
+        }
+
+        $result = FbLeadIngest::ingest($cid, $db, $form, $fieldData, $leadgenId);
+        $this->fbLog($cid, [
+            'event'      => 'received',
+            'form'       => $form['form_name'] ?? $formId,
+            'form_id'    => $formId,
+            'page_id'    => $pageId,
+            'leadgen_id' => $leadgenId,
+            'data'       => $flat,
+            'result'     => $result['status'] ?? 'unknown',
+            'lead_id'    => $result['lead_id'] ?? null,
+        ]);
+    }
+
+    /** Append one timestamped JSON line to the shared Facebook-lead log file. */
+    private function fbLog(int $cid, array $entry): void
+    {
+        try {
+            $line = json_encode(['ts' => date('Y-m-d H:i:s'), 'cid' => $cid] + $entry) . "\n";
+            @file_put_contents(WRITEPATH . 'logs/fb-leads.log', $line, FILE_APPEND | LOCK_EX);
+        } catch (\Throwable $e) {
+            // logging must never break ingestion
+        }
     }
 }

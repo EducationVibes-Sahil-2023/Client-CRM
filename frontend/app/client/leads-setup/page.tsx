@@ -71,7 +71,7 @@ const TABS: { key: EntityKey; label: string; hint: string }[] = [
   { key: "followup_groups", label: "Follow Up Groups", hint: "Group lead statuses into a named follow-up bucket (e.g. Prospect = Hot + Warm). Each group becomes a 'pending' card on the Follow Up Tracker." },
   { key: "states", label: "States", hint: "States/regions a lead can belong to. Add cities under each state." },
   { key: "cities", label: "Cities", hint: "Cities for the lead form, each grouped under a state. Pick the state when adding a city." },
-  { key: "import", label: "Import setup", hint: "Choose which columns appear in the lead import template and which are mandatory. Phone (contact) is always required." },
+  { key: "import", label: "Import setup", hint: "Choose which columns appear in the lead import template and which are mandatory. Enable Status / Source / Lead type / Assigned-to as columns to set them per row (matched by name; the import dialog's picker is the fallback for blank cells). Phone (contact) is always required." },
 ];
 
 // A sub-status has one or more parents; a top-level status has none.
@@ -407,10 +407,20 @@ export default function LeadsSetupPage() {
             </div>
             {importCols.map((c) => (
               <div key={c.key} className="flex items-center justify-between py-2.5">
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700">
-                  {c.label}
+                <span className="min-w-0 flex-1 text-sm font-medium text-slate-700">
+                  <span className="align-middle">{c.label}</span>
                   {c.custom && <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">custom</span>}
                   {c.locked && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600">always</span>}
+                  {c.type === "select" && (c.options?.length ?? 0) > 0 && (
+                    <span className="ml-2 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600" title={`Matched by name. Allowed: ${c.options!.join(", ")}`}>
+                      dropdown · {c.options!.length} values
+                    </span>
+                  )}
+                  {c.type === "select" && (c.options?.length ?? 0) > 0 && (
+                    <span className="mt-0.5 block truncate text-[11px] font-normal text-slate-400" title={c.options!.join(", ")}>
+                      Allowed: {c.options!.slice(0, 6).join(", ")}{c.options!.length > 6 ? ", …" : ""}
+                    </span>
+                  )}
                 </span>
                 <div className="flex items-center gap-6 pr-1">
                   <input type="checkbox" disabled={c.locked || !canUpdate} checked={c.include} onChange={(e) => patchImportCol(c.key, { include: e.target.checked, ...(e.target.checked ? {} : { required: false }) })} className="h-5 w-20 cursor-pointer accent-emerald-600 disabled:opacity-50" />

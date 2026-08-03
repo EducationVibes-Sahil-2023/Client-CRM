@@ -211,6 +211,32 @@ class FacebookController extends ApiController
         return $this->respond(['forms' => $forms]);
     }
 
+    /**
+     * GET /client/facebook/logs — recent incoming Facebook lead deliveries for THIS
+     * client (from the shared fb-leads.log): what data arrived + the outcome.
+     */
+    public function logs()
+    {
+        if ($r = $this->guard()) {
+            return $r;
+        }
+        $cid  = $this->cid();
+        $file = WRITEPATH . 'logs/fb-leads.log';
+        $out  = [];
+        if (is_file($file)) {
+            $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+            foreach (array_slice($lines, -800) as $line) {   // scan the recent tail
+                $e = json_decode($line, true);
+                if (is_array($e) && (int) ($e['cid'] ?? 0) === $cid) {
+                    $out[] = $e;
+                }
+            }
+            $out = array_slice(array_reverse($out), 0, 100); // newest first, capped
+        }
+
+        return $this->respond(['entries' => $out]);
+    }
+
     /** POST /client/facebook/forms — create/update a form's field mapping + lead config. */
     public function saveForm()
     {

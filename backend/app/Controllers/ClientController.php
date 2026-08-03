@@ -5066,13 +5066,26 @@ class ClientController extends ApiController
             return $this->failValidationErrors(['rows' => 'No rows to import.']);
         }
 
-        // ---- Batch selections (chosen once at upload, applied to every row) ----
+        // ---- Batch selections (chosen once at upload) — the FALLBACK for any row
+        // that doesn't carry its own status/sub/source/type/assignee COLUMN. When
+        // those columns are enabled, each row's value (matched by name) wins. ----
+        $importCols = $this->leadImportColumns();
+        $included   = [];
+        foreach ($importCols as $c) {
+            if (! empty($c['include'])) {
+                $included[$c['key']] = true;
+            }
+        }
         $opt      = (array) ($this->input('options') ?? []);
         $statusId = (int) ($opt['status_id'] ?? 0);
         $status   = $statusId ? (new LeadStatusModel())->where('client_id', $cid)->find($statusId) : null;
-        if (! $status) {
+        // A status must resolve per row — from the batch picker OR (when the Status
+        // column is enabled) the row's own value. Only hard-fail upfront when
+        // neither source can supply one.
+        if (! $status && empty($included['status'])) {
             return $this->failValidationErrors(['status_id' => 'Pick a status to apply to the imported leads.']);
         }
+        $statusId = $status ? $statusId : 0;
         $validId  = function (string $modelClass, int $id) use ($cid): ?int {
             return $id > 0 && (new $modelClass())->where('client_id', $cid)->find($id) ? $id : null;
         };
@@ -5097,8 +5110,45 @@ class ClientController extends ApiController
         $notify = ! empty($opt['notify']);
 
         // Admin-configured mandatory columns + the lead's custom-field defs.
-        $mandatory  = array_values(array_filter($this->leadImportColumns(), static fn ($c) => ! empty($c['required']) && $c['key'] !== 'phone'));
+        $mandatory  = array_values(array_filter($importCols, static fn ($c) => ! empty($c['required']) && $c['key'] !== 'phone'));
         $customDefs = $this->formCustomFields('lead');
+
+        // Name → id maps for the per-row lookup columns (case-insensitive).
+        $mapNames = static function (array $rows): array {
+            $m = [];
+            foreach ($rows as $r) {
+                $n = mb_strtolower(trim((string) ($r['name'] ?? '')));
+                if ($n !== '' && ! isset($m[$n])) {
+                    $m[$n] = (int) $r['id'];
+                }
+            }
+
+            return $m;
+        };
+        $allStatuses = $this->lookupRows(LeadStatusModel::class, $cid);
+        $isSubRow    = static function (array $r): bool {
+            if (! empty($r['parent_id'])) {
+                return true;
+            }
+            $p = json_decode((string) ($r['parent_ids'] ?? ''), true);
+
+            return is_array($p) && count($p) > 0;
+        };
+        $statusMap = $mapNames(array_filter($allStatuses, static fn ($r) => ! $isSubRow($r)));
+        $subMap    = $mapNames(array_filter($allStatuses, $isSubRow));
+        $sourceMap = $mapNames($this->lookupRows(LeadSourceModel::class, $cid));
+        $typeMap   = $mapNames($this->lookupRows(LeadTypeModel::class, $cid));
+        $staffMap  = $mapNames((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        // Resolve a row cell against a name→id map → [id|null, ok]. Blank → fallback.
+        $pick = static function ($cell, array $map): array {
+            $cell = trim((string) $cell);
+            if ($cell === '') {
+                return [null, true];
+            }
+            $id = $map[mb_strtolower($cell)] ?? null;
+
+            return [$id, $id !== null];
+        };
 
         $model       = new LeadModel();
         $inserted    = 0;
@@ -5137,6 +5187,45 @@ class ClientController extends ApiController
                 continue;
             }
 
+            // Per-row lookup columns (name → id): a non-empty unmatched value fails
+            // the row; a blank falls back to the batch pick above.
+            $rowStatus = $statusId;
+            $rowSub    = $subId;
+            $rowSource = $sourceId;
+            $rowType   = $typeId;
+            $rowAssign = null;
+            $bad       = null;
+            foreach ([['status', $statusMap], ['sub_status', $subMap], ['source', $sourceMap], ['lead_type', $typeMap], ['assigned_to', $staffMap]] as $lk) {
+                [$lid, $ok] = $pick($row[$lk[0]] ?? '', $lk[1]);
+                if (! $ok) {
+                    $bad = 'Unknown ' . str_replace('_', ' ', $lk[0]) . ' "' . trim((string) $row[$lk[0]]) . '".';
+                    break;
+                }
+                if ($lid !== null) {
+                    if ($lk[0] === 'status') {
+                        $rowStatus = $lid;
+                    } elseif ($lk[0] === 'sub_status') {
+                        $rowSub = $lid;
+                    } elseif ($lk[0] === 'source') {
+                        $rowSource = $lid;
+                    } elseif ($lk[0] === 'lead_type') {
+                        $rowType = $lid;
+                    } else {
+                        $rowAssign = $lid;
+                    }
+                }
+            }
+            if ($bad !== null) {
+                $errors[] = ['row' => $line, 'message' => $bad];
+
+                continue;
+            }
+            if (! $rowStatus) {
+                $errors[] = ['row' => $line, 'message' => 'Status is required.'];
+
+                continue;
+            }
+
             $altPhone = preg_replace('/\D/', '', (string) ($row['alt_phone'] ?? ''));
             $custom   = [];
             foreach ($customDefs as $f) {
@@ -5148,17 +5237,18 @@ class ClientController extends ApiController
                 }
             }
 
-            $assignTo = $assignees ? $assignees[$n % count($assignees)] : null;
+            // A row's own "Assigned to" wins; otherwise fall back to round-robin.
+            $assignTo = $rowAssign ?: ($assignees ? $assignees[$n % count($assignees)] : null);
 
             $data = [
                 'client_id'      => $cid,
                 'name'           => trim((string) ($row['name'] ?? '')),
                 'phone'          => $phone,
                 'alt_phone'      => $altPhone !== '' ? $altPhone : null,
-                'status_id'      => $statusId,
-                'sub_status_id'  => $subId,
-                'lead_type_id'   => $typeId,
-                'source_id'      => $sourceId,
+                'status_id'      => $rowStatus,
+                'sub_status_id'  => $rowSub,
+                'lead_type_id'   => $rowType,
+                'source_id'      => $rowSource,
                 'reference_name' => trim((string) ($row['reference_name'] ?? '')) ?: null,
                 'email'          => $email !== '' ? $email : null,
                 'assigned_to'    => $assignTo,
@@ -5219,6 +5309,7 @@ class ClientController extends ApiController
      */
     private function leadImportColumns(): array
     {
+        $cid   = $this->clientId();
         $cfg   = [];
         $saved = json_decode((string) ($this->settingsMap()['lead_import_fields'] ?? '[]'), true);
         if (is_array($saved)) {
@@ -5228,14 +5319,46 @@ class ClientController extends ApiController
                 }
             }
         }
+        // Build one column definition; `type`/`options` drive the sample download
+        // and (for lookup columns) the per-row name→id matching on import.
+        $col = static fn (string $key, string $label, bool $defInc, bool $defReq, string $type, array $options, bool $custom, bool $locked = false): array => [
+            'key'      => $key,
+            'label'    => $label,
+            'include'  => $cfg[$key]['include'] ?? $defInc,
+            'required' => $cfg[$key]['required'] ?? $defReq,
+            'custom'   => $custom,
+            'locked'   => $locked,
+            'type'     => $type,
+            'options'  => array_values($options),
+        ];
 
-        $cols = [['key' => 'phone', 'label' => 'Phone (contact)', 'include' => true, 'required' => true, 'custom' => false, 'locked' => true]];
+        $cols = [$col('phone', 'Phone (contact)', true, true, 'text', [], false, true)];
         foreach (self::LEAD_IMPORT_COLUMNS as $k => $label) {
-            $cols[] = ['key' => $k, 'label' => $label, 'include' => $cfg[$k]['include'] ?? true, 'required' => $cfg[$k]['required'] ?? false, 'custom' => false, 'locked' => false];
+            $cols[] = $col($k, $label, true, false, $k === 'email' ? 'email' : 'text', [], false);
         }
+
+        // Lookup columns — value matched to a status/source/type/staff by NAME on
+        // import (opt-in; the upload dialog's picker is the fallback for blanks).
+        // `options` are the live allowed values, surfaced in the sample download.
+        $statuses = $this->lookupRows(LeadStatusModel::class, $cid);
+        $isSub    = static function (array $r): bool {
+            if (! empty($r['parent_id'])) {
+                return true;
+            }
+            $p = json_decode((string) ($r['parent_ids'] ?? ''), true);
+
+            return is_array($p) && count($p) > 0;
+        };
+        $namesOf = static fn (array $rows) => array_values(array_filter(array_map(static fn ($r) => (string) ($r['name'] ?? ''), $rows), static fn ($n) => $n !== ''));
+
+        $cols[] = $col('status', 'Status', false, false, 'select', $namesOf(array_filter($statuses, static fn ($r) => ! $isSub($r))), false);
+        $cols[] = $col('sub_status', 'Sub status', false, false, 'select', $namesOf(array_filter($statuses, $isSub)), false);
+        $cols[] = $col('source', 'Source', false, false, 'select', $namesOf($this->lookupRows(LeadSourceModel::class, $cid)), false);
+        $cols[] = $col('lead_type', 'Lead type', false, false, 'select', $namesOf($this->lookupRows(LeadTypeModel::class, $cid)), false);
+        $cols[] = $col('assigned_to', 'Assigned to', false, false, 'select', $namesOf((new ClientStaffModel())->where('client_id', $cid)->orderBy('name', 'ASC')->findAll()), false);
+
         foreach ($this->formCustomFields('lead') as $f) {
-            $k      = $f['key'];
-            $cols[] = ['key' => $k, 'label' => $f['label'], 'include' => $cfg[$k]['include'] ?? true, 'required' => $cfg[$k]['required'] ?? ! empty($f['required']), 'custom' => true, 'locked' => false];
+            $cols[] = $col($f['key'], $f['label'], true, ! empty($f['required']), $f['type'] ?? 'text', $f['options'] ?? [], true);
         }
 
         return $cols;

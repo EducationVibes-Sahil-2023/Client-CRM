@@ -65,6 +65,41 @@ export async function parseFile(file: File): Promise<string[][]> {
   return grid as unknown as string[][];
 }
 
+/** An example cell value for a template column: a real allowed value for dropdown
+ *  (select) columns, else a sensible sample by key. */
+function sampleValue(c: ImportColumn): string {
+  if ((c.options?.length ?? 0) > 0) return c.options![0];
+  switch (c.key) {
+    case "phone": return "9876543210";
+    case "alt_phone": return "9876500000";
+    case "email": return "john@example.com";
+    case "name": return "John Doe";
+    case "title": return "Follow up with client";
+    case "city": return "Mumbai";
+    case "state": return "Maharashtra";
+    default: return "";
+  }
+}
+
+/**
+ * Build the downloadable sample/template for an import: the header row (labels of
+ * the included columns), one filled-in example row, and — for every dropdown
+ * (select) column — a reference note listing its allowed values. Shared by the
+ * leads importer and the Excel Data Hub so both stay in sync.
+ */
+export function importTemplate(columns: ImportColumn[]): { headers: string[]; rows: string[][] } {
+  const cols = columns.filter((c) => c.include);
+  const headers = cols.map((c) => c.label);
+  const rows: string[][] = [cols.map(sampleValue)];
+  const dropdowns = cols.filter((c) => (c.options?.length ?? 0) > 0);
+  if (dropdowns.length) {
+    rows.push([]); // spacer
+    rows.push(["Allowed values (reference only — delete this section before importing):"]);
+    for (const c of dropdowns) rows.push([c.label, (c.options ?? []).join(", ")]);
+  }
+  return { headers, rows };
+}
+
 /** Header alias map for a specific column set (static aliases + each column's label & key). */
 function buildAlias(columns: ImportColumn[]): Record<string, string> {
   const m: Record<string, string> = { ...HEADER_ALIAS };
