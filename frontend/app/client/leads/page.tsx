@@ -622,9 +622,12 @@ export default function ClientLeads() {
   const [convertTarget, setConvertTarget] = useState<Lead | null>(null);      // lead being converted
   const [convertValues, setConvertValues] = useState<Record<string, string>>({});
   const [converting, setConverting] = useState(false);
+  const [convertError, setConvertError] = useState<string | null>(null);
   const [convSetupOpen, setConvSetupOpen] = useState(false);                   // admin config modal
   const [convDraft, setConvDraft] = useState<ConvertConfig | null>(null);
   const [convSaving, setConvSaving] = useState(false);
+  const [convHeadersText, setConvHeadersText] = useState("");                  // "Name: value" per line
+  const [convExtraText, setConvExtraText] = useState("");                      // static POST body fields
   useEffect(() => { getConvertConfig().then(setConvertCfg).catch(() => {}); }, []);
 
   // Search applies instantly; every other filter is staged in `filters` and
@@ -1090,7 +1093,10 @@ export default function ClientLeads() {
   }
 
   function openNew() { setErrors({}); setDraft({ ...blank }); }
-  function openEdit(l: Lead) { setErrors({}); setDraft(toDraft(l)); }
+  function openEdit(l: Lead) {
+    if (l.converted_at) { toast.error("This lead is converted to an applicant and is locked — it can't be edited."); return; }
+    setErrors({}); setDraft(toDraft(l));
+  }
 
   // ---- view detail (reminders / notes / activity) ----
   const loadDetail = useCallback((id: number) => {
@@ -1111,13 +1117,21 @@ export default function ClientLeads() {
 
   // ---- Lead → Applicant conversion ----
   function openConvert(l: Lead) {
-    // Pre-fill any convert field whose key matches a lead field.
+    // Pre-fill a convert field from the matching lead field — mapping common
+    // aliases (e.g. a field keyed "phonenumber"/"mobile" fills from the lead's phone).
+    const ALIAS: Record<string, string> = {
+      phonenumber: "phone", mobile: "phone", contact: "phone", phone_number: "phone",
+      full_name: "name", customer_name: "name", applicant_name: "name",
+      email_id: "email", emailaddress: "email",
+    };
+    const rec = l as unknown as Record<string, unknown>;
     const seed: Record<string, string> = {};
     for (const f of convertCfg?.fields ?? []) {
-      const v = (l as unknown as Record<string, unknown>)[f.key];
+      const v = rec[f.key] ?? rec[ALIAS[f.key] ?? ""];
       if (typeof v === "string" || typeof v === "number") seed[f.key] = String(v);
     }
     setConvertValues(seed);
+    setConvertError(null);
     setConvertTarget(l);
   }
   async function submitConvert() {
@@ -1125,6 +1139,7 @@ export default function ClientLeads() {
     const missing = convertCfg.fields.filter((f) => f.required && !(convertValues[f.key] ?? "").trim());
     if (missing.length) { toast.error(`Please fill: ${missing.map((f) => f.label).join(", ")}`); return; }
     setConverting(true);
+    setConvertError(null);
     try {
       await convertLead(convertTarget.id, convertValues);
       toast.success("Lead converted to applicant.");
@@ -1132,14 +1147,19 @@ export default function ClientLeads() {
       closeView();
       refresh();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not convert the lead.");
+      const msg = e instanceof Error ? e.message : "Could not convert the lead.";
+      setConvertError(msg);   // full detail (URL + reason) shown inline in the modal
+      toast.error(msg);
     } finally {
       setConverting(false);
     }
   }
-  const emptyConvert: ConvertConfig = { enabled: false, label: "Convert to Applicant", status_id: 0, fields: [], api_url: "", api_method: "POST", api_type: "json", api_headers: {} };
+  const emptyConvert: ConvertConfig = { enabled: false, label: "Convert to Applicant", status_id: 0, fields: [], api_url: "", api_method: "POST", api_type: "json", api_headers: {}, api_key_header: "X-Api-Key", has_api_key: false, api_key: "" };
   function openConvSetup() {
     setConvDraft(convertCfg ? { ...emptyConvert, ...convertCfg, fields: [...(convertCfg.fields ?? [])] } : emptyConvert);
+    // Headers edited as "Name: value" lines (admin-managed — CSRF token, auth, etc.).
+    setConvHeadersText(Object.entries(convertCfg?.api_headers ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n"));
+    setConvExtraText(Object.entries(convertCfg?.extra_fields ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n"));
     setConvSetupOpen(true);
   }
   async function saveConvSetup() {
@@ -1147,9 +1167,20 @@ export default function ClientLeads() {
     // The API endpoint is only needed in 'shared' mode; 'own' mode writes to the applicant table.
     const ownMode = convertCfg?.applicant_mode === "own";
     if (convDraft.enabled && !ownMode && !(convDraft.api_url ?? "").trim()) { toast.error("Enter the API endpoint URL."); return; }
+    // Parse the "Name: value" textareas → maps (headers + static body fields).
+    const parseLines = (text: string): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const line of text.split("\n")) {
+        const idx = line.indexOf(":");
+        if (idx < 1) continue;
+        const k = line.slice(0, idx).trim();
+        if (k) out[k] = line.slice(idx + 1).trim();
+      }
+      return out;
+    };
     setConvSaving(true);
     try {
-      const saved = await saveConvertConfig(convDraft);
+      const saved = await saveConvertConfig({ ...convDraft, api_headers: parseLines(convHeadersText), extra_fields: parseLines(convExtraText) });
       setConvertCfg(saved);
       setConvSetupOpen(false);
       toast.success("Conversion settings saved.");
@@ -2134,11 +2165,15 @@ export default function ClientLeads() {
             <IconButton title="View details" onClick={() => openView(l)}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" strokeLinecap="round" strokeLinejoin="round" /><circle cx="12" cy="12" r="3" /></svg>
             </IconButton>
-            {can("leads", "update") && (
+            {can("leads", "update") && (l.converted_at ? (
+              <IconButton title="Converted — locked" onClick={() => openEdit(l)}>
+                <svg className="h-4 w-4 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 10V8a6 6 0 1112 0v2M5 10h14v10H5z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </IconButton>
+            ) : (
               <IconButton title="Edit" onClick={() => openEdit(l)}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>
-            )}
+            ))}
             {canTransfer && (
               <IconButton title="Transfer to another rep" onClick={() => setTransferLead({ id: l.id, name: l.name?.trim() || l.phone })}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 3l4 4-4 4M20 7H8M8 21l-4-4 4-4M4 17h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -2302,16 +2337,26 @@ export default function ClientLeads() {
         footer={
           <div className="flex items-center justify-end gap-2">
             <button onClick={closeView} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
-            {convertCfg?.enabled && can("leads", "update") && (
-              <button onClick={() => viewing && openConvert(viewing)} className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                {convertCfg.label}
-              </button>
+            {viewing?.converted_at ? (
+              // Converted → locked: no convert, no edit.
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                Converted &amp; locked
+              </span>
+            ) : (
+              <>
+                {convertCfg?.enabled && can("leads", "update") && (
+                  <button onClick={() => viewing && openConvert(viewing)} className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    {convertCfg.label}
+                  </button>
+                )}
+                <button onClick={() => { const l = viewing!; closeView(); openEdit(l); }} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  Edit
+                </button>
+              </>
             )}
-            <button onClick={() => { const l = viewing!; closeView(); openEdit(l); }} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              Edit
-            </button>
           </div>
         }
       >
@@ -2762,6 +2807,11 @@ export default function ClientLeads() {
               </label>
             ))}
           </div>
+          {convertError && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+              <span className="font-semibold">Conversion failed.</span> <span className="break-all">{convertError}</span>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={() => setConvertTarget(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
             <button onClick={submitConvert} disabled={converting} className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">
@@ -2779,11 +2829,10 @@ export default function ClientLeads() {
             <input type="checkbox" checked={convDraft.enabled} onChange={(e) => setConvDraft({ ...convDraft, enabled: e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
             <span className="text-sm font-medium text-slate-700">Enable the button on leads</span>
           </label>
-          {convertCfg?.applicant_mode === "own" ? (
-            <p className="rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-700">Applicant section is in <b>My own table</b> mode — converting a lead adds a record to your applicant table using <b>your applicant columns</b> (pre-filled from the lead). No API or form fields to set up here. Manage columns in the Applicant section settings.</p>
-          ) : (
-            <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">Applicant section is in <b>Shared tracker</b> mode — converting posts the form below to your external API.</p>
-          )}
+          <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+            Set an <b>API endpoint URL</b> below and converting a lead <b>POSTs the form to that URL</b> (works in any Applicant mode).
+            {convertCfg?.applicant_mode === "own" && <> Leave the URL blank to instead save a record in <b>your own applicant table</b>.</>}
+          </p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label>
               <span className="mb-1 block text-sm font-medium text-slate-700">Button text</span>
@@ -2796,10 +2845,10 @@ export default function ClientLeads() {
                 {statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </label>
-            {convertCfg?.applicant_mode !== "own" && <>
             <label className="sm:col-span-2">
-              <span className="mb-1 block text-sm font-medium text-slate-700">API endpoint URL</span>
-              <input value={convDraft.api_url ?? ""} onChange={(e) => setConvDraft({ ...convDraft, api_url: e.target.value })} placeholder="https://your-system.com/api/applicants" className={`${selCls} w-full`} />
+              <span className="mb-1 block text-sm font-medium text-slate-700">API endpoint URL <span className="font-normal text-slate-400">· where the converted lead is sent</span></span>
+              <input value={convDraft.api_url ?? ""} onChange={(e) => setConvDraft({ ...convDraft, api_url: e.target.value })} placeholder="https://crm.educationvibes.in/cron/convert-to-applicant" className={`${selCls} w-full`} />
+              <span className="mt-1 block text-[11px] text-slate-400">The CRM <b>POSTs</b> the converted lead here when you click Convert. Leave blank only if you want to write into your own applicant table (Own-table mode).</span>
             </label>
             <label>
               <span className="mb-1 block text-sm font-medium text-slate-700">Method</span>
@@ -2813,10 +2862,46 @@ export default function ClientLeads() {
                 <option value="json">JSON</option><option value="form">Form data</option>
               </select>
             </label>
-            </>}
+            {/* API key auth — sent as a header so a CSRF-excluded cron can authenticate the call. */}
+            <label>
+              <span className="mb-1 block text-sm font-medium text-slate-700">API key header</span>
+              <input value={convDraft.api_key_header ?? "X-Api-Key"} onChange={(e) => setConvDraft({ ...convDraft, api_key_header: e.target.value })} placeholder="X-Api-Key" className={`${selCls} w-full`} />
+            </label>
+            <label>
+              <span className="mb-1 block text-sm font-medium text-slate-700">API key {convDraft.has_api_key && <span className="font-normal text-emerald-600">· saved</span>}</span>
+              <div className="flex gap-1.5">
+                <input type="password" value={convDraft.api_key ?? ""} onChange={(e) => setConvDraft({ ...convDraft, api_key: e.target.value, api_key_clear: false })} placeholder={convDraft.has_api_key ? "•••••• (unchanged)" : "Secret key"} className={`${selCls} w-full`} autoComplete="new-password" />
+                {convDraft.has_api_key && <button type="button" onClick={() => setConvDraft({ ...convDraft, api_key: "", api_key_clear: true, has_api_key: false })} className="flex-shrink-0 rounded-lg border border-slate-300 px-2 text-xs text-slate-500 hover:bg-slate-50">Clear</button>}
+              </div>
+              <span className="mt-1 block text-[11px] text-slate-400">Sent as the header above. Your cron validates it; leave blank to keep the saved key.</span>
+            </label>
           </div>
 
-          {convertCfg?.applicant_mode !== "own" && <div>
+          <div>
+            <span className="mb-1 block text-sm font-medium text-slate-700">Custom headers <span className="font-normal text-slate-400">· one per line, &quot;Name: value&quot;</span></span>
+            <textarea
+              value={convHeadersText}
+              onChange={(e) => setConvHeadersText(e.target.value)}
+              rows={3}
+              placeholder={"Authorization: Bearer xxxxx\nX-CSRF-Token: xxxxx\nContent-Language: en"}
+              className={`${selCls} w-full font-mono text-xs`}
+            />
+            <p className="mt-1 text-[11px] text-slate-400">Any extra headers to send with the convert POST (auth token, etc.). The API key above is added automatically.</p>
+          </div>
+
+          <div>
+            <span className="mb-1 block text-sm font-medium text-slate-700">Extra POST fields <span className="font-normal text-slate-400">· one per line, &quot;name: value&quot;</span></span>
+            <textarea
+              value={convExtraText}
+              onChange={(e) => setConvExtraText(e.target.value)}
+              rows={2}
+              placeholder={"csrf_token_name: 6d8578d80d5356ef08320659b1ab0c5c"}
+              className={`${selCls} w-full font-mono text-xs`}
+            />
+            <p className="mt-1 text-[11px] text-slate-400">Fixed values added to the POST body (e.g. a CI3 <b>CSRF token</b> field). Sent alongside the lead fields below.</p>
+          </div>
+
+          <div>
             <span className="mb-1 block text-sm font-medium text-slate-700">Form fields</span>
             <p className="mb-2 text-xs text-slate-400">These fields appear in the convert form and are sent to the API using their key.</p>
             <div className="space-y-1.5">
@@ -2835,7 +2920,7 @@ export default function ClientLeads() {
               ))}
             </div>
             <button type="button" onClick={() => setConvDraft({ ...convDraft, fields: [...convDraft.fields, { key: "", label: "", type: "text", required: false } as ConvertField] })} className="mt-2 text-sm font-medium text-indigo-600 hover:text-indigo-700">+ Add field</button>
-          </div>}
+          </div>
 
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={() => setConvSetupOpen(false)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>

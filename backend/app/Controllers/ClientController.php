@@ -3722,11 +3722,13 @@ class ClientController extends ApiController
         $fields = json_decode((string) ($map['convert_fields'] ?? ''), true);
         $fields = is_array($fields) ? array_values($fields) : [];
 
-        // The convert form follows the applicant mode: in 'own' mode it uses the
-        // client's applicant table columns (and creates a record there); in 'shared'
-        // mode it uses the admin-configured fields (and posts to the external API).
-        $mode = $this->applicantSourceMap()['mode'];
-        if ($mode === 'own') {
+        // Convert target is decided by whether an API URL is set:
+        //   • URL set        → POST the admin-defined `fields` to that URL (any section mode);
+        //   • URL blank + own → create a record in the client's own applicant table,
+        //                       using its columns as the form.
+        $mode  = $this->applicantSourceMap()['mode'];
+        $apiUrl = trim((string) ($map['convert_api_url'] ?? ''));
+        if ($mode === 'own' && $apiUrl === '') {
             $fields = $this->applicantColumnDefs();
         }
 
@@ -3739,10 +3741,18 @@ class ClientController extends ApiController
         ];
         if ($full) {
             $headers = json_decode((string) ($map['convert_api_headers'] ?? ''), true);
-            $out['api_url']     = (string) ($map['convert_api_url'] ?? '');
-            $out['api_method']  = strtoupper((string) ($map['convert_api_method'] ?? 'POST')) === 'PUT' ? 'PUT' : 'POST';
-            $out['api_type']    = (string) ($map['convert_api_type'] ?? 'json') === 'form' ? 'form' : 'json';
-            $out['api_headers'] = is_array($headers) ? $headers : (object) [];
+            $out['api_url']        = (string) ($map['convert_api_url'] ?? '');
+            $out['api_method']     = strtoupper((string) ($map['convert_api_method'] ?? 'POST')) === 'PUT' ? 'PUT' : 'POST';
+            $out['api_type']       = (string) ($map['convert_api_type'] ?? 'json') === 'form' ? 'form' : 'json';
+            $out['api_headers']    = is_array($headers) ? $headers : (object) [];
+            // API key: sent as a header to authenticate the endpoint. The secret is
+            // never returned — only the header name + whether one is stored.
+            $out['api_key_header'] = trim((string) ($map['convert_api_key_header'] ?? '')) ?: 'X-Api-Key';
+            $out['has_api_key']    = trim((string) ($map['convert_api_key'] ?? '')) !== '';
+            // Static extra POST-body fields sent with every convert (e.g. a CSRF
+            // token: csrf_token_name => <value>). Merged into the request body.
+            $extra              = json_decode((string) ($map['convert_extra_fields'] ?? ''), true);
+            $out['extra_fields'] = is_array($extra) ? (object) $extra : (object) [];
         }
 
         return $out;
@@ -3816,6 +3826,29 @@ class ClientController extends ApiController
         $this->setSetting('convert_api_type', (string) $this->input('api_type') === 'form' ? 'form' : 'json');
         $this->setSetting('convert_api_headers', json_encode($headersOut));
         $this->setSetting('convert_fields', json_encode($fieldsOut));
+
+        // API key auth: header NAME always saved; the secret only changes when a new
+        // one is typed (blank keeps the stored key), or is wiped when 'api_key_clear'.
+        $this->setSetting('convert_api_key_header', mb_substr(trim((string) $this->input('api_key_header')), 0, 60) ?: 'X-Api-Key');
+        $keyIn = (string) $this->input('api_key');
+        if ($keyIn !== '') {
+            $this->setSetting('convert_api_key', mb_substr($keyIn, 0, 255));
+        } elseif ($this->input('api_key_clear')) {
+            $this->setSetting('convert_api_key', '');
+        }
+
+        // Static extra POST-body fields (name → value), e.g. a CSRF token field.
+        $extraIn  = $this->input('extra_fields');
+        $extraOut = [];
+        if (is_array($extraIn)) {
+            foreach ($extraIn as $k => $v) {
+                $k = trim((string) $k);
+                if ($k !== '') {
+                    $extraOut[$k] = mb_substr((string) $v, 0, 500);
+                }
+            }
+        }
+        $this->setSetting('convert_extra_fields', json_encode((object) $extraOut));
         $this->logActivity('updated', 'settings', null, 'Updated the lead-conversion config', $this->clientId());
 
         return $this->respond($this->convertConfigMap(true));
@@ -3856,32 +3889,35 @@ class ClientController extends ApiController
             return $this->failValidationErrors('Please fill: ' . implode(', ', $missing) . '.');
         }
 
-        // 'own' mode → create a record in the client's own applicant table.
-        if (($cfg['applicant_mode'] ?? 'shared') === 'own') {
-            $cols = $this->applicantColumnDefs();
-            $data = [];
-            foreach ($cols as $c) {
-                $v               = $values[$c['key']] ?? '';
-                $data[$c['key']] = $c['type'] === 'number'
-                    ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
-                    : trim((string) $v);
-            }
-            (new ApplicantModel())->insert([
-                'client_id'   => $cid,
-                'data'        => json_encode((object) $data),
-                'search_blob' => $this->applicantSearchBlob($data),
-            ]);
-            if ($cfg['status_id'] > 0) {
-                (new LeadModel())->update($id, ['status_id' => $cfg['status_id']]);
-            }
-            $this->logActivity('converted', 'lead', $id, 'Converted lead to applicant (own table)');
+        // A configured API URL ALWAYS wins — POST to it regardless of section mode.
+        // Only when there's NO URL do we fall back to writing the own applicant table.
+        if (trim((string) ($cfg['api_url'] ?? '')) === '') {
+            if (($cfg['applicant_mode'] ?? 'shared') === 'own') {
+                $cols = $this->applicantColumnDefs();
+                $data = [];
+                foreach ($cols as $c) {
+                    $v               = $values[$c['key']] ?? '';
+                    $data[$c['key']] = $c['type'] === 'number'
+                        ? (($v === '' || $v === null) ? '' : (string) (0 + $v))
+                        : trim((string) $v);
+                }
+                (new ApplicantModel())->insert([
+                    'client_id'   => $cid,
+                    'data'        => json_encode((object) $data),
+                    'search_blob' => $this->applicantSearchBlob($data),
+                ]);
+                // Lock the lead: mark converted (+ move status if configured).
+                $upd = ['converted_at' => date('Y-m-d H:i:s')];
+                if ($cfg['status_id'] > 0) {
+                    $upd['status_id'] = $cfg['status_id'];
+                }
+                (new LeadModel())->update($id, $upd);
+                $this->logActivity('converted', 'lead', $id, 'Converted lead to applicant (own table)');
 
-            return $this->respond(['ok' => true, 'message' => 'Lead converted — applicant added to your table.']);
-        }
+                return $this->respond(['ok' => true, 'message' => 'Lead converted — applicant added to your table.']);
+            }
 
-        // 'shared' mode → forward the values to the configured external API.
-        if ($cfg['api_url'] === '') {
-            return $this->fail('No conversion API endpoint is configured.', 400);
+            return $this->fail('No conversion API URL is set. Add it in Convert-to-Applicant setup (or use "My own table" mode to save into your table).', 400);
         }
 
         // Only forward the configured fields (+ the lead id for reference).
@@ -3889,11 +3925,28 @@ class ClientController extends ApiController
         foreach ($cfg['fields'] as $f) {
             $payload[$f['key']] = (string) ($values[$f['key']] ?? '');
         }
+        // Admin-set static body fields (e.g. a CSRF token: csrf_token_name => value).
+        $extra = json_decode((string) ($map['convert_extra_fields'] ?? ''), true);
+        if (is_array($extra)) {
+            foreach ($extra as $k => $v) {
+                if (trim((string) $k) !== '') {
+                    $payload[$k] = (string) $v;
+                }
+            }
+        }
 
-        // Forward to the external API.
+        // Forward to the external API. Merge, in order: Accept, admin headers, and
+        // the API key header (authenticates the endpoint — e.g. a CSRF-excluded cron).
+        $map       = $this->settingsMap();
+        $headers   = array_merge(['Accept' => 'application/json'], (array) $cfg['api_headers']);
+        $apiKey    = trim((string) ($map['convert_api_key'] ?? ''));
+        if ($apiKey !== '') {
+            $keyHeader           = trim((string) ($map['convert_api_key_header'] ?? '')) ?: 'X-Api-Key';
+            $headers[$keyHeader] = $apiKey;
+        }
         try {
             $client  = \Config\Services::curlrequest(['timeout' => 20, 'http_errors' => false]);
-            $options = ['headers' => array_merge(['Accept' => 'application/json'], (array) $cfg['api_headers'])];
+            $options = ['headers' => $headers];
             if ($cfg['api_type'] === 'form') {
                 $options['form_params'] = $payload;
             } else {
@@ -3903,19 +3956,41 @@ class ClientController extends ApiController
             $status = $res->getStatusCode();
             $body   = (string) $res->getBody();
         } catch (\Throwable $e) {
-            log_message('error', 'convertLead API call failed: ' . $e->getMessage());
+            $raw = $e->getMessage();
+            log_message('error', 'convertLead API call to ' . $cfg['api_url'] . ' failed: ' . $raw);
 
-            return $this->fail('Could not reach the conversion API: ' . $e->getMessage(), 502);
+            // Translate the common cURL failures into a plain, actionable message.
+            $hint = 'Check the URL is correct and reachable.';
+            if (stripos($raw, 'wrong version number') !== false || stripos($raw, 'SSL routines') !== false) {
+                $scheme = str_starts_with(strtolower($cfg['api_url']), 'https') ? 'https://' : 'http://';
+                $other  = $scheme === 'https://' ? 'http://' : 'https://';
+                $hint   = "The server answered plain HTTP to an {$scheme} request (SSL mismatch). Change the API URL scheme from {$scheme} to {$other}.";
+            } elseif (stripos($raw, 'resolve host') !== false || stripos($raw, "couldn't resolve") !== false) {
+                $hint = 'The domain could not be resolved — check the hostname / DNS.';
+            } elseif (stripos($raw, 'timed out') !== false || stripos($raw, 'timeout') !== false) {
+                $hint = 'The server did not respond in time (timeout).';
+            } elseif (stripos($raw, 'refused') !== false) {
+                $hint = 'Connection refused — the host or port isn\'t accepting requests.';
+            } elseif (stripos($raw, 'certificate') !== false) {
+                $hint = 'The server\'s SSL certificate could not be verified.';
+            }
+
+            return $this->fail("Couldn't reach the conversion API ({$cfg['api_method']} {$cfg['api_url']}). {$hint}", 502);
         }
 
         if ($status < 200 || $status >= 300) {
-            return $this->fail("The conversion API returned {$status}: " . mb_substr($body, 0, 300), 502);
+            $snippet = trim(mb_substr(strip_tags($body), 0, 200));
+
+            return $this->fail("The conversion API ({$cfg['api_url']}) returned HTTP {$status}."
+                . ($snippet !== '' ? ' Response: ' . $snippet : ''), 502);
         }
 
-        // Success → move the lead to the configured "customer/converted" status.
+        // Success → lock the lead (converted) + move to the configured status.
+        $upd = ['converted_at' => date('Y-m-d H:i:s')];
         if ($cfg['status_id'] > 0) {
-            (new LeadModel())->update($id, ['status_id' => $cfg['status_id']]);
+            $upd['status_id'] = $cfg['status_id'];
         }
+        (new LeadModel())->update($id, $upd);
         $this->logActivity('converted', 'lead', $id, 'Converted lead to applicant');
 
         return $this->respond([
@@ -4708,6 +4783,10 @@ class ClientController extends ApiController
         $old   = $model->where('client_id', $cid)->find($id);
         if (! $old || ! $this->canSeeLead($old)) {
             return $this->failNotFound('Lead not found');
+        }
+        // A converted lead is locked — it can no longer be edited.
+        if (! empty($old['converted_at'])) {
+            return $this->fail('This lead has been converted to an applicant and is locked — it can no longer be edited.', 409);
         }
 
         $data   = $this->leadData($cid);

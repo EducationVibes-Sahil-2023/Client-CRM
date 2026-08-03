@@ -18,7 +18,7 @@ class LeadModel extends TenantModel
         'lead_type_id', 'source_id', 'web_form_id', 'fb_leadgen_id',
         'reference_id', 'reference_name', 'email', 'assigned_to', 'created_by', 'assigned_date', 'city', 'state',
         'first_response_seconds', 'first_response_at',
-        'follow_date', 'created_date', 'pending_transfer', 'custom_fields', 'description',
+        'follow_date', 'created_date', 'pending_transfer', 'custom_fields', 'description', 'converted_at',
     ];
 
     protected $useSoftDeletes = true;

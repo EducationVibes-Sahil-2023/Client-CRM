@@ -164,6 +164,16 @@ export interface ConvertConfig {
   api_method?: string;   // "POST" | "PUT"
   api_type?: string;     // "json" | "form"
   api_headers?: Record<string, string>;
+  /** Header name the API key is sent under (default "X-Api-Key"). */
+  api_key_header?: string;
+  /** Whether a key is stored (secret never returned). */
+  has_api_key?: boolean;
+  /** Only sent when setting a new key; blank keeps the stored one. */
+  api_key?: string;
+  /** Send with a blank api_key to remove the stored key. */
+  api_key_clear?: boolean;
+  /** Static extra POST-body fields sent with every convert (e.g. a CSRF token). */
+  extra_fields?: Record<string, string>;
 }
 export const getConvertConfig = () => clientGet<ConvertConfig>("/convert-config");
 export const saveConvertConfig = (c: ConvertConfig) =>
@@ -459,6 +469,8 @@ export interface Lead {
   created_date: string | null;
   /** Rich-text description (sanitized HTML), or null. */
   description: string | null;
+  /** When the lead was converted to an applicant (locks the lead), or null. */
+  converted_at?: string | null;
   created_at: string;
   updated_at: string | null;
   /** Latest reminder datetime for this lead (max remind_at), or null if none. */
