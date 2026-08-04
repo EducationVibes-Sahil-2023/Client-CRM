@@ -3,9 +3,11 @@
 namespace App\Libraries;
 
 /**
- * Thin Facebook Graph API client for the Lead Ads integration. One PLATFORM app
- * (App ID/Secret/verify-token in .env under `facebook.*`); each client connects
- * their own Page via OAuth and we store that Page's long-lived access token.
+ * Thin Facebook Graph API client for the Lead Ads integration. Fully PER-PROJECT:
+ * every client supplies their own Meta App ID/Secret/verify-token (stored in that
+ * client's DB settings — nothing here reads `.env`). App credentials are passed
+ * in per call; each client connects their own Page via OAuth and we store that
+ * Page's long-lived access token.
  *
  * Stateless helpers over cURL — every call takes the token it needs. Errors are
  * surfaced as RuntimeExceptions carrying Facebook's own message so the admin UI
@@ -13,31 +15,19 @@ namespace App\Libraries;
  */
 class FacebookGraph
 {
-    public static function appId(): string
-    {
-        return (string) env('facebook.appId', '');
-    }
-
-    /** App secret — env fallback used by the webhook when a client has none saved. */
-    public static function appSecret(): string
-    {
-        return (string) env('facebook.appSecret', '');
-    }
+    /** Graph API version — a platform-wide constant (not a per-project secret). */
+    public const GRAPH_VERSION = 'v19.0';
 
     public static function graphVersion(): string
     {
-        return (string) (env('facebook.graphVersion', '') ?: 'v19.0');
+        return self::GRAPH_VERSION;
     }
 
+    /** Default OAuth redirect (the deployment's own /client/facebook URL). Callers
+     *  usually pass the exact browser origin; this is only the fallback. */
     public static function redirectUri(): string
     {
-        return (string) env('facebook.redirectUri', '');
-    }
-
-    /** The token the leadgen webhook must echo during Facebook's verification handshake. */
-    public static function verifyToken(): string
-    {
-        return (string) env('facebook.webhookVerifyToken', '');
+        return rtrim((string) base_url('client/facebook'), '/');
     }
 
     private static function base(): string

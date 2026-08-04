@@ -6,7 +6,8 @@ use App\Models\AppSettingModel;
 
 /**
  * Sends outgoing email through Gmail SMTP using the same account + App Password
- * configured for the IMAP inbox (app_settings: gmail_user, gmail_app_password).
+ * configured for the IMAP inbox. Credentials come from the DB only (admin
+ * `app_settings`, or a per-client $override) — no `.env` fallback.
  *
  * Returns a structured result so callers can show the exact failure reason
  * instead of silently swallowing it.
@@ -19,9 +20,9 @@ class MailerService
     public function __construct(?array $override = null)
     {
         $map = $override ?? $this->loadSettings();
-        $this->user = trim((string) ($map['gmail_user'] ?? env('gmail.user', '')));
+        $this->user = trim((string) ($map['gmail_user'] ?? ''));
         // App passwords are displayed with spaces; SMTP wants them stripped.
-        $this->pass = str_replace(' ', '', (string) ($map['gmail_app_password'] ?? env('gmail.appPassword', '')));
+        $this->pass = str_replace(' ', '', (string) ($map['gmail_app_password'] ?? ''));
     }
 
     private function loadSettings(): array

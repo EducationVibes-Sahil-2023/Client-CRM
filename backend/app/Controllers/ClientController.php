@@ -3336,15 +3336,16 @@ class ClientController extends ApiController
         ];
     }
 
-    /** The DB the tracker reads: the client's own creds when set, else the global .env server. */
+    /** The DB the tracker reads: THIS project's own creds only. No shared/.env
+     *  fallback — a project without its own applicant DB is "not configured". */
     private function resolvedSecondaryDb(): SecondaryDb
     {
         $db = $this->applicantSourceMap()['db'];
         if (trim((string) ($db['host'] ?? '')) !== '' && trim((string) ($db['database'] ?? '')) !== '') {
-            return new SecondaryDb($this->ownSecondaryConfig($db));
+            return new SecondaryDb($this->ownSecondaryConfig($db), false);
         }
 
-        return new SecondaryDb(); // global .env `database.secondary.*`
+        return new SecondaryDb(null, false); // per-project only — not configured
     }
 
     /** The client-defined applicant table columns (sanitized): key,label,type,required,options. */
@@ -3386,7 +3387,7 @@ class ClientController extends ApiController
 
         return $this->respond([
             'mode'              => $src['mode'],
-            'global_configured' => (new SecondaryDb())->isConfigured(),
+            'global_configured' => false, // shared/.env applicant DB removed — each project uses its own
             'db'                => [
                 'host'         => (string) ($db['host'] ?? ''),
                 'port'         => (int) ($db['port'] ?? 3306) ?: 3306,

@@ -1385,13 +1385,13 @@ export interface FbForm {
 }
 export interface FbPage { id: number; page_id: string; page_name: string; enabled: number; forms: FbForm[] }
 /** The client's Meta App config (secret never returned — only whether one is saved). */
-export interface FacebookConfig { app_id: string; has_secret: boolean; verify_token: string }
+export interface FacebookConfig { app_id: string; has_secret: boolean; verify_token: string; webhook_url?: string }
 export interface FacebookState { configured: boolean; connected: boolean; config: FacebookConfig; pages: FbPage[] }
 /** A lead form as returned live from the Graph API (for the "add form" picker). */
 export interface FbLiveForm { id: string; name: string; status: string }
 
 export const getFacebook = () => clientGet<FacebookState>("/facebook");
-export const saveFacebookConfig = (body: { app_id: string; app_secret: string }) =>
+export const saveFacebookConfig = (body: { app_id: string; app_secret: string; verify_token?: string }) =>
   clientPost<{ message: string }>("/facebook/config", body);
 export const facebookOauthUrl = (redirectUri: string) =>
   clientGet<{ url: string }>(`/facebook/oauth-url?redirect_uri=${encodeURIComponent(redirectUri)}`);

@@ -7,9 +7,9 @@ use App\Models\AppSettingModel;
 /**
  * Reads a Gmail mailbox over IMAP using an App Password.
  *
- * Credentials are managed from the admin panel and stored in the `app_settings`
- * table (keys: gmail_user, gmail_app_password, gmail_mailbox). The .env keys
- * gmail.user / gmail.appPassword / gmail.mailbox are used only as a fallback.
+ * Credentials are managed in-app and stored in the DB (admin: `app_settings`
+ * keys gmail_user/gmail_app_password/gmail_mailbox; a client passes its own
+ * per-tenant settings via $override). No `.env` fallback — config is never shared.
  *
  * Every public call opens its own connection and closes it in a finally block,
  * so a failure never leaks an IMAP stream.
@@ -24,14 +24,14 @@ class GmailService
 
     public function __construct(?array $override = null)
     {
-        // Saved settings take priority; fall back to .env, then sensible defaults.
-        // An explicit $override (used by the "test connection" action) wins over both.
+        // Saved DB settings only (no .env). An explicit $override (per-client, or the
+        // "test connection" action) wins over the stored admin settings.
         $saved = $override ?? $this->loadSettings();
 
-        $this->user    = trim((string) ($saved['gmail_user'] ?? env('gmail.user', '')));
+        $this->user    = trim((string) ($saved['gmail_user'] ?? ''));
         // App passwords are shown with spaces for readability; IMAP wants them stripped.
-        $this->pass    = str_replace(' ', '', (string) ($saved['gmail_app_password'] ?? env('gmail.appPassword', '')));
-        $mailbox       = trim((string) ($saved['gmail_mailbox'] ?? env('gmail.mailbox', '')));
+        $this->pass    = str_replace(' ', '', (string) ($saved['gmail_app_password'] ?? ''));
+        $mailbox       = trim((string) ($saved['gmail_mailbox'] ?? ''));
         $this->mailbox = $mailbox !== '' ? $mailbox : self::DEFAULT_MAILBOX;
     }
 

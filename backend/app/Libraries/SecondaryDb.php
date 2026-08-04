@@ -37,16 +37,23 @@ class SecondaryDb
      *  global .env `secondary` group. Lets each CLIENT point at its OWN database. */
     private ?array $cfg;
 
+    /** When false, an instance with no own config is simply "not configured" —
+     *  it does NOT fall back to the global .env `secondary` group. Used for the
+     *  strictly per-project applicant DB (each project must supply its own). */
+    private bool $allowGlobal;
+
     /**
      * @param array<string,mixed>|null $config A partial DB config (hostname, port,
-     *   database, username, password, DBDriver). Null uses the global .env
-     *   `database.secondary.*` group (the shared server).
+     *   database, username, password, DBDriver). Null with $allowGlobal=true uses
+     *   the global .env `database.secondary.*` group; with $allowGlobal=false it is
+     *   not configured (no shared fallback).
      */
-    public function __construct(?array $config = null)
+    public function __construct(?array $config = null, bool $allowGlobal = true)
     {
         $this->cfg = ($config && ! empty($config['hostname']) && ! empty($config['database']))
             ? self::normalizeConfig($config)
             : null;
+        $this->allowGlobal = $allowGlobal;
     }
 
     /** Fill a partial connection config with CI4's required keys (SELECT-only use). */
@@ -66,11 +73,15 @@ class SecondaryDb
         ], array_filter($c, static fn ($v) => $v !== null && $v !== ''));
     }
 
-    /** The effective config: this instance's own config, else the global secondary group. */
+    /** The effective config: this instance's own config, else (only when allowed)
+     *  the global secondary group. Per-project instances never see the global. */
     private function resolved(): array
     {
         if ($this->cfg !== null) {
             return $this->cfg;
+        }
+        if (! $this->allowGlobal) {
+            return [];
         }
         $g = config(Database::class)->secondary ?? [];
 

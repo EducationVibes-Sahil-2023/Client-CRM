@@ -9,30 +9,58 @@ use App\Models\ClientModel;
 use App\Models\FbFormModel;
 use App\Models\FbPageIndexModel;
 use App\Models\FbPageModel;
+use App\Models\FbWebhookIndexModel;
 use App\Models\SettingsModel;
 
 /**
- * PUBLIC (sessionless) Facebook Lead Ads webhook. Two jobs:
- *  - GET  handshake: echo `hub.challenge` when `hub.verify_token` matches ours.
- *  - POST leadgen:   verify the `X-Hub-Signature-256` (HMAC of the raw body with
- *    the app secret), then for each leadgen change resolve the client from the
- *    page id via the main-DB `fb_page_index`, fetch the lead from the Graph API
- *    with that page's token, and ingest it into the client's DB.
+ * PUBLIC (sessionless) Facebook Lead Ads webhook — FULLY PER-PROJECT. Each client
+ * has their OWN webhook URL /public/fb/webhook/{token} (token → client via the
+ * main-DB `fb_webhook_index`) and their own Meta app credentials. Two jobs:
+ *  - GET  handshake: echo `hub.challenge` when `hub.verify_token` matches THAT
+ *    client's own `fb_verify_token`.
+ *  - POST leadgen:   verify `X-Hub-Signature-256` (HMAC of the raw body with THAT
+ *    client's own app secret), then for each leadgen change resolve the page via
+ *    `fb_page_index`, fetch the lead with that page's token, and ingest it.
  *
- * Facebook subscribes at the app level, so one endpoint receives every client's
- * leads; the page id in the payload selects the tenant. Modeled on {@see CallIngest}.
+ * Nothing here reads `.env` — a project that hasn't configured Facebook simply
+ * has no webhook token and its URL 403s.
  */
 class FbWebhook extends ApiController
 {
-    /** GET /public/fb/webhook — verification handshake. */
-    public function verify()
+    /** Resolve the owning client id from a webhook URL token (enabled only), or 0. */
+    private function clientForToken(string $token): int
+    {
+        if ($token === '') {
+            return 0;
+        }
+        $idx = (new FbWebhookIndexModel())->where('token', $token)->first();
+
+        return ($idx && ! empty($idx['enabled'])) ? (int) $idx['client_id'] : 0;
+    }
+
+    /** Read one of a client's tenant settings (empty string when unset). */
+    private function clientSetting(int $cid, string $key): string
+    {
+        try {
+            $db  = (new TenantManager())->forClient($cid);
+            $row = (new SettingsModel($db))->where('client_id', $cid)->where('setting_key', $key)->first();
+
+            return (string) ($row['setting_value'] ?? '');
+        } catch (\Throwable $e) {
+            return '';
+        }
+    }
+
+    /** GET /public/fb/webhook/{token} — this project's verification handshake. */
+    public function verify(string $token = '')
     {
         $mode      = (string) $this->request->getGet('hub_mode');
-        $token     = (string) $this->request->getGet('hub_verify_token');
+        $sent      = (string) $this->request->getGet('hub_verify_token');
         $challenge = (string) $this->request->getGet('hub_challenge');
 
-        $expected = FacebookGraph::verifyToken();
-        if ($mode === 'subscribe' && $expected !== '' && hash_equals($expected, $token)) {
+        $cid      = $this->clientForToken($token);
+        $expected = $cid ? trim($this->clientSetting($cid, 'fb_verify_token')) : '';
+        if ($mode === 'subscribe' && $expected !== '' && hash_equals($expected, $sent)) {
             // Facebook expects the raw challenge echoed back as plain text.
             return $this->response->setStatusCode(200)->setBody($challenge);
         }
@@ -40,8 +68,8 @@ class FbWebhook extends ApiController
         return $this->response->setStatusCode(403)->setBody('Verification failed');
     }
 
-    /** POST /public/fb/webhook — receive leadgen events. */
-    public function receive()
+    /** POST /public/fb/webhook/{token} — receive this project's leadgen events. */
+    public function receive(string $token = '')
     {
         $raw  = (string) $this->request->getBody();
         $body = json_decode($raw, true);
@@ -50,17 +78,17 @@ class FbWebhook extends ApiController
             return $this->respond(['status' => 1]);
         }
 
-        // Verify the payload signature with the sending client's app secret (each
-        // client may run their own Meta app). We resolve the secret from the first
-        // page id in the payload; a client with none saved falls back to .env.
-        $firstPage = (string) ($body['entry'][0]['id'] ?? '');
-        $secret    = $this->secretForPage($firstPage);
-        if ($secret !== '') {
-            $sig      = (string) $this->request->getHeaderLine('X-Hub-Signature-256');
-            $expected = 'sha256=' . hash_hmac('sha256', $raw, $secret);
-            if ($sig === '' || ! hash_equals($expected, $sig)) {
-                return $this->response->setStatusCode(403)->setBody('Bad signature');
-            }
+        // The URL token identifies the project; verify the signature with THAT
+        // project's own app secret (no .env). Unknown token / no secret → reject.
+        $cid    = $this->clientForToken($token);
+        $secret = $cid ? trim($this->clientSetting($cid, 'fb_app_secret')) : '';
+        if ($secret === '') {
+            return $this->response->setStatusCode(403)->setBody('Unknown or unconfigured webhook.');
+        }
+        $sig      = (string) $this->request->getHeaderLine('X-Hub-Signature-256');
+        $expected = 'sha256=' . hash_hmac('sha256', $raw, $secret);
+        if ($sig === '' || ! hash_equals($expected, $sig)) {
+            return $this->response->setStatusCode(403)->setBody('Bad signature');
         }
 
         foreach ((array) ($body['entry'] ?? []) as $entry) {
@@ -86,29 +114,6 @@ class FbWebhook extends ApiController
 
         // Facebook only needs a 200 to consider delivery successful.
         return $this->respond(['status' => 1]);
-    }
-
-    /** The app secret to verify a payload with: the owning client's saved value, else .env. */
-    private function secretForPage(string $pageId): string
-    {
-        $env = FacebookGraph::appSecret();
-        if ($pageId === '') {
-            return $env;
-        }
-        $idx = (new FbPageIndexModel())->where('page_id', $pageId)->first();
-        if (! $idx) {
-            return $env;
-        }
-        try {
-            $cid = (int) $idx['client_id'];
-            $db  = (new TenantManager())->forClient($cid);
-            $row = (new SettingsModel($db))->where('client_id', $cid)->where('setting_key', 'fb_app_secret')->first();
-            $s   = (string) ($row['setting_value'] ?? '');
-
-            return $s !== '' ? $s : $env;
-        } catch (\Throwable $e) {
-            return $env;
-        }
     }
 
     /** Resolve tenant from page id, fetch the lead, and ingest it. */

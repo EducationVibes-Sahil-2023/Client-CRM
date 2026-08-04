@@ -24,11 +24,16 @@ $routes->post('calls/ingest', 'CallIngest::store');
 $routes->get('public/forms/(:segment)', 'WebFormPublic::show/$1');
 $routes->post('public/forms/(:segment)', 'WebFormPublic::submit/$1');
 
-// Facebook Lead Ads webhook (app-level, sessionless). GET = verification handshake
-// (echoes hub.challenge); POST = leadgen events signed with the app secret. The
-// page id in the payload resolves the tenant via the main-DB fb_page_index.
-$routes->get('public/fb/webhook', 'FbWebhook::verify');
-$routes->post('public/fb/webhook', 'FbWebhook::receive');
+// Facebook Lead Ads webhook — PER-PROJECT, sessionless. Each client has their own
+// URL /public/fb/webhook/{token} ({token} → client via main-DB fb_webhook_index).
+// GET = verification handshake (echoes hub.challenge when hub.verify_token matches
+// that client's own token); POST = leadgen events signed with that client's app
+// secret. The token-less legacy URL 410s (there is no shared platform app anymore).
+$routes->get('public/fb/webhook/(:segment)', 'FbWebhook::verify/$1');
+$routes->post('public/fb/webhook/(:segment)', 'FbWebhook::receive/$1');
+$routes->match(['get', 'post'], 'public/fb/webhook', static fn () => service('response')
+    ->setStatusCode(410)
+    ->setBody('This Facebook webhook URL is per project. Use the URL shown on your Facebook integration page.'));
 
 // Authentication
 $routes->group('auth', static function (RouteCollection $routes) {

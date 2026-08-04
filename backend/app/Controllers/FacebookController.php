@@ -58,13 +58,58 @@ class FacebookController extends ApiController
         }
     }
 
-    /** The Meta App credentials to use — this client's saved values, else the .env fallback. */
+    /** The Meta App credentials to use — THIS client's own saved values only (no .env). */
     private function creds(): array
     {
         return [
-            'app_id'     => trim($this->settingVal('fb_app_id')) ?: (string) env('facebook.appId', ''),
-            'app_secret' => trim($this->settingVal('fb_app_secret')) ?: (string) env('facebook.appSecret', ''),
+            'app_id'     => trim($this->settingVal('fb_app_id')),
+            'app_secret' => trim($this->settingVal('fb_app_secret')),
         ];
+    }
+
+    /** This client's webhook verify token — the value they also paste into their
+     *  own Meta app. Auto-generated once and stored so it's stable + per-project. */
+    private function verifyToken(): string
+    {
+        $t = trim($this->settingVal('fb_verify_token'));
+        if ($t === '') {
+            $t = 'vt_' . bin2hex(random_bytes(12));
+            $this->putSetting('fb_verify_token', $t);
+        }
+
+        return $t;
+    }
+
+    /** This client's unique webhook URL slug. Auto-generated once, and mirrored to
+     *  the MAIN-DB fb_webhook_index so the sessionless webhook can resolve the
+     *  tenant from the URL alone (before any page id is known). */
+    private function webhookToken(): string
+    {
+        $t = trim($this->settingVal('fb_webhook_token'));
+        if ($t === '') {
+            $t = bin2hex(random_bytes(16));
+            $this->putSetting('fb_webhook_token', $t);
+        }
+        $this->syncWebhookIndex($t, $this->cid(), 1);
+
+        return $t;
+    }
+
+    /** The full per-project webhook callback URL the admin pastes into their Meta app. */
+    private function webhookUrl(): string
+    {
+        return rtrim((string) base_url('public/fb/webhook'), '/') . '/' . $this->webhookToken();
+    }
+
+    /** Upsert the main-DB webhook-token → client registry. */
+    private function syncWebhookIndex(string $token, int $cid, int $enabled): void
+    {
+        $model = new \App\Models\FbWebhookIndexModel();
+        if ($model->where('token', $token)->first()) {
+            $model->where('token', $token)->set(['client_id' => $cid, 'enabled' => $enabled])->update();
+        } else {
+            $model->insert(['token' => $token, 'client_id' => $cid, 'enabled' => $enabled]);
+        }
     }
 
     /** POST /client/facebook/config — save the client's Meta App ID/Secret (secret blank-preserves). */
@@ -78,6 +123,14 @@ class FacebookController extends ApiController
         if (trim($secret) !== '') {
             $this->putSetting('fb_app_secret', trim($secret)); // blank leaves the saved secret untouched
         }
+        // Verify token: use the admin's value, or keep/auto-generate one if blank.
+        $vt = trim((string) $this->input('verify_token'));
+        if ($vt !== '') {
+            $this->putSetting('fb_verify_token', $vt);
+        } else {
+            $this->verifyToken(); // ensures one exists
+        }
+        $this->webhookToken(); // ensure the per-project webhook URL + index row exist
         $this->logActivity('updated', 'settings', null, 'Updated Facebook app credentials', $this->cid());
 
         return $this->respond(['message' => 'Saved']);
@@ -105,7 +158,8 @@ class FacebookController extends ApiController
             'config'     => [
                 'app_id'       => $creds['app_id'],
                 'has_secret'   => $creds['app_secret'] !== '',
-                'verify_token' => FacebookGraph::verifyToken(), // shared handshake token (from .env), shown so the admin can copy it into their Meta app
+                'verify_token' => $this->verifyToken(),   // this client's own token — paste into their Meta app
+                'webhook_url'  => $this->webhookUrl(),     // this client's unique callback URL
             ],
             'pages'      => array_map(fn ($p) => [
                 'id'        => (int) $p['id'],
@@ -332,6 +386,10 @@ class FacebookController extends ApiController
             (new FbPageIndexModel())->where('page_id', $p['page_id'])->set(['enabled' => 0])->update();
         }
         (new FbFormModel())->where('client_id', $cid)->delete(); // soft-delete all forms
+        $wt = trim($this->settingVal('fb_webhook_token'));
+        if ($wt !== '') {
+            $this->syncWebhookIndex($wt, $cid, 0); // stop the webhook resolving to this client
+        }
         $this->logActivity('deleted', 'fb_page', null, 'Disconnected Facebook', $cid);
 
         return $this->respond(['message' => 'Disconnected']);

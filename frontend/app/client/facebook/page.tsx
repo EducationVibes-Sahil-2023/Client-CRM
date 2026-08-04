@@ -5,7 +5,6 @@ import { PageHeader, Card, Drawer, ConfirmDialog, Spinner } from "../../admin/ui
 import { SearchSelect, MultiSelect, type SelectOption } from "../../admin/SearchSelect";
 import { useClient } from "../ClientContext";
 import { useToast } from "../../components/toast/ToastProvider";
-import { API_URL } from "../../lib/api";
 import {
   getFacebook, saveFacebookConfig, facebookOauthUrl, connectFacebook, getPageForms,
   saveFbForm, deleteFbForm, syncFbForm, disconnectFacebook, listWebForms, getFacebookLogs,
@@ -226,16 +225,19 @@ function AppSettings({ fb, redirectUri, onSaved, defaultOpen = false }: {
   const [open, setOpen] = useState(defaultOpen);
   const [appId, setAppId] = useState(fb.config.app_id ?? "");
   const [secret, setSecret] = useState("");
+  const [verifyToken, setVerifyToken] = useState(fb.config.verify_token ?? "");
   const [saving, setSaving] = useState(false);
 
-  const callbackUrl = `${API_URL}/public/fb/webhook`;
+  // Each project has its OWN webhook URL (from the server); the token in the path
+  // is how the sessionless webhook resolves this project.
+  const callbackUrl = fb.config.webhook_url ?? "";
   const copy = (t: string, what: string) => navigator.clipboard.writeText(t).then(() => toast.success(`${what} copied`)).catch(() => {});
 
   async function save() {
     if (!appId.trim()) { toast.error("Enter your App ID."); return; }
     setSaving(true);
     try {
-      await saveFacebookConfig({ app_id: appId.trim(), app_secret: secret });
+      await saveFacebookConfig({ app_id: appId.trim(), app_secret: secret, verify_token: verifyToken.trim() });
       toast.success("Saved");
       setSecret("");
       await onSaved();
@@ -261,15 +263,20 @@ function AppSettings({ fb, redirectUri, onSaved, defaultOpen = false }: {
             <div><label className={lbl}>App ID</label><input value={appId} onChange={(e) => setAppId(e.target.value)} className={inp} placeholder="e.g. 123456789012345" /></div>
             <div><label className={lbl}>App Secret</label><input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} className={inp} placeholder={fb.config.has_secret ? "•••••••• saved — leave blank to keep" : "App secret"} /></div>
           </div>
+          <div>
+            <label className={lbl}>Webhook verify token</label>
+            <input value={verifyToken} onChange={(e) => setVerifyToken(e.target.value)} className={inp} placeholder="auto-generated" />
+            <p className="mt-1 text-xs text-slate-400">Your own token — paste the SAME value into your Meta app&apos;s Webhooks → Verify Token. Auto-filled with a generated one; change it if you like.</p>
+          </div>
           <button onClick={save} disabled={saving} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{saving ? "Saving…" : "Save app settings"}</button>
 
           <div className="space-y-3 border-t border-slate-100 pt-4">
-            <p className="text-xs font-medium text-slate-500">Paste these into your Meta app:</p>
+            <p className="text-xs font-medium text-slate-500">Paste these into <b>your own</b> Meta app (this project&apos;s values):</p>
             <ReadonlyRow label="OAuth redirect URI (Facebook Login → Valid OAuth Redirect URIs)" value={redirectUri} onCopy={copy} />
-            <ReadonlyRow label="Webhook callback URL (Webhooks → leadgen)" value={callbackUrl} onCopy={copy} />
-            {fb.config.verify_token
-              ? <ReadonlyRow label="Webhook verify token" value={fb.config.verify_token} onCopy={copy} />
-              : <p className="text-xs text-amber-600">Webhook verify token isn&apos;t set on the server (<code>facebook.webhookVerifyToken</code>). Real-time delivery needs it; otherwise leads still arrive via the polling sync.</p>}
+            {callbackUrl
+              ? <ReadonlyRow label="Webhook callback URL (Webhooks → leadgen) — unique to this project" value={callbackUrl} onCopy={copy} />
+              : <p className="text-xs text-amber-600">Save your app settings to generate this project&apos;s unique webhook URL.</p>}
+            {fb.config.verify_token && <ReadonlyRow label="Webhook verify token (same as above)" value={fb.config.verify_token} onCopy={copy} />}
           </div>
         </div>
       )}
