@@ -2,6 +2,35 @@
 
 import { useMemo, useState } from "react";
 import { PageHeader } from "../../admin/ui";
+import { useClient } from "../ClientContext";
+
+/**
+ * Per-doc-section access gate, keyed by section id — mirrors the sidebar's
+ * feature/module/admin gating. A section shows only when the user's plan includes
+ * the feature AND they have the module permission (admins see everything). Sections
+ * not listed here (getting-started, dashboard, notifications, activity, profile)
+ * are universal and always shown.
+ */
+const DOC_GATE: Record<string, { feature?: string; module?: string; adminOnly?: boolean }> = {
+  leads: { feature: "leads", module: "leads" },
+  "lead-transfer": { feature: "lead_transfer", module: "lead_transfer" },
+  visitors: { feature: "visitors", module: "visitors" },
+  followups: { feature: "followups", module: "followups" },
+  calls: { feature: "call_tracking", module: "calls" },
+  reports: { feature: "reports", module: "reports" },
+  team: { feature: "team", module: "team" },
+  roles: { feature: "roles", module: "roles" },
+  tasks: { feature: "tasks", module: "tasks" },
+  assets: { feature: "assets", module: "assets" },
+  announcements: { feature: "announcements", module: "announcements" },
+  chat: { feature: "chat", module: "chat" },
+  "leads-setup": { feature: "leads", module: "leads_setup" },
+  "departments-offices": { feature: "team", module: "team", adminOnly: true },
+  "email-config": { feature: "email_config", adminOnly: true },
+  appearance: { adminOnly: true },
+  settings: { adminOnly: true },
+  billing: { feature: "billing", adminOnly: true },
+};
 
 /**
  * In-app user manual. Content is data-driven (the DOCS array below) so it's easy
@@ -619,21 +648,33 @@ const DOCS: Section[] = [
 ];
 
 export default function DocsPage() {
+  const { can, hasFeature, isAdmin } = useClient();
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState<string>(DOCS[0].id);
   const [zoom, setZoom] = useState<string | null>(null); // screenshot lightbox
+
+  // Only sections the user can access (their permitted modules) — mirrors the sidebar.
+  const docs = useMemo(() => DOCS.filter((s) => {
+    const g = DOC_GATE[s.id];
+    if (!g) return true; // universal sections
+    if (g.adminOnly && !isAdmin) return false;
+    if (g.feature && !hasFeature(g.feature)) return false;
+    if (g.module && !can(g.module)) return false;
+    return true;
+  }), [can, hasFeature, isAdmin]);
+
+  const [active, setActive] = useState<string>(DOCS[0].id);
 
   // Sections matching the search (matches title, summary, or any step text).
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return DOCS;
-    return DOCS.filter((s) =>
+    if (!q) return docs;
+    return docs.filter((s) =>
       [s.title, s.summary, ...s.groups.flatMap((g) => [g.heading ?? "", ...g.items]), ...(s.tips ?? [])]
         .join(" ")
         .toLowerCase()
         .includes(q),
     );
-  }, [query]);
+  }, [query, docs]);
 
   function jump(id: string) {
     setActive(id);

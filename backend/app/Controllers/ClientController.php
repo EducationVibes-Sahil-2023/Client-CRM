@@ -236,6 +236,28 @@ class ClientController extends ApiController
         return (new ClientStaffModel())->subordinateIds($this->clientId(), $sid);
     }
 
+    /**
+     * The normalized phone numbers of every lead the current user can see (reference
+     * or assignment scope). Used to scope call stats to "my leads' calls". Returns
+     * an empty array when the user can see no leads (→ zero calls).
+     */
+    private function visibleLeadPhones(): array
+    {
+        $lq = (new LeadModel())->select('phone, alt_phone')->where('client_id', $this->clientId());
+        $this->applyLeadScope($lq);
+        $out = [];
+        foreach ($lq->findAll() as $l) {
+            foreach ([$l['phone'] ?? '', $l['alt_phone'] ?? ''] as $p) {
+                $k = CallIngestService::normalizePhone((string) $p);
+                if ($k !== '') {
+                    $out[$k] = true;
+                }
+            }
+        }
+
+        return array_keys($out);
+    }
+
     /** Memoised per-request reference scope (false = not resolved yet). */
     private string|false|null $refScope = false;
 
@@ -5991,8 +6013,13 @@ class ClientController extends ApiController
             return $resp;
         }
         $cid   = $this->clientId();
-        $scope = $this->visibleStaffIds();
         $today = date('Y-m-d');
+
+        // Scope to the calls on the leads THIS user can SEE (reference/assignment
+        // scope), matching a call's contact to a visible lead's phone — so an agent
+        // sees stats for their own leads only, consistent with the leads table.
+        // Admin = every call. A non-admin with no visible-lead phones sees zero.
+        $phones = $this->isAdmin() ? null : $this->visibleLeadPhones();
 
         // TODAY's totals only — independent of any table filter. A day with no
         // calls reads as 0 (the UI then shows "No calls").
@@ -6000,14 +6027,14 @@ class ClientController extends ApiController
             ->where('client_id', $cid)
             ->where('call_start >=', "{$today} 00:00:00")
             ->where('call_start <=', "{$today} 23:59:59");
-        if ($scope !== null) {
-            $totalQ->whereIn('staff_id', $scope ?: [0]);
+        if ($phones !== null) {
+            $totalQ->whereIn('contact', $phones ?: ['']);
         }
         $agg = $totalQ->first();
 
         $lastQ = (new CallLogModel())->select('MAX(call_start) AS last')->where('client_id', $cid);
-        if ($scope !== null) {
-            $lastQ->whereIn('staff_id', $scope ?: [0]);
+        if ($phones !== null) {
+            $lastQ->whereIn('contact', $phones ?: ['']);
         }
         $last = $lastQ->first()['last'] ?? null;
 

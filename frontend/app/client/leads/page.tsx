@@ -556,6 +556,10 @@ export default function ClientLeads() {
   // plan feature AND the lead_transfer permission.
   const canTransfer = hasFeature("lead_transfer") && can("lead_transfer");
   const canVisitors = hasFeature("visitors") && can("visitors");
+  // The per-row "Transfer" / "Log visitor" actions CREATE records, so they need
+  // create permission (not just view) — otherwise they show but the action fails.
+  const canCreateTransfer = hasFeature("lead_transfer") && can("lead_transfer", "create");
+  const canCreateVisitor = hasFeature("visitors") && can("visitors", "create");
   const [leadTab, setLeadTab] = useState<"leads" | "transfers" | "visitors">("leads");
   const [transferLead, setTransferLead] = useState<{ id: number; name: string } | null>(null);
   const [transferMode, setTransferMode] = useState<"direct" | "approval">("approval");
@@ -1627,7 +1631,7 @@ export default function ClientLeads() {
 
   const allColumns: Column<Lead>[] = [
     { key: "name", header: "Name", width: 180, lockVisible: true, render: (l) => <span className="font-medium text-slate-800">{l.name?.trim() || dash}</span> },
-    { key: "phone", header: "Phone", width: 130, render: (l) => <span className="tabular-nums text-slate-600">{l.phone}</span> },
+    { key: "phone", header: "Phone", width: 130, render: (l) => (l.phone ? <a href={`tel:${l.phone}`} onClick={(e) => e.stopPropagation()} title={`Call ${l.phone}`} className="tabular-nums text-emerald-700 hover:underline">{l.phone}</a> : dash) },
     { key: "status", header: "Status", width: 210, render: statusChip },
     { key: "lead_type", header: "Type", width: 140, render: typeChip },
     { key: "source", header: "Source", width: 140, render: sourceChip },
@@ -1656,7 +1660,7 @@ export default function ClientLeads() {
     { key: "updated_at", header: "Last updated", width: 150, render: (l) => stackedDateTime(l.updated_at) ?? dash },
     // Available via the Columns menu, hidden until the user opts in.
     { key: "email", header: "Email", width: 210, defaultHidden: true, render: (l) => (l.email ? <span className="text-slate-600">{l.email}</span> : dash) },
-    { key: "alt_phone", header: "Alt. phone", width: 130, defaultHidden: true, render: (l) => (l.alt_phone ? <span className="tabular-nums text-slate-600">{l.alt_phone}</span> : dash) },
+    { key: "alt_phone", header: "Alt. phone", width: 130, defaultHidden: true, render: (l) => (l.alt_phone ? <a href={`tel:${l.alt_phone}`} onClick={(e) => e.stopPropagation()} title={`Call ${l.alt_phone}`} className="tabular-nums text-emerald-700 hover:underline">{l.alt_phone}</a> : dash) },
     { key: "sub_status", header: "Sub status", width: 150, defaultHidden: true, render: (l) => l.sub_status ?? dash },
     { key: "reference_name", header: "Reference", width: 150, defaultHidden: true, render: (l) => l.reference_name ?? dash },
     { key: "state", header: "State", width: 120, defaultHidden: true, render: (l) => l.state ?? dash },
@@ -1785,9 +1789,11 @@ export default function ClientLeads() {
         applying={applying}
         placement={filterLayout.placement}
       >
-        <div className="flex items-center justify-end" style={{ order: -1 }}>
-          <VisibilityMenu api={filterPrefs} items={FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
-        </div>
+        {isAdmin && (
+          <div className="flex items-center justify-end" style={{ order: -1 }}>
+            <VisibilityMenu api={filterPrefs} items={FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
+          </div>
+        )}
 
         {!filterPrefs.isHidden("status") && !filterLayout.isHidden("status") && (
           <label className="flex flex-col gap-1" style={{ order: fo("status") }}>
@@ -1812,7 +1818,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
+        {!isAgent && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
           <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
             <FilterLabel>Reporting Person</FilterLabel>
             <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
@@ -2168,12 +2174,12 @@ export default function ClientLeads() {
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>
             ))}
-            {canTransfer && (
+            {canCreateTransfer && (
               <IconButton title="Transfer to another rep" onClick={() => setTransferLead({ id: l.id, name: l.name?.trim() || l.phone })}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 3l4 4-4 4M20 7H8M8 21l-4-4 4-4M4 17h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>
             )}
-            {canVisitors && (
+            {canCreateVisitor && (
               <IconButton title="Log a visitor for this lead" onClick={() => setVisitorDraft(visitorDraftFromLead(l, visitorTypes, visitorStatuses))}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-1a6 6 0 0112 0v1M19 8v6M22 11h-6" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>

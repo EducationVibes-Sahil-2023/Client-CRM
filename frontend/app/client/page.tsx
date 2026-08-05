@@ -6,6 +6,7 @@ import { getClientDashboard, getLeadsSetup, getLeadAnalytics, type ClientInfo, t
 import { BarChart, DonutChart } from "../admin/Charts";
 import { SkeletonStats, SkeletonBlock } from "../admin/ui";
 import { fmtDate } from "../lib/datetime";
+import { useClient } from "./ClientContext";
 
 // Map the config colour names (and pass-through hex values) to chart hex codes.
 const HEX: Record<string, string> = {
@@ -97,16 +98,17 @@ function subscriptionPct(planStart: string, planEnd: string) {
 }
 
 const statCards = (s: Record<string, number>) => [
-  { label: "Team Members", value: s.staff ?? 0, icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2", tone: "bg-emerald-100 text-emerald-600", bar: "from-emerald-400 to-teal-500", dot: "bg-emerald-300" },
-  { label: "Roles", value: s.roles ?? 0, icon: "M12 11a3 3 0 100-6 3 3 0 000 6zM4 21v-2a4 4 0 014-4h8a4 4 0 014 4v2", tone: "bg-indigo-100 text-indigo-600", bar: "from-indigo-400 to-blue-500", dot: "bg-indigo-300" },
-  { label: "Open Tasks", value: s.tasks_open ?? 0, icon: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11", tone: "bg-amber-100 text-amber-600", bar: "from-amber-400 to-orange-500", dot: "bg-amber-300" },
-  { label: "Announcements", value: s.announcements ?? 0, icon: "M11 5L6 9H2v6h4l5 4V5z", tone: "bg-violet-100 text-violet-600", bar: "from-violet-400 to-purple-500", dot: "bg-violet-300" },
+  { label: "Team Members", value: s.staff ?? 0, icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2", tone: "bg-emerald-100 text-emerald-600", bar: "from-emerald-400 to-teal-500", dot: "bg-emerald-300", feature: "team", module: "team" },
+  { label: "Roles", value: s.roles ?? 0, icon: "M12 11a3 3 0 100-6 3 3 0 000 6zM4 21v-2a4 4 0 014-4h8a4 4 0 014 4v2", tone: "bg-indigo-100 text-indigo-600", bar: "from-indigo-400 to-blue-500", dot: "bg-indigo-300", feature: "roles", module: "roles" },
+  { label: "Open Tasks", value: s.tasks_open ?? 0, icon: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11", tone: "bg-amber-100 text-amber-600", bar: "from-amber-400 to-orange-500", dot: "bg-amber-300", feature: "tasks", module: "tasks" },
+  { label: "Announcements", value: s.announcements ?? 0, icon: "M11 5L6 9H2v6h4l5 4V5z", tone: "bg-violet-100 text-violet-600", bar: "from-violet-400 to-purple-500", dot: "bg-violet-300", feature: "announcements", module: "announcements" },
 ];
 
 // Fixed heights for the decorative equalizer flourish on each stat card.
 const SPARK = [9, 15, 11, 18, 13, 16];
 
 export default function ClientDashboard() {
+  const { can, hasFeature } = useClient();
   const [client, setClient] = useState<ClientInfo | null>(null);
   const [features, setFeatures] = useState<ClientFeature[]>([]);
   const [stats, setStats] = useState<Record<string, number>>({});
@@ -152,6 +154,11 @@ export default function ClientDashboard() {
 
   const enabled = features.filter((f) => f.enabled);
   const v = planValidity(client.plan_end);
+
+  // Only show widgets for modules the user can access (plan feature + permission).
+  const canLeads = can("leads");
+  const canTasks = hasFeature("tasks") && can("tasks");
+  const cards = statCards(stats).filter((c) => (!c.feature || hasFeature(c.feature)) && (!c.module || can(c.module)));
 
   // Each conversion stage with the lead statuses (substatuses) it groups.
   const stageRows = conversionTypes
@@ -224,9 +231,10 @@ export default function ClientDashboard() {
         <div className="pointer-events-none absolute right-8 top-1/2 hidden h-28 w-28 -translate-y-1/2 rounded-full bg-white/5 sm:block" />
       </div>
 
-      {/* Stats */}
+      {/* Stats — only the cards for modules the user can access */}
+      {cards.length > 0 && (
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {statCards(stats).map((s) => (
+        {cards.map((s) => (
           <div key={s.label} className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md">
             <span className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${s.bar}`} />
             <div className="flex items-start justify-between">
@@ -242,9 +250,10 @@ export default function ClientDashboard() {
           </div>
         ))}
       </div>
+      )}
 
-      {/* Charts */}
-      {taskSummary && (
+      {/* Charts — tasks (only with tasks access) */}
+      {canTasks && taskSummary && (
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md lg:col-span-2">
             <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-900">
@@ -291,8 +300,8 @@ export default function ClientDashboard() {
         </div>
       )}
 
-      {/* Leads overview — Modern gradient analytics */}
-      {hasPipeline && (
+      {/* Leads overview — Modern gradient analytics (only with leads access) */}
+      {canLeads && hasPipeline && (
         <div className="space-y-5">
           <div className="flex items-center justify-between">
             <div>
@@ -409,8 +418,8 @@ export default function ClientDashboard() {
         </div>
       )}
 
-      {/* Tasks overview */}
-      {taskSummary && (
+      {/* Tasks overview (only with tasks access) */}
+      {canTasks && taskSummary && (
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:shadow-md">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="flex items-center gap-2 font-semibold text-slate-900">
