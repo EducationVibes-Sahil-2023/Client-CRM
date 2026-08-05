@@ -1661,12 +1661,11 @@ export default function ClientLeads() {
     { key: "reference_name", header: "Reference", width: 150, defaultHidden: true, render: (l) => l.reference_name ?? dash },
     { key: "state", header: "State", width: 120, defaultHidden: true, render: (l) => l.state ?? dash },
   ];
-  // Hide the "Last call" column for users without the call-tracking permission,
-  // and hide assignment columns for reference-scoped agents (assignment doesn't
-  // govern their view — their leads are scoped by reference).
+  // Hide the "Last call" column only for users without the call-tracking
+  // permission. Reference-scoped agents now see every column (incl. assignment)
+  // over their own reference-scoped leads.
   const hiddenColKeys = new Set<string>([
     ...(canViewCalls ? [] : ["last_call", "last_connected", "total_duration", "person_call_count", "person_call_duration"]),
-    ...(isAgent ? ["assigned", "assigned_date", "first_response"] : []),
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
 
@@ -1787,7 +1786,7 @@ export default function ClientLeads() {
         placement={filterLayout.placement}
       >
         <div className="flex items-center justify-end" style={{ order: -1 }}>
-          <VisibilityMenu api={filterPrefs} items={isAgent ? FILTER_DEFS.filter((f) => f.id !== "assigned" && f.id !== "assignedDate") : FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
+          <VisibilityMenu api={filterPrefs} items={FILTER_DEFS} buttonLabel="Customize" title="Show / hide filters" />
         </div>
 
         {!filterPrefs.isHidden("status") && !filterLayout.isHidden("status") && (
@@ -1813,7 +1812,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!isAgent && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
+        {!filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
           <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
             <FilterLabel>Reporting Person</FilterLabel>
             <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
@@ -1821,7 +1820,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!isAgent && !filterPrefs.isHidden("assigned") && !filterLayout.isHidden("assigned") && (
+        {!filterPrefs.isHidden("assigned") && !filterLayout.isHidden("assigned") && (
           <label className="flex flex-col gap-1" style={{ order: fo("assigned") }}>
             <FilterLabel>Assigned to</FilterLabel>
             <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => setFilter("assigned", v)} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
@@ -1865,7 +1864,7 @@ export default function ClientLeads() {
             </label>
           )}
 
-          {!isAgent && !filterPrefs.isHidden("assignedDate") && (
+          {!filterPrefs.isHidden("assignedDate") && (
             <label className="flex flex-col gap-1">
               <FilterLabel>Assigned date</FilterLabel>
               <DateRangeFilter ariaLabel="Assigned date" value={filters.assignedDate} onChange={(v) => setFilter("assignedDate", v)} />
@@ -2395,14 +2394,12 @@ export default function ClientLeads() {
                     ["Email", lead.email || "—"],
                     ["Assigned to", lead.assigned_to_name || "Unassigned"],
                     ["Assigned date", lead.assigned_date ? fmtDateTime(lead.assigned_date) : "—"],
-                    ...(isAgent ? [] : [["First response", lead.first_response_at ? `${fmtDuration(lead.first_response_seconds)} · ${fmtDateTime(lead.first_response_at)}` : "—"] as [string, React.ReactNode]]),
+                    ["First response", lead.first_response_at ? `${fmtDuration(lead.first_response_seconds)} · ${fmtDateTime(lead.first_response_at)}` : "—"] as [string, React.ReactNode],
                     ["City", lead.city || "—"],
                     ["State", lead.state || "—"],
                     ["Follow-up date", lead.last_reminder_at ? fmtDateTime(lead.last_reminder_at) : "—"],
                     ["Created date", fmtDateTime(lead.created_at ?? lead.created_date)],
                   ] as [string, React.ReactNode][])
-                    // Agents don't deal with assignment — drop those rows for them.
-                    .filter(([label]) => !isAgent || (label !== "Assigned to" && label !== "Assigned date"))
                     .map(([label, value]) => (
                     <div key={label}>
                       <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt>
