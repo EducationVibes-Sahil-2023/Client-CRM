@@ -570,6 +570,7 @@ export default function ClientLeads() {
   const [visitorStatuses, setVisitorStatuses] = useState<VisitorStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false); // client admin → may rename columns
+  const [myStaff, setMyStaff] = useState<{ id: number; name: string } | null>(null); // current user (for the assignee filter)
   const [leads, setLeads] = useState<Lead[]>([]);
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
@@ -830,7 +831,7 @@ export default function ClientLeads() {
     if (showCall && summaryDateOk) getLeadCallSummary(filterQuery).then(setCallSummary).catch(() => {});
     else if (!showCall || !summaryDateOk) setCallSummary(null);
   }, [showLead, showCall, filterQuery, fetchTick, summaryDateOk]);
-  useEffect(() => { getMe().then((m) => setIsAdmin(!!m.is_admin)).catch(() => {}); }, []);
+  useEffect(() => { getMe().then((m) => { setIsAdmin(!!m.is_admin); if (m.user?.staff_id) setMyStaff({ id: m.user.staff_id, name: m.user.name || "Me" }); }).catch(() => {}); }, []);
   // Admin-defined custom fields for the lead form (Form Setup).
   useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
   // The lead form is customizable PER LEAD TYPE: whenever the form is open and its
@@ -946,10 +947,16 @@ export default function ClientLeads() {
     }
     return opts;
   }, [references, leads]);
-  const assignedFilterOptions = useMemo<SelectOption[]>(
-    () => [{ value: "unassigned", label: "Unassigned" }, ...staff.filter((s) => !s.reference_id).map((s) => ({ value: String(s.id), label: s.name }))],
-    [staff],
-  );
+  // Assignee filter options — include agents (reference staff) too, since leads can
+  // now be assigned to them; and always include the current user, so an agent can
+  // filter their own assigned leads even when the staff list is scoped/empty.
+  const assignedFilterOptions = useMemo<SelectOption[]>(() => {
+    const opts = staff.map((s) => ({ value: String(s.id), label: s.reference_id ? `${s.name} (agent)` : s.name }));
+    if (myStaff && !opts.some((o) => o.value === String(myStaff.id))) {
+      opts.push({ value: String(myStaff.id), label: `${myStaff.name} (me)` });
+    }
+    return [{ value: "unassigned", label: "Unassigned" }, ...opts];
+  }, [staff, myStaff]);
   // When exactly one assignee is picked, their team leader (reports_to) is
   // offered as a suggestion — surfaced at the top of the Reporting Person
   // dropdown but NOT auto-selected (the user chooses whether to use it).

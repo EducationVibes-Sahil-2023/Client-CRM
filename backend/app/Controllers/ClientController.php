@@ -308,9 +308,9 @@ class ClientController extends ApiController
 
     /**
      * Apply the current user's lead-visibility scope to a leads query/builder:
-     *   - admin            → no restriction
-     *   - reference "agent" → only leads with the matching reference_name
-     *   - everyone else     → only leads assigned to them or their reports
+     *   - admin             → no restriction
+     *   - reference "agent" → leads with the matching reference_name OR assigned to them
+     *   - everyone else      → only leads assigned to them or their reports
      *
      * @param object $q a LeadModel query or its builder (supports where/whereIn)
      */
@@ -323,13 +323,18 @@ class ClientController extends ApiController
         if ($refName !== null) {
             // Match on the stable id, but also on the (live) name so legacy leads
             // that predate reference_id — or imports tagged by free-text name —
-            // stay visible to their agent.
+            // stay visible to their agent. An agent ALSO sees leads assigned to
+            // them directly (assignation), not only their reference leads.
             $refId = $this->currentReferenceId();
+            $sid   = $this->staffId();
             $q->groupStart();
             if ($refId) {
                 $q->where('reference_id', $refId)->orWhere('reference_name', $refName);
             } else {
                 $q->where('reference_name', $refName);
+            }
+            if ($sid) {
+                $q->orWhere('assigned_to', $sid);
             }
             $q->groupEnd();
 
@@ -352,8 +357,13 @@ class ClientController extends ApiController
             if ($refId && (int) ($lead['reference_id'] ?? 0) === $refId) {
                 return true;
             }
+            if (trim((string) ($lead['reference_name'] ?? '')) === $refName) {
+                return true;
+            }
+            // An agent also owns leads assigned directly to them.
+            $sid = $this->staffId();
 
-            return trim((string) ($lead['reference_name'] ?? '')) === $refName;
+            return $sid > 0 && (int) ($lead['assigned_to'] ?? 0) === $sid;
         }
         $sid   = $this->staffId();
         $scope = $sid ? (new ClientStaffModel())->subordinateIds($this->clientId(), $sid) : [0];
