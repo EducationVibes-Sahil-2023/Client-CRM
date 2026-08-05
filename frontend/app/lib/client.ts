@@ -1511,6 +1511,10 @@ export interface MeInfo {
   is_admin: boolean;
   /** True when the signed-in user is a reference-scoped "agent". */
   is_agent?: boolean;
+  /** The agent's own reference (null for admins/non-agents) — lets the UI tell
+   *  reference leads (transferable / visitor-loggable) from merely-assigned ones. */
+  reference_id?: number | null;
+  reference_name?: string | null;
   role: string;
   permissions: Record<string, Perm>;
   modules: string[];

@@ -571,6 +571,7 @@ export default function ClientLeads() {
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false); // client admin → may rename columns
   const [myStaff, setMyStaff] = useState<{ id: number; name: string } | null>(null); // current user (for the assignee filter)
+  const [myRef, setMyRef] = useState<{ id: number | null; name: string | null }>({ id: null, name: null }); // agent's own reference
   const [leads, setLeads] = useState<Lead[]>([]);
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
@@ -831,7 +832,7 @@ export default function ClientLeads() {
     if (showCall && summaryDateOk) getLeadCallSummary(filterQuery).then(setCallSummary).catch(() => {});
     else if (!showCall || !summaryDateOk) setCallSummary(null);
   }, [showLead, showCall, filterQuery, fetchTick, summaryDateOk]);
-  useEffect(() => { getMe().then((m) => { setIsAdmin(!!m.is_admin); if (m.user?.staff_id) setMyStaff({ id: m.user.staff_id, name: m.user.name || "Me" }); }).catch(() => {}); }, []);
+  useEffect(() => { getMe().then((m) => { setIsAdmin(!!m.is_admin); if (m.user?.staff_id) setMyStaff({ id: m.user.staff_id, name: m.user.name || "Me" }); setMyRef({ id: m.reference_id ?? null, name: m.reference_name ?? null }); }).catch(() => {}); }, []);
   // Admin-defined custom fields for the lead form (Form Setup).
   useEffect(() => { getFormSetup("lead").then((d) => setLeadCustomFields(d.custom_fields)).catch(() => {}); }, []);
   // The lead form is customizable PER LEAD TYPE: whenever the form is open and its
@@ -947,16 +948,31 @@ export default function ClientLeads() {
     }
     return opts;
   }, [references, leads]);
-  // Assignee filter options — include agents (reference staff) too, since leads can
-  // now be assigned to them; and always include the current user, so an agent can
-  // filter their own assigned leads even when the staff list is scoped/empty.
+  // Assignee filter options. An AGENT can only filter by their own assignation —
+  // they don't get to see or filter by other staff. Everyone else sees the full
+  // staff list (incl. agents, since leads can now be assigned to them).
   const assignedFilterOptions = useMemo<SelectOption[]>(() => {
+    if (isAgent) {
+      return [
+        { value: "unassigned", label: "Unassigned" },
+        ...(myStaff ? [{ value: String(myStaff.id), label: `${myStaff.name} (me)` }] : []),
+      ];
+    }
     const opts = staff.map((s) => ({ value: String(s.id), label: s.reference_id ? `${s.name} (agent)` : s.name }));
     if (myStaff && !opts.some((o) => o.value === String(myStaff.id))) {
       opts.push({ value: String(myStaff.id), label: `${myStaff.name} (me)` });
     }
     return [{ value: "unassigned", label: "Unassigned" }, ...opts];
-  }, [staff, myStaff]);
+  }, [staff, myStaff, isAgent]);
+  // Transfer / Log-visitor are limited, for an agent, to their REFERENCE leads —
+  // not leads merely assigned to them. Non-agents keep normal visibility.
+  const isMyRefLead = useCallback(
+    (l: Lead) =>
+      !isAgent ||
+      (myRef.id != null && Number(l.reference_id) === myRef.id) ||
+      (!!myRef.name && (l.reference_name ?? "") === myRef.name),
+    [isAgent, myRef],
+  );
   // When exactly one assignee is picked, their team leader (reports_to) is
   // offered as a suggestion — surfaced at the top of the Reporting Person
   // dropdown but NOT auto-selected (the user chooses whether to use it).
@@ -2181,12 +2197,12 @@ export default function ClientLeads() {
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>
             ))}
-            {canCreateTransfer && (
+            {canCreateTransfer && isMyRefLead(l) && (
               <IconButton title="Transfer to another rep" onClick={() => setTransferLead({ id: l.id, name: l.name?.trim() || l.phone })}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 3l4 4-4 4M20 7H8M8 21l-4-4 4-4M4 17h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>
             )}
-            {canCreateVisitor && (
+            {canCreateVisitor && isMyRefLead(l) && (
               <IconButton title="Log a visitor for this lead" onClick={() => setVisitorDraft(visitorDraftFromLead(l, visitorTypes, visitorStatuses))}>
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-1a6 6 0 0112 0v1M19 8v6M22 11h-6" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </IconButton>

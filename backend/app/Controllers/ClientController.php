@@ -371,6 +371,31 @@ class ClientController extends ApiController
         return in_array((int) ($lead['assigned_to'] ?? 0), $scope, true);
     }
 
+    /**
+     * Whether the current user may run a lead-linked action (log a visitor,
+     * start a transfer) on this lead. Same as canSeeLead EXCEPT that a
+     * reference "agent" is limited to their REFERENCE leads only — leads merely
+     * assigned to them (which they can see in the list) are NOT actionable here.
+     */
+    private function canActOnReferenceLead(array $lead): bool
+    {
+        if ($this->isAdmin()) {
+            return true;
+        }
+        $refName = $this->currentReferenceName();
+        if ($refName !== null) {
+            $refId = $this->currentReferenceId();
+            if ($refId && (int) ($lead['reference_id'] ?? 0) === $refId) {
+                return true;
+            }
+
+            return trim((string) ($lead['reference_name'] ?? '')) === $refName;
+        }
+
+        // Non-agent staff: fall back to normal visibility (assignment/reports).
+        return $this->canSeeLead($lead);
+    }
+
     /** GET /client/me — current user, whether they're an admin, and their permissions. */
     public function me()
     {
@@ -382,6 +407,11 @@ class ClientController extends ApiController
             // An "agent" is a staff member locked to a reference: their lead view
             // is scoped by reference (not assignment), so the UI hides assignment.
             'is_agent'    => ! $this->isAdmin() && $this->currentReferenceName() !== null,
+            // The agent's own reference, so the UI can tell reference leads (which
+            // an agent may transfer / log a visitor for) apart from leads merely
+            // assigned to them (visible, but not actionable for those features).
+            'reference_id'   => $this->currentReferenceId(),
+            'reference_name' => $this->currentReferenceName(),
             'role'        => $this->role(),
             'permissions' => $this->effectivePermissions(),
             'modules'     => self::MODULES,
@@ -4391,8 +4421,8 @@ class ClientController extends ApiController
         if (! $lead) {
             return $this->failNotFound('Lead not found');
         }
-        if (! $this->canSeeLead($lead)) {
-            return $this->failForbidden('You can only transfer your own leads.');
+        if (! $this->canActOnReferenceLead($lead)) {
+            return $this->failForbidden('You can only transfer your own reference leads.');
         }
         if ($toId <= 0) {
             return $this->failValidationErrors(['to_staff_id' => 'Choose a team member to transfer to.']);
@@ -4648,6 +4678,14 @@ class ClientController extends ApiController
         }
         $cid    = $this->clientId();
         $data   = $this->visitorData($cid);
+        // When the visitor is logged against a lead, an agent may only do so for
+        // their own reference leads (not leads merely assigned to them).
+        if (! empty($data['lead_id'])) {
+            $lead = (new LeadModel())->where('client_id', $cid)->find((int) $data['lead_id']);
+            if (! $lead || ! $this->canActOnReferenceLead($lead)) {
+                return $this->failForbidden('You can only log a visitor for your own reference leads.');
+            }
+        }
         $custom = $this->formCustomValues('visitor', (array) $this->input());
         if ($errs = $this->formFieldErrors('visitor', $data, $custom)) {
             return $this->failValidationErrors($errs);
