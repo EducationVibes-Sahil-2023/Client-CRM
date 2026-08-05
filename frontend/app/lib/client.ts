@@ -739,6 +739,10 @@ export interface LeadTransfer {
 }
 export const getLeadTransfers = () =>
   clientGet<{ transfers: LeadTransfer[]; mode: "direct" | "approval"; can_decide: boolean; my_staff_id: number }>("/lead-transfers");
+/** Distinct staff the current user's VISIBLE leads are assigned to (scope-aware) —
+ *  used to build the "Assigned to" filter for agents, who can't read the team list. */
+export const getLeadAssignees = () =>
+  clientGet<{ assignees: { id: number; name: string }[] }>("/lead-assignees");
 export const createLeadTransfer = (b: { lead_id: number; to_staff_id: number; reason?: string }) =>
   clientPost<{ message: string; id: number; status: TransferStatus }>("/lead-transfers", b);
 export const approveLeadTransfer = (id: number, note?: string) => clientPost(`/lead-transfers/${id}/approve`, { note });

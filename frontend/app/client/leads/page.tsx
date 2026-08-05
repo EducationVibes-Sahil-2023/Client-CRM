@@ -5,7 +5,7 @@ import {
   getLeads, createLead, updateLead, deleteLead, importLeads, bulkUpdateLeads, getLeadImportSetup,
   getLeadsSetup, getStaff, getMe, getLeadAnalytics, getCallSyncStatus, getLeadCallSummary,
   getLeadDetail, createLeadReminder, updateLeadReminder, deleteLeadReminder, createLeadNote, updateLeadNote, deleteLeadNote,
-  getLeadTransfers, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS, LEAD_FIELD_HINTS, LEAD_FORM_FIELDS,
+  getLeadTransfers, getLeadAssignees, getVisitorSetup, getFormSetup, LEAD_REQUIRABLE_FIELDS, LEAD_FIELD_HINTS, LEAD_FORM_FIELDS,
   getConvertConfig, saveConvertConfig, convertLead,
   type Lead, type LeadStatus, type LeadSource, type LeadType, type LeadReference, type Staff, type LeadImportResult, type LeadDetail,
   type LeadAnalytics, type LeadCount, type State, type City, type VisitorType, type VisitorStatus, type CustomField,
@@ -572,6 +572,7 @@ export default function ClientLeads() {
   const [isAdmin, setIsAdmin] = useState(false); // client admin → may rename columns
   const [myStaff, setMyStaff] = useState<{ id: number; name: string } | null>(null); // current user (for the assignee filter)
   const [myRef, setMyRef] = useState<{ id: number | null; name: string | null }>({ id: null, name: null }); // agent's own reference
+  const [agentAssignees, setAgentAssignees] = useState<{ id: number; name: string }[]>([]); // reps owning the agent's visible leads
   const [leads, setLeads] = useState<Lead[]>([]);
   const [statuses, setStatuses] = useState<LeadStatus[]>([]);
   const [sources, setSources] = useState<LeadSource[]>([]);
@@ -861,6 +862,9 @@ export default function ClientLeads() {
   useEffect(() => { if (canTransfer) getLeadTransfers().then((d) => { setTransferMode(d.mode); setTransferPending((d.transfers ?? []).filter((t) => t.status === "pending").length); }).catch(() => {}); }, [canTransfer]);
   // Visitor types/statuses for the per-lead "Log visitor" modal.
   useEffect(() => { if (canVisitors) getVisitorSetup().then((d) => { setVisitorTypes(d.types ?? []); setVisitorStatuses(d.statuses ?? []); }).catch(() => {}); }, [canVisitors]);
+  // Agents can't read the team list, so build their "Assigned to" filter from the
+  // distinct reps that actually own their visible (reference) leads.
+  useEffect(() => { if (isAgent) getLeadAssignees().then((d) => setAgentAssignees(d.assignees ?? [])).catch(() => {}); }, [isAgent]);
 
   // A sub-status has one or more parents; top-level statuses have none.
   const isSub = (s: LeadStatus) => (s.parent_ids?.length ?? 0) > 0 || !!s.parent_id;
@@ -953,17 +957,23 @@ export default function ClientLeads() {
   // staff list (incl. agents, since leads can now be assigned to them).
   const assignedFilterOptions = useMemo<SelectOption[]>(() => {
     if (isAgent) {
-      return [
-        { value: "unassigned", label: "Unassigned" },
-        ...(myStaff ? [{ value: String(myStaff.id), label: `${myStaff.name} (me)` }] : []),
-      ];
+      // Every rep that owns one of the agent's visible leads, so they can filter
+      // their reference leads by whoever they're assigned to.
+      const opts = agentAssignees.map((a) => ({
+        value: String(a.id),
+        label: myStaff && a.id === myStaff.id ? `${a.name} (me)` : a.name,
+      }));
+      if (myStaff && !opts.some((o) => o.value === String(myStaff.id))) {
+        opts.unshift({ value: String(myStaff.id), label: `${myStaff.name} (me)` });
+      }
+      return [{ value: "unassigned", label: "Unassigned" }, ...opts];
     }
     const opts = staff.map((s) => ({ value: String(s.id), label: s.reference_id ? `${s.name} (agent)` : s.name }));
     if (myStaff && !opts.some((o) => o.value === String(myStaff.id))) {
       opts.push({ value: String(myStaff.id), label: `${myStaff.name} (me)` });
     }
     return [{ value: "unassigned", label: "Unassigned" }, ...opts];
-  }, [staff, myStaff, isAgent]);
+  }, [staff, myStaff, isAgent, agentAssignees]);
   // Transfer / Log-visitor are limited, for an agent, to their REFERENCE leads —
   // not leads merely assigned to them. Non-agents keep normal visibility.
   const isMyRefLead = useCallback(

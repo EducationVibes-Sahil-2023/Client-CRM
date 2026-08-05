@@ -1945,6 +1945,38 @@ class ClientController extends ApiController
      * params: page, per_page, sort, dir, q, and the filters (status, sub, source,
      * lead_type, reference, assigned, follow_status, created/assigned/follow ranges).
      */
+    /**
+     * GET /client/lead-assignees — the distinct staff that the current user's
+     * VISIBLE leads are assigned to (scope-aware). This lets an agent's
+     * "Assigned to" filter list every rep who owns one of their reference leads
+     * (a, b, c, d…) without the agent needing the full team list, which they
+     * can't read. Admins/managers still build the filter from the team list.
+     */
+    public function leadAssignees()
+    {
+        if ($resp = $this->requirePermission('leads')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+        $q   = (new LeadModel())->select('assigned_to')->distinct()
+            ->where('client_id', $cid)
+            ->where('(pending_transfer IS NULL OR pending_transfer = 0)')
+            ->where('assigned_to IS NOT NULL')
+            ->where('assigned_to !=', 0);
+        $this->applyLeadScope($q);
+
+        $ids        = array_values(array_unique(array_filter(array_map(static fn ($r) => (int) $r['assigned_to'], $q->findAll()))));
+        $staffNames = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+
+        $out = [];
+        foreach ($ids as $id) {
+            $out[] = ['id' => $id, 'name' => $staffNames[$id] ?? ('#' . $id)];
+        }
+        usort($out, static fn ($a, $b) => strcasecmp((string) $a['name'], (string) $b['name']));
+
+        return $this->respond(['assignees' => $out]);
+    }
+
     public function leads()
     {
         if ($resp = $this->requirePermission('leads')) {

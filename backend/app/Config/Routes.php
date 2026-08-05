@@ -340,6 +340,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         // Leads (the records themselves)
         $routes->get('leads', 'ClientController::leads');
         $routes->get('lead-analytics', 'ClientController::leadAnalytics');
+        $routes->get('lead-assignees', 'ClientController::leadAssignees');
         $routes->get('lead-call-summary', 'ClientController::leadCallSummary');
         $routes->post('leads', 'ClientController::createLead');
         $routes->post('leads/import', 'ClientController::importLeads');
