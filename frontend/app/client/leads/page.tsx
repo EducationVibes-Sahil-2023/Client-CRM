@@ -1878,18 +1878,18 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {canSeeReporting && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
+        {canSeeReporting && filters.assigned.length > 0 && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
           <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
             <FilterLabel>Reporting Person</FilterLabel>
             <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
-            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Suggested: <b>{suggestedLeader.name}</b> (team leader) — pick it from the top of the list, or choose anyone.</> : "Pick assignees who share one team leader to see that leader suggested here."}</span>
+            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Suggested: <b>{suggestedLeader.name}</b> (team leader) — pick it from the top of the list, or choose anyone.</> : "The selected reps don't share one team leader — pick any reporting person from the list."}</span>
           </label>
         )}
 
         {!filterPrefs.isHidden("assigned") && !filterLayout.isHidden("assigned") && (
           <label className="flex flex-col gap-1" style={{ order: fo("assigned") }}>
             <FilterLabel>Assigned to</FilterLabel>
-            <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => setFilter("assigned", v)} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
+            <MultiSelect ariaLabel="Filter by assignee" value={filters.assigned} onChange={(v) => { setFilter("assigned", v); if (v.length === 0) setFilter("reporting", ""); }} options={assignedFilterOptions} placeholder="Anyone" searchPlaceholder="Search team…" />
           </label>
         )}
 
@@ -1907,7 +1907,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!filterPrefs.isHidden("reference") && !filterLayout.isHidden("reference") && (
+        {!isAgent && !filterPrefs.isHidden("reference") && !filterLayout.isHidden("reference") && (
           <label className="flex flex-col gap-1" style={{ order: fo("reference") }}>
             <FilterLabel>Reference</FilterLabel>
             <MultiSelect ariaLabel="Filter by reference" value={filters.reference} onChange={(v) => setFilter("reference", v)} options={referenceFilterOptions} placeholder="All references" searchPlaceholder="Search reference…" />
