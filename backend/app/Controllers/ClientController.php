@@ -66,7 +66,7 @@ class ClientController extends ApiController
 {
     /** Modules that roles can be granted CRUD permissions on. */
     public const MODULES = [
-        'dashboard', 'leads', 'leads_setup', 'followups', 'lead_transfer', 'visitors', 'team', 'roles', 'tasks', 'assets',
+        'dashboard', 'leads', 'leads_setup', 'followups', 'lead_transfer', 'visitors', 'team', 'departments', 'office_locations', 'roles', 'tasks', 'assets',
         'calls', 'reports', 'chat', 'notifications', 'announcements', 'email_config', 'settings',
     ];
 
@@ -8610,7 +8610,7 @@ class ClientController extends ApiController
     /** GET /client/departments — active list plus the archived (soft-deleted) ones. */
     public function departmentsList()
     {
-        if ($resp = $this->requirePermission('team')) {
+        if ($resp = $this->requirePermission('departments')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8625,7 +8625,7 @@ class ClientController extends ApiController
     /** POST /client/departments */
     public function createDepartment()
     {
-        if ($resp = $this->requirePermission('team', 'create')) {
+        if ($resp = $this->requirePermission('departments', 'create')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8645,7 +8645,7 @@ class ClientController extends ApiController
     /** POST /client/departments/{id} */
     public function updateDepartment(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'update')) {
+        if ($resp = $this->requirePermission('departments', 'update')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8664,7 +8664,7 @@ class ClientController extends ApiController
     /** POST /client/departments/{id}/delete — soft delete (archive). */
     public function deleteDepartment(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'delete')) {
+        if ($resp = $this->requirePermission('departments', 'delete')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8682,7 +8682,7 @@ class ClientController extends ApiController
     /** POST /client/departments/{id}/restore — bring an archived department back. */
     public function restoreDepartment(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'update')) {
+        if ($resp = $this->requirePermission('departments', 'update')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8705,7 +8705,7 @@ class ClientController extends ApiController
     /** GET /client/office-locations — active list plus archived (soft-deleted). */
     public function officeLocationsList()
     {
-        if ($resp = $this->requirePermission('team')) {
+        if ($resp = $this->requirePermission('office_locations')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8722,7 +8722,7 @@ class ClientController extends ApiController
     /** POST /client/office-locations */
     public function createOfficeLocation()
     {
-        if ($resp = $this->requirePermission('team', 'create')) {
+        if ($resp = $this->requirePermission('office_locations', 'create')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8739,7 +8739,7 @@ class ClientController extends ApiController
     /** POST /client/office-locations/{id} */
     public function updateOfficeLocation(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'update')) {
+        if ($resp = $this->requirePermission('office_locations', 'update')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8758,7 +8758,7 @@ class ClientController extends ApiController
     /** POST /client/office-locations/{id}/delete — soft delete (archive). */
     public function deleteOfficeLocation(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'delete')) {
+        if ($resp = $this->requirePermission('office_locations', 'delete')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8776,7 +8776,7 @@ class ClientController extends ApiController
     /** POST /client/office-locations/{id}/restore — bring an archived office back. */
     public function restoreOfficeLocation(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'update')) {
+        if ($resp = $this->requirePermission('office_locations', 'update')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8796,7 +8796,7 @@ class ClientController extends ApiController
     /** GET /client/holidays?year=YYYY — holidays for a year + the years that have any. */
     public function holidays()
     {
-        if ($resp = $this->requirePermission('team')) {
+        if ($resp = $this->requirePermission('office_locations')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8846,7 +8846,7 @@ class ClientController extends ApiController
     /** POST /client/holidays */
     public function createHoliday()
     {
-        if ($resp = $this->requirePermission('team', 'create')) {
+        if ($resp = $this->requirePermission('office_locations', 'create')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8867,7 +8867,7 @@ class ClientController extends ApiController
     /** POST /client/holidays/{id} */
     public function updateHoliday(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'update')) {
+        if ($resp = $this->requirePermission('office_locations', 'update')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8890,7 +8890,7 @@ class ClientController extends ApiController
     /** POST /client/holidays/{id}/delete — soft delete. */
     public function deleteHoliday(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'delete')) {
+        if ($resp = $this->requirePermission('office_locations', 'delete')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8910,7 +8910,7 @@ class ClientController extends ApiController
     /** GET /client/shifts — shifts with decoded weekly hours. */
     public function shiftsList()
     {
-        if ($resp = $this->requirePermission('team')) {
+        if ($resp = $this->requirePermission('office_locations')) {
             return $resp;
         }
         $cid    = $this->clientId();
@@ -8936,7 +8936,7 @@ class ClientController extends ApiController
     /** POST /client/shifts */
     public function createShift()
     {
-        if ($resp = $this->requirePermission('team', 'create')) {
+        if ($resp = $this->requirePermission('office_locations', 'create')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8957,7 +8957,7 @@ class ClientController extends ApiController
     /** POST /client/shifts/{id} */
     public function updateShift(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'update')) {
+        if ($resp = $this->requirePermission('office_locations', 'update')) {
             return $resp;
         }
         $cid   = $this->clientId();
@@ -8980,7 +8980,7 @@ class ClientController extends ApiController
     /** POST /client/shifts/{id}/delete — soft delete; unmaps any staff on it. */
     public function deleteShift(int $id)
     {
-        if ($resp = $this->requirePermission('team', 'delete')) {
+        if ($resp = $this->requirePermission('office_locations', 'delete')) {
             return $resp;
         }
         $cid   = $this->clientId();

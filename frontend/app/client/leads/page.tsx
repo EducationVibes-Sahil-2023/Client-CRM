@@ -983,13 +983,23 @@ export default function ClientLeads() {
       (!!myRef.name && (l.reference_name ?? "") === myRef.name),
     [isAgent, myRef],
   );
-  // When exactly one assignee is picked, their team leader (reports_to) is
-  // offered as a suggestion — surfaced at the top of the Reporting Person
-  // dropdown but NOT auto-selected (the user chooses whether to use it).
+  // When the picked assignees all report up to ONE common parent (their team
+  // leader), that single parent is offered as a suggestion — surfaced at the top
+  // of the Reporting Person dropdown but NOT auto-selected. Works whether one or
+  // several counsellors are selected (e.g. a manager picks both their reps); it
+  // stays hidden when they don't share a single parent.
   const suggestedLeader = useMemo(() => {
-    if (filters.assigned.length !== 1 || filters.assigned[0] === "unassigned") return null;
-    const a = staff.find((s) => String(s.id) === filters.assigned[0]);
-    const leader = a?.reports_to ? staff.find((s) => s.id === a.reports_to && !s.reference_id) : null;
+    const picked = filters.assigned.filter((a) => a !== "unassigned");
+    if (picked.length === 0) return null;
+    const parents = new Set<number>();
+    for (const id of picked) {
+      const a = staff.find((s) => String(s.id) === id);
+      if (!a?.reports_to) return null; // a picked rep has no parent → no single suggestion
+      parents.add(a.reports_to);
+    }
+    if (parents.size !== 1) return null; // the picked reps don't share one parent
+    const leaderId = [...parents][0];
+    const leader = staff.find((s) => s.id === leaderId && !s.reference_id);
     return leader ? { id: leader.id, name: leader.name } : null;
   }, [filters.assigned, staff]);
 
@@ -1673,9 +1683,9 @@ export default function ClientLeads() {
     // Follow-up shows the lead's latest reminder (date over time); blank if none.
     { key: "follow_date", header: "Follow-up", width: 140, sortAccessor: (l) => l.last_reminder_at, render: (l) => stackedDateTime(l.last_reminder_at) },
     // Latest call of any status (connected or not) to this lead's phone.
-    { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) ?? dash },
+    { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) },
     // Latest connected (answered) call.
-    { key: "last_connected", header: "Last connected", width: 150, sortAccessor: (l) => l.last_connected_at ?? null, render: (l) => stackedDateTime(l.last_connected_at) ?? dash },
+    { key: "last_connected", header: "Last connected", width: 150, sortAccessor: (l) => l.last_connected_at ?? null, render: (l) => stackedDateTime(l.last_connected_at) },
     // Total calls to this lead's number (any staff).
     { key: "call_count", header: "Total calls", width: 110, align: "right", sortAccessor: (l) => l.call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.call_count ?? 0}</span> },
     // Reporting-person columns: the Call Count & Duration reflect the Reporting
@@ -1688,9 +1698,9 @@ export default function ClientLeads() {
     { key: "follow_flag", header: "Follow-up status", width: 150, render: (l) => followFlagBadge(l.follow_flag) ?? dash },
     // First-response SLA: working time from assignment → first connected call by the assigned user.
     { key: "first_response", header: "First response", width: 130, sortAccessor: (l) => (l.first_response_seconds == null ? null : Number(l.first_response_seconds)), render: (l) => <span className="tabular-nums text-slate-600">{fmtDuration(l.first_response_seconds)}</span> },
-    { key: "assigned_date", header: "Assigned date", width: 140, render: (l) => stackedDateTime(l.assigned_date) ?? dash },
-    { key: "created_date", header: "Created", width: 150, sortAccessor: (l) => l.created_at, render: (l) => stackedDateTime(l.created_at) ?? dash },
-    { key: "updated_at", header: "Last updated", width: 150, render: (l) => stackedDateTime(l.updated_at) ?? dash },
+    { key: "assigned_date", header: "Assigned date", width: 140, render: (l) => stackedDateTime(l.assigned_date) },
+    { key: "created_date", header: "Created", width: 150, sortAccessor: (l) => l.created_at, render: (l) => stackedDateTime(l.created_at) },
+    { key: "updated_at", header: "Last updated", width: 150, render: (l) => stackedDateTime(l.updated_at) },
     // Available via the Columns menu, hidden until the user opts in.
     { key: "email", header: "Email", width: 210, defaultHidden: true, render: (l) => (l.email ? <span className="text-slate-600">{l.email}</span> : dash) },
     { key: "alt_phone", header: "Alt. phone", width: 130, defaultHidden: true, render: (l) => (l.alt_phone ? <a href={`tel:${l.alt_phone}`} onClick={(e) => e.stopPropagation()} title={`Call ${l.alt_phone}`} className="tabular-nums text-emerald-700 hover:underline">{l.alt_phone}</a> : dash) },
@@ -1855,7 +1865,7 @@ export default function ClientLeads() {
           <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
             <FilterLabel>Reporting Person</FilterLabel>
             <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
-            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Suggested: <b>{suggestedLeader.name}</b> (team leader) — pick it from the top of the list, or choose anyone.</> : "Pick one assignee to see their team leader suggested here."}</span>
+            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Suggested: <b>{suggestedLeader.name}</b> (team leader) — pick it from the top of the list, or choose anyone.</> : "Pick assignees who share one team leader to see that leader suggested here."}</span>
           </label>
         )}
 

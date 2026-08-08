@@ -86,8 +86,8 @@ export function orderNav(items: NavItem[], order: string[]): NavItem[] {
 export const setupNav: NavItem[] = [
   { key: "billing", href: "/client/billing", label: "Billing", icon: "billing", feature: "billing", adminOnly: true },
   { key: "roles", href: "/client/roles", label: "Roles & Permissions", icon: "roles", feature: "roles", module: "roles" },
-  { key: "departments", href: "/client/departments", label: "Departments", icon: "departments", feature: "team", module: "team" },
-  { key: "office-locations", href: "/client/office-locations", label: "Office Locations", icon: "office", feature: "team", module: "team" },
+  { key: "departments", href: "/client/departments", label: "Departments", icon: "departments", feature: "team", module: "departments" },
+  { key: "office-locations", href: "/client/office-locations", label: "Office Locations", icon: "office", feature: "team", module: "office_locations" },
   { key: "leads-setup", href: "/client/leads-setup", label: "Leads Setup", icon: "statuses", feature: "leads", module: "leads_setup" },
   { key: "form-setup", href: "/client/form-setup", label: "Form Setup", icon: "formsetup", adminOnly: true },
   { key: "web-to-lead", href: "/client/web-to-lead", label: "Web to Lead", icon: "webtolead", feature: "leads", adminOnly: true },
