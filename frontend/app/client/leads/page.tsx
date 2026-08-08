@@ -1004,16 +1004,32 @@ export default function ClientLeads() {
     return leader ? { id: leader.id, name: leader.name } : null;
   }, [filters.assigned, staff]);
 
-  // Reporting Person: pick any real staff member — the Call Count & Duration
-  // columns then reflect that person's own calls on each lead. A leading blank
-  // clears the selection (columns fall back to the lead's assigned rep). The
-  // suggested team leader is pinned right under the blank for quick picking.
+  // A "reporting person" is a team leader — someone other staff report up to.
+  // The Reporting Person filter is limited to admins, agents and these leaders;
+  // an individual-contributor staff member (nobody reports to them) doesn't see it.
+  const isTeamLeader = useMemo(
+    () => !!myStaff && staff.some((s) => Number(s.reports_to) === myStaff.id),
+    [staff, myStaff],
+  );
+  const canSeeReporting = isAdmin || isAgent || isTeamLeader;
+
+  // Reporting Person: pick whose OWN calls the Call Count & Duration columns
+  // reflect on each lead. A leading blank clears it (columns fall back to the
+  // lead's assigned rep). The suggested team leader is pinned under the blank.
+  // Agents don't see the full staff directory, so they pick from the reps that
+  // own their (reference) leads — same list the assignee filter uses for them.
   const reportingOptions = useMemo<SelectOption[]>(() => {
-    const base = staff.filter((s) => !s.reference_id && (!suggestedLeader || s.id !== suggestedLeader.id)).map((s) => ({ value: String(s.id), label: s.name }));
     const head: SelectOption[] = [{ value: "", label: "— Assigned rep (default) —" }];
     if (suggestedLeader) head.push({ value: String(suggestedLeader.id), label: `${suggestedLeader.name} · team leader` });
+    if (isAgent) {
+      const base = agentAssignees
+        .filter((a) => !suggestedLeader || a.id !== suggestedLeader.id)
+        .map((a) => ({ value: String(a.id), label: myStaff && a.id === myStaff.id ? `${a.name} (me)` : a.name }));
+      return [...head, ...base];
+    }
+    const base = staff.filter((s) => !s.reference_id && (!suggestedLeader || s.id !== suggestedLeader.id)).map((s) => ({ value: String(s.id), label: s.name }));
     return [...head, ...base];
-  }, [staff, suggestedLeader]);
+  }, [staff, suggestedLeader, isAgent, agentAssignees, myStaff]);
 
   // Options for the searchable selects in the Add/Edit lead form. These differ
   // from the filter options: each carries a blank "none" row and the form's
@@ -1862,7 +1878,7 @@ export default function ClientLeads() {
           </label>
         )}
 
-        {!isAgent && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
+        {canSeeReporting && !filterPrefs.isHidden("reporting") && !filterLayout.isHidden("reporting") && (
           <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
             <FilterLabel>Reporting Person</FilterLabel>
             <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
