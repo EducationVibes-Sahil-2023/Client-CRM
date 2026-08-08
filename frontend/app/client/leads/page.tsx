@@ -1013,23 +1013,16 @@ export default function ClientLeads() {
   );
   const canSeeReporting = isAdmin || isAgent || isTeamLeader;
 
-  // Reporting Person: pick whose OWN calls the Call Count & Duration columns
-  // reflect on each lead. A leading blank clears it (columns fall back to the
-  // lead's assigned rep). The suggested team leader is pinned under the blank.
-  // Agents don't see the full staff directory, so they pick from the reps that
-  // own their (reference) leads — same list the assignee filter uses for them.
+  // Reporting Person options: ONLY the single reporting person of the selected
+  // assignee(s) — their common team leader — plus the default that falls back to
+  // each lead's own assigned rep. We deliberately do NOT list the whole team;
+  // the field exists to see that one leader's calls in the Call Count/Duration
+  // columns once you've filtered by their reps.
   const reportingOptions = useMemo<SelectOption[]>(() => {
-    const head: SelectOption[] = [{ value: "", label: "— Assigned rep (default) —" }];
-    if (suggestedLeader) head.push({ value: String(suggestedLeader.id), label: `${suggestedLeader.name} · team leader` });
-    if (isAgent) {
-      const base = agentAssignees
-        .filter((a) => !suggestedLeader || a.id !== suggestedLeader.id)
-        .map((a) => ({ value: String(a.id), label: myStaff && a.id === myStaff.id ? `${a.name} (me)` : a.name }));
-      return [...head, ...base];
-    }
-    const base = staff.filter((s) => !s.reference_id && (!suggestedLeader || s.id !== suggestedLeader.id)).map((s) => ({ value: String(s.id), label: s.name }));
-    return [...head, ...base];
-  }, [staff, suggestedLeader, isAgent, agentAssignees, myStaff]);
+    const opts: SelectOption[] = [{ value: "", label: "— Assigned rep (default) —" }];
+    if (suggestedLeader) opts.push({ value: String(suggestedLeader.id), label: `${suggestedLeader.name} (team leader)` });
+    return opts;
+  }, [suggestedLeader]);
 
   // Options for the searchable selects in the Add/Edit lead form. These differ
   // from the filter options: each carries a blank "none" row and the form's
@@ -1882,7 +1875,7 @@ export default function ClientLeads() {
           <label className="flex flex-col gap-1" style={{ order: fo("reporting") }}>
             <FilterLabel>Reporting Person</FilterLabel>
             <SearchSelect ariaLabel="Reporting person for call columns" value={filters.reporting} onChange={(v) => setFilter("reporting", v)} options={reportingOptions} placeholder="— Assigned rep (default) —" searchPlaceholder="Search team…" />
-            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Suggested: <b>{suggestedLeader.name}</b> (team leader) — pick it from the top of the list, or choose anyone.</> : "The selected reps don't share one team leader — pick any reporting person from the list."}</span>
+            <span className="text-[11px] text-slate-400">Sets whose calls the <b>Call Count</b> &amp; <b>Duration</b> columns show. Doesn&apos;t filter the list. {suggestedLeader ? <>Reporting person: <b>{suggestedLeader.name}</b> (team leader of the selected reps).</> : "The selected reps don't share one team leader."}</span>
           </label>
         )}
 
