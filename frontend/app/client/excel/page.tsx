@@ -23,7 +23,7 @@ const ENTITIES: { key: ImportEntity; label: string; assignable: boolean }[] = [
 ];
 
 export default function ExcelHubPage() {
-  const { isAdmin, permissionsLoaded } = useClient();
+  const { can, permissionsLoaded } = useClient();
   const [tab, setTab] = useState<ImportEntity>("lead");
 
   // Shared lookups (loaded once) for import options + export naming.
@@ -40,11 +40,11 @@ export default function ExcelHubPage() {
     return () => { alive = false; };
   }, []);
 
-  if (permissionsLoaded && !isAdmin) {
+  if (permissionsLoaded && !can("data_import", "view")) {
     return (
       <Card className="mx-auto mt-10 max-w-lg text-center">
-        <h2 className="text-lg font-semibold text-slate-800">Admins only</h2>
-        <p className="mt-1 text-sm text-slate-500">Only the client admin can import and export data.</p>
+        <h2 className="text-lg font-semibold text-slate-800">No access</h2>
+        <p className="mt-1 text-sm text-slate-500">You don&apos;t have permission to import or export data. Ask an admin to grant the <b>Import (Excel)</b> permission.</p>
       </Card>
     );
   }
@@ -66,6 +66,8 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
   entity: ImportEntity; statuses: LeadStatus[]; sources: LeadSource[]; types: LeadType[]; staff: Staff[];
 }) {
   const toast = useToast();
+  const { can } = useClient();
+  const canImport = can("data_import", "create"); // view-only users can still export
   const assignable = entity !== "team";
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -184,8 +186,9 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
   if (loading) return <div className="flex justify-center py-16"><Spinner /></div>;
 
   return (
-    <div className="grid gap-5 lg:grid-cols-2">
+    <div className={`grid gap-5 ${canImport ? "lg:grid-cols-2" : "lg:grid-cols-1"}`}>
       {/* IMPORT */}
+      {canImport && (
       <Card className="space-y-4">
         <h3 className="text-sm font-semibold text-slate-700">Import from Excel / CSV</h3>
         <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ""; }} />
@@ -240,6 +243,7 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
           </div>
         )}
       </Card>
+      )}
 
       {/* EXPORT */}
       <Card className="space-y-4">

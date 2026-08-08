@@ -91,7 +91,7 @@ export const setupNav: NavItem[] = [
   { key: "leads-setup", href: "/client/leads-setup", label: "Leads Setup", icon: "statuses", feature: "leads", module: "leads_setup" },
   { key: "form-setup", href: "/client/form-setup", label: "Form Setup", icon: "formsetup", adminOnly: true },
   { key: "web-to-lead", href: "/client/web-to-lead", label: "Web to Lead", icon: "webtolead", feature: "leads", adminOnly: true },
-  { key: "excel", href: "/client/excel", label: "Excel / Data", icon: "excel", adminOnly: true },
+  { key: "excel", href: "/client/excel", label: "Excel / Data", icon: "excel", module: "data_import" },
   { key: "facebook", href: "/client/facebook", label: "Facebook Leads", icon: "facebook", adminOnly: true },
   { key: "google-sheets", href: "/client/google-sheets", label: "Google Sheets", icon: "googlesheets", adminOnly: true },
   { key: "email-config", href: "/client/email-config", label: "Email Setup", icon: "email", feature: "email_config", adminOnly: true },

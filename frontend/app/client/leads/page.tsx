@@ -983,23 +983,24 @@ export default function ClientLeads() {
       (!!myRef.name && (l.reference_name ?? "") === myRef.name),
     [isAgent, myRef],
   );
-  // When the picked assignees all report up to ONE common parent (their team
-  // leader), that single parent is offered as a suggestion — surfaced at the top
-  // of the Reporting Person dropdown but NOT auto-selected. Works whether one or
-  // several counsellors are selected (e.g. a manager picks both their reps); it
-  // stays hidden when they don't share a single parent.
+  // Suggest a single "reporting person" — the team leader (reports_to) — for the
+  // picked assignees, surfaced at the top of the Reporting Person dropdown but NOT
+  // auto-selected. Works for one OR several selected counsellors: it tallies each
+  // rep's leader and offers the MOST COMMON one, so a single parent is shown even
+  // when a rep has no leader set or the reps span more than one. Ids are coerced
+  // (CI4 returns them as strings) so the match never fails on string-vs-number.
   const suggestedLeader = useMemo(() => {
     const picked = filters.assigned.filter((a) => a !== "unassigned");
     if (picked.length === 0) return null;
-    const parents = new Set<number>();
+    const tally = new Map<number, number>();
     for (const id of picked) {
       const a = staff.find((s) => String(s.id) === id);
-      if (!a?.reports_to) return null; // a picked rep has no parent → no single suggestion
-      parents.add(a.reports_to);
+      const p = a?.reports_to != null ? Number(a.reports_to) : 0;
+      if (p) tally.set(p, (tally.get(p) ?? 0) + 1);
     }
-    if (parents.size !== 1) return null; // the picked reps don't share one parent
-    const leaderId = [...parents][0];
-    const leader = staff.find((s) => s.id === leaderId && !s.reference_id);
+    if (tally.size === 0) return null; // none of the picked reps has a team leader
+    const leaderId = [...tally.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const leader = staff.find((s) => Number(s.id) === leaderId && !s.reference_id);
     return leader ? { id: leader.id, name: leader.name } : null;
   }, [filters.assigned, staff]);
 
@@ -1774,7 +1775,7 @@ export default function ClientLeads() {
                 Convert setup
               </button>
             )}
-            {can("leads", "create") && (
+            {can("data_import", "create") && (
               <button onClick={openImport} className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0-12L8 7m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" strokeLinecap="round" strokeLinejoin="round" /></svg>
                 Import

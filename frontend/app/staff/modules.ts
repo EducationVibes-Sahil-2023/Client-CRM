@@ -3,6 +3,7 @@
 export const MODULE_META: Record<string, { label: string; icon: string }> = {
   dashboard: { label: "Dashboard", icon: "M4 5h7v7H4zM13 5h7v4h-7zM13 11h7v8h-7zM4 14h7v5H4z" },
   leads: { label: "Leads", icon: "M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 100-8 4 4 0 000 8z" },
+  data_import: { label: "Import (Excel)", icon: "M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V9l-6-6H9zM13 3v6h6M9 13l3 3m0-3l-3 3" },
   team: { label: "Team", icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM3 21v-2a6 6 0 0112 0v2M17 11h4m-2-2v4" },
   roles: { label: "Roles & Permissions", icon: "M12 11a3 3 0 100-6 3 3 0 000 6zM4 21v-2a4 4 0 014-4h8a4 4 0 014 4v2" },
   tasks: { label: "Tasks", icon: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" },

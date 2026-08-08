@@ -66,7 +66,7 @@ class ClientController extends ApiController
 {
     /** Modules that roles can be granted CRUD permissions on. */
     public const MODULES = [
-        'dashboard', 'leads', 'leads_setup', 'followups', 'lead_transfer', 'visitors', 'team', 'departments', 'office_locations', 'roles', 'tasks', 'assets',
+        'dashboard', 'leads', 'leads_setup', 'data_import', 'followups', 'lead_transfer', 'visitors', 'team', 'departments', 'office_locations', 'roles', 'tasks', 'assets',
         'calls', 'reports', 'chat', 'notifications', 'announcements', 'email_config', 'settings',
     ];
 
@@ -5160,7 +5160,7 @@ class ClientController extends ApiController
      */
     public function importLeads()
     {
-        if ($resp = $this->requirePermission('leads', 'create')) {
+        if ($resp = $this->requirePermission('data_import', 'create')) {
             return $resp;
         }
         $cid  = $this->clientId();
@@ -5470,7 +5470,7 @@ class ClientController extends ApiController
     /** GET /client/lead-import-setup — template columns + flags (readable for leads or leads_setup). */
     public function leadImportSetup()
     {
-        if (! $this->can('leads') && ! $this->can('leads_setup')) {
+        if (! $this->can('data_import') && ! $this->can('data_import', 'create') && ! $this->can('leads') && ! $this->can('leads_setup')) {
             return $this->failForbidden('You do not have permission to view the import setup.');
         }
 
@@ -5560,7 +5560,7 @@ class ClientController extends ApiController
         if (! isset(self::IMPORT_ENTITIES[$entity])) {
             return $this->failNotFound('Unknown import type');
         }
-        if (! $this->can(self::IMPORT_ENTITIES[$entity]['perm']) && ! $this->isAdmin()) {
+        if (! $this->can('data_import') && ! $this->can('data_import', 'create') && ! $this->can(self::IMPORT_ENTITIES[$entity]['perm']) && ! $this->isAdmin()) {
             return $this->failForbidden('You do not have permission to view the import setup.');
         }
 
@@ -5627,7 +5627,7 @@ class ClientController extends ApiController
     /** POST /client/tasks/import — bulk-create tasks from a mapped sheet. */
     public function importTasks()
     {
-        if ($resp = $this->requirePermission('tasks', 'create')) {
+        if ($resp = $this->requirePermission('data_import', 'create')) {
             return $resp;
         }
         $cid  = $this->clientId();
@@ -5710,7 +5710,7 @@ class ClientController extends ApiController
     /** POST /client/team/import — bulk-create staff directory records from a mapped sheet. */
     public function importTeam()
     {
-        if ($resp = $this->requirePermission('team', 'create')) {
+        if ($resp = $this->requirePermission('data_import', 'create')) {
             return $resp;
         }
         $cid  = $this->clientId();
