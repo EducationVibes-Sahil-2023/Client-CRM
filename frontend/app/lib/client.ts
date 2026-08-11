@@ -490,6 +490,8 @@ export interface Lead {
   call_count?: number;
   /** Calls to this lead's number(s) made by the lead's assigned staff. */
   assigned_call_count?: number;
+  /** Talk-time (seconds) of the assigned staff's calls to this lead's number(s). */
+  assigned_call_duration?: number;
   /** Total talk-time (seconds) across all calls to this lead's number(s). */
   total_duration?: number;
   /** Calls to this lead's number(s) by the selected Reporting Person (or, when

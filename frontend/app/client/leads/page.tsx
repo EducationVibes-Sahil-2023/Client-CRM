@@ -1696,14 +1696,16 @@ export default function ClientLeads() {
     { key: "last_call", header: "Last call", width: 150, sortAccessor: (l) => l.last_call_at ?? null, render: (l) => stackedDateTime(l.last_call_at) },
     // Latest connected (answered) call.
     { key: "last_connected", header: "Last connected", width: 150, sortAccessor: (l) => l.last_connected_at ?? null, render: (l) => stackedDateTime(l.last_connected_at) },
-    // Total calls to this lead's number (any staff).
-    { key: "call_count", header: "Total calls", width: 110, align: "right", sortAccessor: (l) => l.call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.call_count ?? 0}</span> },
-    // Reporting-person columns: the Call Count & Duration reflect the Reporting
-    // Person filter's own calls (or the assigned rep when none is selected) — this
-    // "Call Count" already covers the assigned rep, so no separate "Assigned calls".
-    { key: "person_call_count", header: "Call Count", width: 120, align: "right", sortAccessor: (l) => l.person_call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.person_call_count ?? 0}</span> },
-    { key: "total_duration", header: "Total Duration", width: 130, align: "right", sortAccessor: (l) => l.total_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.total_duration ? fmtDuration(l.total_duration) : dash}</span> },
-    { key: "person_call_duration", header: "Duration", width: 120, align: "right", sortAccessor: (l) => l.person_call_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-600">{l.person_call_duration ? fmtDuration(l.person_call_duration) : dash}</span> },
+    // Call counts: Total (any staff) + Assigned (the lead's assigned rep, fixed).
+    { key: "call_count", header: "Total Call Count", width: 130, align: "right", sortAccessor: (l) => l.call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.call_count ?? 0}</span> },
+    { key: "assigned_call_count", header: "Assigned Call Count", width: 150, align: "right", sortAccessor: (l) => l.assigned_call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.assigned_call_count ?? 0}</span> },
+    // Reporting-person count: reflects the Reporting Person filter (else the
+    // assigned rep). Distinct from the fixed Assigned column above.
+    { key: "person_call_count", header: "Reporting Calls", width: 130, align: "right", defaultHidden: true, sortAccessor: (l) => l.person_call_count ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.person_call_count ?? 0}</span> },
+    // Durations: Total (any staff) + Assigned (the lead's assigned rep, fixed).
+    { key: "total_duration", header: "Total Call Duration", width: 150, align: "right", sortAccessor: (l) => l.total_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.total_duration ? fmtDuration(l.total_duration) : dash}</span> },
+    { key: "assigned_call_duration", header: "Assigned Call Duration", width: 160, align: "right", sortAccessor: (l) => l.assigned_call_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-700">{l.assigned_call_duration ? fmtDuration(l.assigned_call_duration) : dash}</span> },
+    { key: "person_call_duration", header: "Reporting Duration", width: 150, align: "right", defaultHidden: true, sortAccessor: (l) => l.person_call_duration ?? 0, render: (l) => <span className="tabular-nums text-slate-600">{l.person_call_duration ? fmtDuration(l.person_call_duration) : dash}</span> },
     // Follow-up status flag (orange upcoming / red overdue / green done), server-computed.
     { key: "follow_flag", header: "Follow-up status", width: 150, render: (l) => followFlagBadge(l.follow_flag) ?? dash },
     // First-response SLA: working time from assignment → first connected call by the assigned user.
@@ -1722,7 +1724,7 @@ export default function ClientLeads() {
   // permission. Reference-scoped agents now see every column (incl. assignment)
   // over their own reference-scoped leads.
   const hiddenColKeys = new Set<string>([
-    ...(canViewCalls ? [] : ["last_call", "last_connected", "total_duration", "person_call_count", "person_call_duration"]),
+    ...(canViewCalls ? [] : ["last_call", "last_connected", "call_count", "assigned_call_count", "total_duration", "assigned_call_duration", "person_call_count", "person_call_duration"]),
   ]);
   const columns = hiddenColKeys.size ? allColumns.filter((c) => !hiddenColKeys.has(c.key)) : allColumns;
 

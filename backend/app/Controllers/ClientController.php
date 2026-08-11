@@ -2117,6 +2117,7 @@ class ClientController extends ApiController
             $callTotal    = 0;
             $callAssigned = 0;
             $durTotal     = 0;
+            $durAssigned  = 0;
             // The "contribution" person for the dynamic columns: the selected
             // reporting person if one is chosen, else this lead's assigned rep.
             $person       = $reportPerson > 0 ? $reportPerson : $assignedTo;
@@ -2126,16 +2127,18 @@ class ClientController extends ApiController
                 $callTotal    += $callCountByPhone[$n] ?? 0;
                 $durTotal     += $durByPhone[$n] ?? 0;
                 $callAssigned += $assignedTo > 0 ? ($callCountByPhoneStaff[$n][$assignedTo] ?? 0) : 0;
+                $durAssigned  += $assignedTo > 0 ? ($durByPhoneStaff[$n][$assignedTo] ?? 0) : 0;
                 if ($person > 0) {
                     $personCalls += $callCountByPhoneStaff[$n][$person] ?? 0;
                     $personDur   += $durByPhoneStaff[$n][$person] ?? 0;
                 }
             }
-            $r['call_count']           = $callTotal;         // Total Calls (all callers)
-            $r['assigned_call_count']  = $callAssigned;      // legacy "Assigned calls" column
-            $r['total_duration']       = $durTotal;          // Total Duration seconds (all callers)
-            $r['person_call_count']    = $personCalls;       // Call Count (reporting person, else assigned)
-            $r['person_call_duration'] = $personDur;         // Duration seconds (reporting person, else assigned)
+            $r['call_count']             = $callTotal;         // Total Calls (all callers)
+            $r['assigned_call_count']    = $callAssigned;      // Assigned rep's calls
+            $r['assigned_call_duration'] = $durAssigned;       // Assigned rep's call duration (seconds)
+            $r['total_duration']         = $durTotal;          // Total Duration seconds (all callers)
+            $r['person_call_count']      = $personCalls;       // Call Count (reporting person, else assigned)
+            $r['person_call_duration']   = $personDur;         // Duration seconds (reporting person, else assigned)
             $r['custom_fields']    = $this->decodeCustom($r['custom_fields'] ?? null);
         }
         unset($r);

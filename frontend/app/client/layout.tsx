@@ -7,7 +7,8 @@ import { ClientProvider, useClient } from "./ClientContext";
 import ClientSidebar, { MAIN_NAV, setupNav } from "./ClientSidebar";
 import ChatLauncher from "../components/chat/ChatLauncher";
 import type { AppNotification } from "../lib/chat";
-import { globalSearch, type SearchGroup } from "../lib/client";
+import { globalSearch, type SearchGroup, type SearchItem } from "../lib/client";
+import SearchDetailDrawer, { type SearchTarget } from "./SearchDetailDrawer";
 import { timeAgo } from "../lib/datetime";
 import { brandCssVars, surfaceCssVars, fontStack, fontSizePx } from "../lib/theme";
 import { API_URL } from "../lib/api";
@@ -117,6 +118,7 @@ function GlobalSearch() {
   const [groups, setGroups] = useState<SearchGroup[]>([]);
   const ref = useRef<HTMLDivElement>(null);
   const reqId = useRef(0);
+  const [view, setView] = useState<SearchTarget | null>(null); // detail drawer target
 
   // Close on outside click.
   useEffect(() => {
@@ -146,7 +148,14 @@ function GlobalSearch() {
     return () => clearTimeout(t);
   }, [q]);
 
+  // Click a result → open the quick-view modal (peek without leaving the page).
+  function openView(type: string, it: SearchItem) {
+    setOpen(false);
+    setView({ type, id: it.id, title: it.title, subtitle: it.subtitle, href: it.href });
+  }
+  // "Open full record" from the modal → navigate to the real page.
   function go(href: string) {
+    setView(null);
     setOpen(false);
     setQ("");
     setGroups([]);
@@ -185,7 +194,7 @@ function GlobalSearch() {
               <div key={g.key} className="border-b border-slate-50 last:border-0">
                 <div className="px-4 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{g.label}</div>
                 {g.items.map((it) => (
-                  <button key={`${g.key}-${it.id}`} onClick={() => go(it.href)} className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition hover:bg-slate-50">
+                  <button key={`${g.key}-${it.id}`} onClick={() => openView(g.key, it)} className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition hover:bg-slate-50">
                     <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d={groupIcon(g.key)} strokeLinecap="round" strokeLinejoin="round" /></svg>
                     </span>
@@ -200,6 +209,8 @@ function GlobalSearch() {
           )}
         </div>
       )}
+
+      <SearchDetailDrawer key={view ? `${view.type}-${view.id}` : "none"} target={view} onClose={() => setView(null)} onOpen={go} />
     </div>
   );
 }
