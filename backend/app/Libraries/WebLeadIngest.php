@@ -236,22 +236,21 @@ class WebLeadIngest
         $descIn = self::submitted($input, 'description');
 
         // --- Anti-duplicate rule ------------------------------------------------
+        // The default phone dedupe blocks the lead when the submitted phone OR alt
+        // phone is already used as ANY existing lead's phone OR alt phone.
         if (empty($form['allow_duplicate'])) {
-            $dupWhere = self::dupeMatch($form, $input, ['phone' => $phone, 'alt_phone' => $alt, 'email' => $email, 'name' => $name, 'city' => $city, 'state' => $state]);
-            if ($dupWhere !== null) {
-                $existing = (new LeadModel($db))->where('client_id', $cid)->where($dupWhere)->first();
-                if ($existing) {
-                    $makeTask = ! empty($form['create_duplicate_as_task']);
-                    // Resolve the assignee first (it advances the cursor), then persist
-                    // the counter + cursor in a single bump so a duplicate is counted once.
-                    $assignee = $makeTask ? self::resolveAssignee($cid, $db, $form, $state) : null;
-                    if ($makeTask) {
-                        self::createDuplicateTask($cid, $db, $form, $name ?: $phone, $assignee);
-                    }
-                    self::bumpForm($db, $cid, $formId, $form, $table);
-
-                    return ['status' => $makeTask ? 'task' : 'duplicate', 'message' => (string) ($form['success_message'] ?? 'Thank you!'), 'lead_id' => null];
+            $existing = self::findDuplicate($cid, $db, $form, $input, $phone, $alt, ['email' => $email, 'name' => $name, 'city' => $city, 'state' => $state]);
+            if ($existing) {
+                $makeTask = ! empty($form['create_duplicate_as_task']);
+                // Resolve the assignee first (it advances the cursor), then persist
+                // the counter + cursor in a single bump so a duplicate is counted once.
+                $assignee = $makeTask ? self::resolveAssignee($cid, $db, $form, $state) : null;
+                if ($makeTask) {
+                    self::createDuplicateTask($cid, $db, $form, $name ?: $phone, $assignee);
                 }
+                self::bumpForm($db, $cid, $formId, $form, $table);
+
+                return ['status' => $makeTask ? 'task' : 'duplicate', 'message' => (string) ($form['success_message'] ?? 'Thank you!'), 'lead_id' => null];
             }
         }
 
@@ -315,25 +314,48 @@ class WebLeadIngest
     }
 
     /** Build the WHERE for the dedupe rule, or null when the field(s) have no value. */
-    private static function dupeMatch(array $form, array $input, array $vals): ?array
+    /**
+     * Find an existing lead that duplicates this submission, or null. For the
+     * default single-field phone rule this checks the submitted phone AND alt
+     * phone against BOTH the phone and alt_phone columns — so a number reused
+     * anywhere blocks the lead. Other fields (email/name) and a two-field rule
+     * fall back to exact per-field matching.
+     *
+     * @param array<string,string> $vals values keyed by lead field
+     *
+     * @return array<string,mixed>|null
+     */
+    private static function findDuplicate(int $cid, ConnectionInterface $db, array $form, array $input, string $phone, string $alt, array $vals): ?array
     {
         $f1 = (string) ($form['prevent_duplicate_field'] ?? 'phone') ?: 'phone';
+        $f2 = trim((string) ($form['prevent_duplicate_field2'] ?? ''));
+        $q  = (new LeadModel($db))->where('client_id', $cid);
+
+        // Phone dedupe (default, single field): match either column, either number.
+        if ($f1 === 'phone' && ($f2 === '' || $f2 === 'phone')) {
+            $nums = array_values(array_unique(array_filter([$phone, $alt], static fn ($p) => $p !== '')));
+            if (! $nums) {
+                return null;
+            }
+
+            return $q->groupStart()->whereIn('phone', $nums)->orWhereIn('alt_phone', $nums)->groupEnd()->first();
+        }
+
+        // Otherwise: exact match on the configured field(s).
         $v1 = $vals[$f1] ?? self::submitted($input, $f1);
         if ($v1 === '' || $v1 === null) {
             return null;
         }
-        $where = [$f1 => $v1];
-
-        $f2 = trim((string) ($form['prevent_duplicate_field2'] ?? ''));
+        $q->where($f1, $v1);
         if ($f2 !== '' && $f2 !== $f1) {
             $v2 = $vals[$f2] ?? self::submitted($input, $f2);
             if ($v2 === '' || $v2 === null) {
                 return null; // both fields must be present to match a pair
             }
-            $where[$f2] = $v2;
+            $q->where($f2, $v2);
         }
 
-        return $where;
+        return $q->first();
     }
 
     /** The client's first (parent) lead status, used when the form has none set. */

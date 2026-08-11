@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Drawer, fmtDate, fmtDateTime } from "../admin/ui";
-import { getLeadDetail, getTask, type LeadDetail, type Task } from "../lib/client";
+import { getLeadDetail, getTask, getStaff, type LeadDetail, type Task, type Staff } from "../lib/client";
 
 /** A global-search result to show in the detail drawer. */
 export type SearchTarget = { type: string; id: number; title: string; subtitle: string; href: string };
@@ -174,6 +174,50 @@ function TaskDetailView({ target, onClose, onOpen }: { target: SearchTarget; onC
   );
 }
 
+/** Team member detail — the member's info, read-only. */
+function TeamDetailView({ target, onClose, onOpen }: { target: SearchTarget; onClose: () => void; onOpen: (href: string) => void }) {
+  const [member, setMember] = useState<Staff | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getStaff().then((d) => { if (alive) setMember(d.staff.find((s) => s.id === target.id) ?? null); }).catch(() => {});
+    return () => { alive = false; };
+  }, [target.id]);
+
+  return (
+    <Drawer
+      open
+      onClose={onClose}
+      title={target.title}
+      subtitle="Team member details"
+      width="max-w-xl"
+      footer={
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
+          <button onClick={() => onOpen(target.href)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">Open full record</button>
+        </div>
+      }
+    >
+      {!member && <p className="py-6 text-center text-sm text-slate-400">Loading…</p>}
+      {member && (
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+          <Field label="Name">{member.name}</Field>
+          <Field label="Designation">{member.designation}</Field>
+          <Field label="Email">{member.email}</Field>
+          <Field label="Phone">{member.phone}</Field>
+          <Field label="Alternative Phone">{member.alt_phone}</Field>
+          <Field label="Employee Code">{member.emp_code}</Field>
+          <Field label="Role">{member.role_name}</Field>
+          <Field label="Reports To">{member.manager_name}</Field>
+          <Field label="Department">{member.department}</Field>
+          <Field label="Office">{member.office_name}</Field>
+          <Field label="Reference">{member.reference_name}</Field>
+          <Field label="Status">{member.status}</Field>
+        </div>
+      )}
+    </Drawer>
+  );
+}
+
 /**
  * Detail drawer for a global-search result — opens the same rich view as the
  * page it belongs to (leads get the full tabbed drawer; tasks get their details;
@@ -186,6 +230,7 @@ export default function SearchDetailDrawer({ target, onClose, onOpen }: {
   if (!target) return null;
   if (target.type === "leads") return <LeadDetailView target={target} onClose={onClose} onOpen={onOpen} />;
   if (target.type === "tasks") return <TaskDetailView target={target} onClose={onClose} onOpen={onOpen} />;
+  if (target.type === "team") return <TeamDetailView target={target} onClose={onClose} onOpen={onOpen} />;
 
   // Fallback for other result types (team, assets, …): basic info + open.
   return (

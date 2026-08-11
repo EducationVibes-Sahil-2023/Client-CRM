@@ -5263,6 +5263,18 @@ class ClientController extends ApiController
         $n           = 0; // round-robin cursor (advances per inserted lead)
         $now         = date('Y-m-d H:i:s'); // assignment stamp (date+time, IST)
 
+        // Duplicate-phone guard: a number already used as ANY existing lead's phone
+        // OR alternative phone blocks the import row (also de-dupes within the file).
+        $existingPhones = [];
+        foreach ((new LeadModel())->select('phone, alt_phone')->where('client_id', $cid)->findAll() as $ex) {
+            foreach ([$ex['phone'] ?? '', $ex['alt_phone'] ?? ''] as $p) {
+                $p = preg_replace('/\D/', '', (string) $p);
+                if ($p !== '') {
+                    $existingPhones[$p] = true;
+                }
+            }
+        }
+
         foreach ($rows as $i => $row) {
             $line  = (int) $i + 2; // +1 header, +1 to be 1-based
             $row   = is_array($row) ? $row : [];
@@ -5273,6 +5285,12 @@ class ClientController extends ApiController
             }
             if (strlen((string) $phone) !== 10) {
                 $errors[] = ['row' => $line, 'message' => 'Phone must be exactly 10 digits.'];
+                continue;
+            }
+            // Skip a row whose phone (or alt phone) is already in use anywhere.
+            $altCheck = preg_replace('/\D/', '', (string) ($row['alt_phone'] ?? ''));
+            if (isset($existingPhones[$phone]) || ($altCheck !== '' && isset($existingPhones[$altCheck]))) {
+                $errors[] = ['row' => $line, 'message' => 'Duplicate — phone number already in use by another lead.'];
                 continue;
             }
             $email = trim((string) ($row['email'] ?? ''));
@@ -5369,6 +5387,11 @@ class ClientController extends ApiController
                 $first    = $model->errors();
                 $errors[] = ['row' => $line, 'message' => $first ? reset($first) : 'Could not save row.'];
                 continue;
+            }
+            // Reserve this row's numbers so a later row can't duplicate them.
+            $existingPhones[$phone] = true;
+            if ($altPhone !== '') {
+                $existingPhones[$altPhone] = true;
             }
             $inserted++;
             $n++;
