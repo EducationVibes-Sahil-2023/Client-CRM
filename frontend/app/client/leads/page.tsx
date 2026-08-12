@@ -1418,7 +1418,9 @@ export default function ClientLeads() {
       if (draft.id) await updateLead(draft.id, body);
       else await createLead(body);
       toast.success(draft.id ? "Lead updated." : "Lead added.");
-      setDraft(null);
+      // Keep the edit drawer open after an update (the user closes it themselves);
+      // only auto-close after creating a new lead, to avoid duplicate creates.
+      if (!draft.id) setDraft(null);
       refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save lead.");
