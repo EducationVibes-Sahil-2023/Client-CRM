@@ -608,6 +608,7 @@ export default function ClientLeads() {
   const [detail, setDetail] = useState<LeadDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [viewTab, setViewTab] = useState<"info" | "reminders" | "notes" | "calls" | "activity">("info");
+  const [editTab, setEditTab] = useState<"info" | "reminders" | "notes" | "calls" | "activity">("info");
   const [remindAt, setRemindAt] = useState("");
   const [reminderNote, setReminderNote] = useState("");
   const [reminderErr, setReminderErr] = useState("");
@@ -1150,10 +1151,14 @@ export default function ClientLeads() {
     setSelectedIds(new Set());
   }
 
-  function openNew() { setErrors({}); setDraft({ ...blank }); }
+  function openNew() { setErrors({}); setEditTab("info"); setDetail(null); setDraft({ ...blank }); }
   function openEdit(l: Lead) {
     if (l.converted_at) { toast.error("This lead is converted to an applicant and is locked — it can't be edited."); return; }
-    setErrors({}); setDraft(toDraft(l));
+    setErrors({}); setEditTab("info"); setDraft(toDraft(l));
+    // Load the lead's reminders / notes / calls / activity so the edit drawer's
+    // tabs can show them alongside the Information form.
+    setDetail(null);
+    if (l.id) { setRemindAt(followReminderDefault(l)); setReminderNote(""); setReminderErr(""); setNoteBody(""); loadDetail(l.id); }
   }
 
   // ---- view detail (reminders / notes / activity) ----
@@ -2268,7 +2273,16 @@ export default function ClientLeads() {
           </div>
         }
       >
-        {draft && (
+        {draft?.id && (
+          <div className="mb-4 flex gap-5 border-b border-slate-200 text-sm">
+            {([["info", "Information", undefined], ["reminders", "Reminders", detail?.reminders.length], ["notes", "Notes", detail?.notes.length], ...(canViewCalls ? [["calls", "Calls", detail?.calls.length] as [typeof editTab, string, number | undefined]] : []), ["activity", "Activity", detail?.activity.length]] as [typeof editTab, string, number | undefined][]).map(([k, label, count]) => (
+              <button key={k} type="button" onClick={() => setEditTab(k)} className={`-mb-px flex items-center gap-1.5 border-b-2 pb-2 font-medium ${editTab === k ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+                {label}{count ? <span className="rounded-full bg-slate-100 px-1.5 text-[11px] text-slate-500">{count}</span> : null}
+              </button>
+            ))}
+          </div>
+        )}
+        {draft && editTab === "info" && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {(() => {
               // Each built-in field as a keyed node; conditionally-hidden ones are
@@ -2380,6 +2394,24 @@ export default function ClientLeads() {
               const ordered = [...leadOrder.filter((k) => k in nodes), ...natural.filter((k) => k in nodes && !leadOrder.includes(k))];
               return ordered.map((k) => nodes[k]).filter(Boolean);
             })()}
+          </div>
+        )}
+        {draft?.id && editTab !== "info" && (
+          <div className="text-sm">
+            {detailLoading && <p className="py-6 text-center text-slate-400">Loading…</p>}
+            {!detailLoading && editTab === "reminders" && ((detail?.reminders ?? []).length ? (
+              <ul className="space-y-2">{detail!.reminders.map((r) => <li key={r.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="text-slate-700">{stripHtml(r.note ?? "") || "Reminder"}</p><p className="mt-0.5 text-xs text-slate-400">{fmtDateTime(r.remind_at)}{r.done ? " · done" : ""}</p></li>)}</ul>
+            ) : <p className="py-6 text-center text-slate-400">No reminders yet.</p>)}
+            {!detailLoading && editTab === "notes" && ((detail?.notes ?? []).length ? (
+              <ul className="space-y-2">{detail!.notes.map((n) => <li key={n.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="text-slate-700">{stripHtml(n.body)}</p><p className="mt-0.5 text-xs text-slate-400">{n.author_name || "Someone"} · {fmtDateTime(n.created_at)}</p></li>)}</ul>
+            ) : <p className="py-6 text-center text-slate-400">No notes yet.</p>)}
+            {!detailLoading && editTab === "calls" && ((detail?.calls ?? []).length ? (
+              <ul className="space-y-2">{detail!.calls.map((c) => <li key={c.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="capitalize text-slate-700">{c.type || "call"}{c.call_status ? ` · ${c.call_status}` : ""}</p><p className="mt-0.5 text-xs text-slate-400">{fmtDuration(c.duration)}{c.call_start ? ` · ${fmtDateTime(c.call_start)}` : ""}</p></li>)}</ul>
+            ) : <p className="py-6 text-center text-slate-400">No calls yet.</p>)}
+            {!detailLoading && editTab === "activity" && ((detail?.activity ?? []).length ? (
+              <ul className="space-y-2">{detail!.activity.map((a) => <li key={a.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="text-slate-700">{a.description || a.action}</p><p className="mt-0.5 text-xs text-slate-400">{a.actor_name ? `${a.actor_name} · ` : ""}{fmtDateTime(a.created_at)}</p></li>)}</ul>
+            ) : <p className="py-6 text-center text-slate-400">No activity yet.</p>)}
+            <p className="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400">Read-only here — to add a reminder or note, open the lead (click its name in the table).</p>
           </div>
         )}
       </Drawer>
