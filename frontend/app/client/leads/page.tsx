@@ -1255,18 +1255,22 @@ export default function ClientLeads() {
   }
 
   async function addReminder() {
-    if (!viewing) return;
+    const lid = viewing?.id ?? draft?.id ?? null; // works from the view OR edit drawer
+    if (!lid) return;
     setReminderErr("");
     if (!remindAt) { setReminderErr("Pick a date and time."); return; }
+    // Date.now() is fine in this click handler (not render); the purity rule can't tell.
+    // eslint-disable-next-line react-hooks/purity
     if (new Date(remindAt).getTime() <= Date.now()) { setReminderErr("Choose a future date and time."); return; }
     if (!stripHtml(reminderNote).trim()) { setReminderErr("Add a note for this reminder."); return; }
     setSavingReminder(true);
     try {
-      await createLeadReminder(viewing.id, { remind_at: remindAt, note: reminderNote });
+      await createLeadReminder(lid, { remind_at: remindAt, note: reminderNote });
       requestNotifyPermission(); // so the alert can fire when it's due
-      setRemindAt(followReminderDefault(viewing)); setReminderNote(""); setComposerKey((k) => k + 1);
+      const leadRef = viewing ?? detail?.lead ?? null;
+      setRemindAt(leadRef ? followReminderDefault(leadRef) : ""); setReminderNote(""); setComposerKey((k) => k + 1);
       toast.success("Reminder set.");
-      await loadDetail(viewing.id);
+      await loadDetail(lid);
       refresh(); // follow-up date is reminder-driven — refresh the table too
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not set reminder.");
@@ -1284,7 +1288,8 @@ export default function ClientLeads() {
     if (!ok) return;
     try {
       await deleteLeadReminder(rid);
-      if (viewing) await loadDetail(viewing.id);
+      const lid = viewing?.id ?? draft?.id ?? null;
+      if (lid) await loadDetail(lid);
       refresh(); // keep the reminder-driven follow-up date in sync in the table
       toast.success("Reminder removed.");
     } catch (e) {
@@ -1311,7 +1316,8 @@ export default function ClientLeads() {
     try {
       await updateLeadReminder(rid, { remind_at: editRemindAt, note: stripHtml(editReminderNote) ? editReminderNote : undefined });
       cancelEditReminder();
-      if (viewing) await loadDetail(viewing.id);
+      const lid = viewing?.id ?? draft?.id ?? null;
+      if (lid) await loadDetail(lid);
       refresh();
       toast.success("Reminder updated.");
     } catch (e) {
@@ -1322,13 +1328,14 @@ export default function ClientLeads() {
   }
 
   async function addNote() {
-    if (!viewing || !stripHtml(noteBody)) return;
+    const lid = viewing?.id ?? draft?.id ?? null; // works from the view OR edit drawer
+    if (!lid || !stripHtml(noteBody)) return;
     setSavingNote(true);
     try {
-      await createLeadNote(viewing.id, noteBody);
+      await createLeadNote(lid, noteBody);
       setNoteBody(""); setComposerKey((k) => k + 1);
       toast.success("Note added.");
-      await loadDetail(viewing.id);
+      await loadDetail(lid);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not add note.");
     } finally {
@@ -1345,7 +1352,8 @@ export default function ClientLeads() {
     if (!ok) return;
     try {
       await deleteLeadNote(nid);
-      if (viewing) await loadDetail(viewing.id);
+      const lid = viewing?.id ?? draft?.id ?? null;
+      if (lid) await loadDetail(lid);
       toast.success("Note removed.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not remove note.");
@@ -1366,7 +1374,8 @@ export default function ClientLeads() {
     try {
       await updateLeadNote(nid, editNoteBody);
       cancelEditNote();
-      if (viewing) await loadDetail(viewing.id);
+      const lid = viewing?.id ?? draft?.id ?? null;
+      if (lid) await loadDetail(lid);
       toast.success("Note updated.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not update note.");
@@ -1779,6 +1788,113 @@ export default function ClientLeads() {
       </>
     );
   }
+
+  // Reminders composer + list — shared by the view drawer and the edit drawer, so
+  // reminders can be added while editing a lead too. Acts on the open lead.
+  const composerLeadId = viewing?.id ?? draft?.id ?? "x";
+  const remindersSection = () => {
+    const secLead = detail?.lead ?? viewing ?? null;
+    return (
+      <section>
+        <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex-1">
+              <span className="mb-1 block text-xs font-medium text-slate-600">Remind me at</span>
+              <input type="datetime-local" min={toLocalInput(new Date())} value={remindAt} onChange={(e) => setRemindAt(e.target.value)} className={inputCls(reminderErr)} />
+            </label>
+            <button onClick={addReminder} disabled={savingReminder} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingReminder ? "Setting…" : "Set reminder"}</button>
+          </div>
+          <div className="mt-2"><RichTextEditor key={`rem-${composerLeadId}-${composerKey}`} initialHTML={reminderNote} onChange={setReminderNote} placeholder="Note (required) — e.g. Call back about pricing" minHeight={80} /></div>
+          {reminderErr && <p className="mt-1 text-xs text-rose-600">{reminderErr}</p>}
+          <p className="mt-1 text-xs text-slate-400">
+            {secLead?.follow_date ? <>Pre-filled from this lead&apos;s follow-up date ({fmtDate(secLead.follow_date)}) — adjust if needed. </> : null}
+            A desktop notification fires at the chosen time while the app is open.
+          </p>
+        </div>
+        <ul className="mt-3 space-y-2">
+          {(detail?.reminders ?? []).map((r) => (
+            <li key={r.id} className="flex items-start gap-3 rounded-lg border border-slate-200 px-3 py-2">
+              <span className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full ${r.notified_at ? "bg-slate-100 text-slate-400" : r.due ? "bg-amber-100 text-amber-600" : "bg-indigo-100 text-indigo-600"}`}>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </span>
+              {editingReminder === r.id ? (
+                <div className="min-w-0 flex-1">
+                  <input type="datetime-local" value={editRemindAt} onChange={(e) => setEditRemindAt(e.target.value)} className={inputCls(editReminderErr)} />
+                  <div className="mt-2"><RichTextEditor key={`rem-edit-${r.id}`} initialHTML={r.note ?? ""} onChange={setEditReminderNote} placeholder="Optional note" minHeight={70} /></div>
+                  {editReminderErr && <p className="mt-1 text-xs text-rose-600">{editReminderErr}</p>}
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button onClick={cancelEditReminder} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+                    <button onClick={() => saveEditReminder(r.id)} disabled={savingReminder} className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingReminder ? "Saving…" : "Save"}</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-slate-800">{fmtDateTime(r.remind_at)}</div>
+                  {stripHtml(r.note ?? "") && <div className="rte-content text-xs text-slate-500" dangerouslySetInnerHTML={{ __html: r.note ?? "" }} />}
+                  <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">{r.notified_at ? "Notified" : r.due ? "Due" : "Upcoming"}</div>
+                </div>
+              )}
+              {r.can_edit && editingReminder !== r.id && (
+                <div className="flex items-center gap-1">
+                  <button onClick={() => startEditReminder(r)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-emerald-50 hover:text-emerald-600" aria-label="Edit reminder">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                  <button onClick={() => removeReminder(r.id)} className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-500" aria-label="Delete reminder">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                </div>
+              )}
+            </li>
+          ))}
+          {detail && detail.reminders.length === 0 && <li className="text-sm text-slate-400">No reminders yet.</li>}
+        </ul>
+      </section>
+    );
+  };
+
+  // Notes composer + list — shared by the view + edit drawers (add notes while editing).
+  const notesSection = () => (
+    <section>
+      <div className="flex items-start gap-2">
+        <div className="flex-1"><RichTextEditor key={`note-${composerLeadId}-${composerKey}`} initialHTML={noteBody} onChange={setNoteBody} placeholder="Add a note about this lead…" minHeight={90} /></div>
+        <button onClick={addNote} disabled={savingNote || !stripHtml(noteBody)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingNote ? "Adding…" : "Add"}</button>
+      </div>
+      <ul className="mt-3 space-y-2">
+        {(detail?.notes ?? []).map((n) => (
+          <li key={n.id} className="rounded-lg border border-slate-200 px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-slate-600">{n.author_name || "Someone"}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-400">{fmtDateTime(n.created_at)}</span>
+                {n.can_edit && editingNote !== n.id && (
+                  <button onClick={() => startEditNote(n)} className="text-slate-400 hover:text-emerald-600" aria-label="Edit note">
+                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 5l4 4m-4-4a2.8 2.8 0 014 4l-9 9-5 1 1-5 9-9z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
+                {n.can_edit && (
+                  <button onClick={() => removeNote(n.id)} className="text-slate-400 hover:text-rose-500" aria-label="Delete note">
+                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M5 7l1 13a1 1 0 001 1h10a1 1 0 001-1l1-13" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                )}
+              </div>
+            </div>
+            {editingNote === n.id ? (
+              <div className="mt-2">
+                <RichTextEditor key={`note-edit-${n.id}`} initialHTML={n.body} onChange={setEditNoteBody} placeholder="Edit note…" minHeight={90} />
+                <div className="mt-2 flex justify-end gap-2">
+                  <button onClick={cancelEditNote} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+                  <button onClick={() => saveEditNote(n.id)} disabled={savingNote || !stripHtml(editNoteBody)} className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">{savingNote ? "Saving…" : "Save"}</button>
+                </div>
+              </div>
+            ) : (
+              <div className="rte-content mt-1 text-sm text-slate-700" dangerouslySetInnerHTML={{ __html: n.body }} />
+            )}
+          </li>
+        ))}
+        {detail && detail.notes.length === 0 && <li className="text-sm text-slate-400">No notes yet.</li>}
+      </ul>
+    </section>
+  );
 
   return (
     <>
@@ -2396,22 +2512,17 @@ export default function ClientLeads() {
             })()}
           </div>
         )}
-        {draft?.id && editTab !== "info" && (
+        {draft?.id && editTab === "reminders" && remindersSection()}
+        {draft?.id && editTab === "notes" && notesSection()}
+        {draft?.id && (editTab === "calls" || editTab === "activity") && (
           <div className="text-sm">
             {detailLoading && <p className="py-6 text-center text-slate-400">Loading…</p>}
-            {!detailLoading && editTab === "reminders" && ((detail?.reminders ?? []).length ? (
-              <ul className="space-y-2">{detail!.reminders.map((r) => <li key={r.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="text-slate-700">{stripHtml(r.note ?? "") || "Reminder"}</p><p className="mt-0.5 text-xs text-slate-400">{fmtDateTime(r.remind_at)}{r.done ? " · done" : ""}</p></li>)}</ul>
-            ) : <p className="py-6 text-center text-slate-400">No reminders yet.</p>)}
-            {!detailLoading && editTab === "notes" && ((detail?.notes ?? []).length ? (
-              <ul className="space-y-2">{detail!.notes.map((n) => <li key={n.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="text-slate-700">{stripHtml(n.body)}</p><p className="mt-0.5 text-xs text-slate-400">{n.author_name || "Someone"} · {fmtDateTime(n.created_at)}</p></li>)}</ul>
-            ) : <p className="py-6 text-center text-slate-400">No notes yet.</p>)}
             {!detailLoading && editTab === "calls" && ((detail?.calls ?? []).length ? (
               <ul className="space-y-2">{detail!.calls.map((c) => <li key={c.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="capitalize text-slate-700">{c.type || "call"}{c.call_status ? ` · ${c.call_status}` : ""}</p><p className="mt-0.5 text-xs text-slate-400">{fmtDuration(c.duration)}{c.call_start ? ` · ${fmtDateTime(c.call_start)}` : ""}</p></li>)}</ul>
             ) : <p className="py-6 text-center text-slate-400">No calls yet.</p>)}
             {!detailLoading && editTab === "activity" && ((detail?.activity ?? []).length ? (
               <ul className="space-y-2">{detail!.activity.map((a) => <li key={a.id} className="rounded-lg border border-slate-100 px-3 py-2"><p className="text-slate-700">{a.description || a.action}</p><p className="mt-0.5 text-xs text-slate-400">{a.actor_name ? `${a.actor_name} · ` : ""}{fmtDateTime(a.created_at)}</p></li>)}</ul>
             ) : <p className="py-6 text-center text-slate-400">No activity yet.</p>)}
-            <p className="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400">Read-only here — to add a reminder or note, open the lead (click its name in the table).</p>
           </div>
         )}
       </Drawer>
