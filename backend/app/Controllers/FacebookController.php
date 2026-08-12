@@ -417,6 +417,14 @@ class FacebookController extends ApiController
             } else {
                 $skipped++;
             }
+            // ingest() persists the advanced round-robin cursor + submission counter
+            // to the DB, but NOT back to this in-memory copy (it takes $form by value
+            // downstream). Reload so the NEXT lead in this batch round-robins to the
+            // next rep and the counter keeps climbing — instead of all repeating.
+            $fresh = (new FbFormModel($db))->where('client_id', $cid)->find((int) $form['id']);
+            if ($fresh) {
+                $form = $fresh;
+            }
             $t = strtotime((string) ($l['created_time'] ?? ''));
             if ($t && $t > $maxTime) {
                 $maxTime = $t;
