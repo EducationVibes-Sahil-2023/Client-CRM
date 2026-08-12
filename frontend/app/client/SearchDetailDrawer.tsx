@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Drawer, fmtDate, fmtDateTime } from "../admin/ui";
 import { getLeadDetail, getTask, getStaff, type LeadDetail, type Task, type Staff } from "../lib/client";
 
@@ -227,16 +228,22 @@ function TeamDetailView({ target, onClose, onOpen }: { target: SearchTarget; onC
 export default function SearchDetailDrawer({ target, onClose, onOpen }: {
   target: SearchTarget | null; onClose: () => void; onOpen: (href: string) => void;
 }) {
-  if (!target) return null;
-  if (target.type === "leads") return <LeadDetailView target={target} onClose={onClose} onOpen={onOpen} />;
-  if (target.type === "tasks") return <TaskDetailView target={target} onClose={onClose} onOpen={onOpen} />;
-  if (target.type === "team") return <TeamDetailView target={target} onClose={onClose} onOpen={onOpen} />;
+  // The search box lives inside the top bar, whose stacking context would trap a
+  // plain fixed drawer under the leads table's sticky "Actions" column. Portalling
+  // to document.body lifts it above everything (like the leads page's own drawer).
+  if (!target || typeof document === "undefined") return null;
 
-  // Fallback for other result types (team, assets, …): basic info + open.
-  return (
+  let content: ReactNode;
+  if (target.type === "leads") content = <LeadDetailView target={target} onClose={onClose} onOpen={onOpen} />;
+  else if (target.type === "tasks") content = <TaskDetailView target={target} onClose={onClose} onOpen={onOpen} />;
+  else if (target.type === "team") content = <TeamDetailView target={target} onClose={onClose} onOpen={onOpen} />;
+  else content = (
+    // Fallback for other result types (assets, …): basic info + open.
     <Drawer open onClose={onClose} title={target.title} subtitle={target.subtitle || undefined} width="max-w-md"
       footer={<div className="flex justify-end"><button onClick={() => onOpen(target.href)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">Open full record</button></div>}>
       <p className="text-sm text-slate-500">Open the full record to see all details.</p>
     </Drawer>
   );
+
+  return createPortal(content, document.body);
 }
