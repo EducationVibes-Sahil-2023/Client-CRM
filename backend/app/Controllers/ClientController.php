@@ -7,6 +7,7 @@ use App\Libraries\GmailService;
 use App\Libraries\GoogleCalendarService;
 use App\Libraries\HtmlSanitizer;
 use App\Libraries\MailerService;
+use App\Libraries\AutoLeadTransfer;
 use App\Libraries\PasswordPolicy;
 use App\Libraries\PushService;
 use App\Libraries\SecondaryDb;
@@ -4595,6 +4596,116 @@ class ClientController extends ApiController
         $this->logActivity('updated', 'settings', null, "Lead transfer mode set to {$mode}");
 
         return $this->respond(['message' => 'Saved', 'mode' => $mode]);
+    }
+
+    /** This client's stored auto-transfer config, normalised over the defaults. */
+    private function autoTransferConfig(): array
+    {
+        $raw = $this->settingsMap()[AutoLeadTransfer::SETTING_KEY] ?? '';
+        $stored = $raw !== '' ? json_decode($raw, true) : [];
+
+        return AutoLeadTransfer::normalise(array_merge(AutoLeadTransfer::DEFAULTS, is_array($stored) ? $stored : []));
+    }
+
+    /**
+     * GET /client/auto-transfer-config — the cron config plus the pickers the admin
+     * needs (trigger statuses + the active counsellor pool).
+     */
+    public function getAutoTransferConfig()
+    {
+        if ($resp = $this->requirePermission('lead_transfer')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        // Trigger statuses = top-level lead statuses (leads.status_id points at these).
+        $statuses = [];
+        foreach ((new LeadStatusModel())->where('client_id', $cid)->orderBy('sequence', 'ASC')->findAll() as $s) {
+            if (! empty($s['parent_id'])) {
+                continue;
+            }
+            $statuses[] = ['id' => (int) $s['id'], 'name' => (string) $s['name']];
+        }
+
+        // Reassignment pool = active team members.
+        $staff = [];
+        foreach ((new ClientStaffModel())->where('client_id', $cid)->orderBy('name', 'ASC')->findAll() as $m) {
+            if ((string) ($m['status'] ?? '') === 'inactive') {
+                continue;
+            }
+            $staff[] = ['id' => (int) $m['id'], 'name' => (string) $m['name']];
+        }
+
+        return $this->respond([
+            'config'   => $this->autoTransferConfig(),
+            'statuses' => $statuses,
+            'staff'    => $staff,
+        ]);
+    }
+
+    /** POST /client/auto-transfer-config — admin saves the cron rules. */
+    public function saveAutoTransferConfig()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can change auto-transfer settings.');
+        }
+
+        $enabled   = (int) $this->input('enabled') === 1;
+        $statusIds = array_values(array_filter(array_map('intval', (array) $this->input('status_ids'))));
+
+        // A trigger status is mandatory when enabling — without it the rule would
+        // match on day/call count alone, which is too broad to run automatically.
+        if ($enabled && ! $statusIds) {
+            return $this->failValidationErrors(['status_ids' => 'Select at least one trigger status before enabling.']);
+        }
+
+        $next = AutoLeadTransfer::normalise([
+            'enabled'              => $enabled,
+            'days_since_assigned'  => (int) $this->input('days_since_assigned'),
+            'days_since_created'   => (int) $this->input('days_since_created'),
+            'max_calls'            => (int) $this->input('max_calls'),
+            'count_connected_only' => (int) $this->input('count_connected_only') === 1,
+            'max_updates'          => (int) $this->input('max_updates'),
+            'status_ids'           => $statusIds,
+            'max_transfers'        => (int) $this->input('max_transfers'),
+            'target_staff_ids'     => array_values(array_filter(array_map('intval', (array) $this->input('target_staff_ids')))),
+            // Preserve the round-robin cursor across edits so fairness isn't reset.
+            'assign_cursor'        => $this->autoTransferConfig()['assign_cursor'],
+        ]);
+
+        $this->setSetting(AutoLeadTransfer::SETTING_KEY, json_encode($next));
+        $this->logActivity('updated', 'settings', null, 'Auto lead-transfer ' . ($enabled ? 'enabled' : 'disabled'));
+
+        return $this->respond(['message' => 'Saved', 'config' => $next]);
+    }
+
+    /**
+     * POST /client/auto-transfer-run — run the rules once for this client now.
+     * `dry_run=1` previews matches without moving anything (the default is a real
+     * run). Uses the saved config so "Run now" behaves exactly like the cron.
+     */
+    public function runAutoTransferNow()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can run auto-transfer.');
+        }
+        $cid    = $this->clientId();
+        $dryRun = (int) $this->input('dry_run') === 1;
+
+        try {
+            $db  = (new TenantManager())->forClient($cid);
+            $res = AutoLeadTransfer::run($cid, $db, $this->autoTransferConfig(), $dryRun);
+        } catch (\Throwable $e) {
+            log_message('error', 'Auto-transfer run failed: ' . $e->getMessage());
+
+            return $this->failServerError('Could not run auto-transfer.');
+        }
+
+        if (! $dryRun && $res['transferred'] > 0) {
+            $this->logActivity('transferred', 'lead', null, "Auto-transfer moved {$res['transferred']} lead(s)");
+        }
+
+        return $this->respond(['result' => $res, 'dry_run' => $dryRun]);
     }
 
     // ============================================================ VISITORS

@@ -19,13 +19,15 @@ Client **#1** = `crm_education_vibes`. Most commands take `--client=ID` to scope
 | `php spark fb:poll` | Pull new Facebook Lead Ads leads for every client and ingest them. Backfill/safety-net alongside the real-time webhook (idempotent on `leadgen_id`). | `*/5 * * * *` |
 | `php spark sheets:sync` | Sync every client's connected Google Sheets into leads (create/update + write back "CRM Status"). | `*/5 * * * *` |
 | `php spark backup:run [--force] [--main-only]` | Run scheduled DB backups to `writable/backups` when due. `--force` ignores the schedule; `--main-only` skips tenant DBs. | `0 2 * * *` |
+| `php spark leadtransfer:auto [--client=ID] [--dry-run] [--force]` | Auto-transfer stale leads to another counsellor per each client's admin rules (Auto Lead Transfer page). Moves leads matching: assigned N+ days ago, (optional) created N+ days ago, dialled fewer than M times by the assigned rep, (optional) at most X activity updates, in a selected status, transferred fewer than K times. Skips clients who haven't enabled it (`--force` overrides). | `0 6 * * *` |
 
 Example crontab lines:
 
 ```cron
-*/5 * * * *  cd /var/www/crm/backend && php spark fb:poll    >> writable/logs/fb-poll.log 2>&1
-*/5 * * * *  cd /var/www/crm/backend && php spark sheets:sync >> writable/logs/sheets-sync.log 2>&1
-0   2 * * *  cd /var/www/crm/backend && php spark backup:run  >> writable/logs/backup.log 2>&1
+*/5 * * * *  cd /var/www/crm/backend && php spark fb:poll          >> writable/logs/fb-poll.log 2>&1
+*/5 * * * *  cd /var/www/crm/backend && php spark sheets:sync       >> writable/logs/sheets-sync.log 2>&1
+0   2 * * *  cd /var/www/crm/backend && php spark backup:run        >> writable/logs/backup.log 2>&1
+0   6 * * *  cd /var/www/crm/backend && php spark leadtransfer:auto >> writable/logs/lead-transfer.log 2>&1
 ```
 
 ---

@@ -35,6 +35,7 @@ export const icons: Record<string, string> = {
   excel: "M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V9l-6-6H9zM13 3v6h6M9 13l3 3m0-3l-3 3",
   facebook: "M18 2h-3a5 5 0 00-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 011-1h3z",
   googlesheets: "M5 3h9l5 5v13a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1zm9 0v5h5M8 12h8M8 15h8M8 18h5",
+  autotransfer: "M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4",
 };
 
 export interface NavItem {
@@ -94,6 +95,7 @@ export const setupNav: NavItem[] = [
   { key: "excel", href: "/client/excel", label: "Excel / Data", icon: "excel", module: "data_import" },
   { key: "facebook", href: "/client/facebook", label: "Facebook Leads", icon: "facebook", adminOnly: true },
   { key: "google-sheets", href: "/client/google-sheets", label: "Google Sheets", icon: "googlesheets", adminOnly: true },
+  { key: "auto-transfer", href: "/client/auto-transfer", label: "Auto Lead Transfer", icon: "autotransfer", module: "lead_transfer", adminOnly: true },
   { key: "email-config", href: "/client/email-config", label: "Email Setup", icon: "email", feature: "email_config", adminOnly: true },
   { key: "appearance", href: "/client/appearance", label: "Appearance", icon: "palette", adminOnly: true },
   { key: "settings", href: "/client/settings", label: "Dashboard Config", icon: "config", adminOnly: true },
