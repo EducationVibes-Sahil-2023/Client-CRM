@@ -75,7 +75,7 @@ function LeadDetailView({ target, onClose, onOpen }: { target: SearchTarget; onC
       footer={
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
-          <button onClick={() => onOpen(target.href)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">Open full record</button>
+          <button onClick={() => onOpen(`/client/leads?edit=${target.id}`)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">Edit</button>
         </div>
       }
     >

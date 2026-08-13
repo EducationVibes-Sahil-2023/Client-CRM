@@ -148,7 +148,9 @@ function GlobalSearch() {
     return () => clearTimeout(t);
   }, [q]);
 
-  // Click a result → open the quick-view modal (peek without leaving the page).
+  // Click a result → open its detail modal in place, on whatever page you're on
+  // (no navigation). The lead's modal shows its info + reminders/notes/calls/activity
+  // and an Edit action; tasks/team show their own detail.
   function openView(type: string, it: SearchItem) {
     setOpen(false);
     setView({ type, id: it.id, title: it.title, subtitle: it.subtitle, href: it.href });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   getLeads, createLead, updateLead, deleteLead, importLeads, bulkUpdateLeads, getLeadImportSetup,
   getLeadsSetup, getStaff, getMe, getLeadAnalytics, getCallSyncStatus, getLeadCallSummary,
@@ -548,6 +549,8 @@ function activityStyle(action: string, description?: string | null): { ring: str
 export default function ClientLeads() {
   const toast = useToast();
   const confirm = useConfirm();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { can, hasFeature, defaultPageSize, isAgent } = useClient();
   // The Calls tab/column needs both the plan feature AND the call-tracking
   // permission (admins implicitly hold it; staff must be granted it).
@@ -1177,6 +1180,23 @@ export default function ClientLeads() {
     loadDetail(l.id);
   }
   function closeView() { setViewing(null); setDetail(null); }
+
+  // Open a lead arriving via ?view=ID or ?edit=ID (e.g. clicking a lead in the
+  // top-bar global search). We fetch the full lead, open its view/edit modal, then
+  // strip the param so it doesn't re-trigger on refresh.
+  const viewParam = searchParams.get("view");
+  const editParam = searchParams.get("edit");
+  useEffect(() => {
+    const vid = Number(viewParam);
+    const eid = Number(editParam);
+    if (!vid && !eid) return;
+    getLeadDetail(vid || eid)
+      .then((d) => (eid ? openEdit(d.lead) : openView(d.lead)))
+      .catch(() => toast.error("Could not open that lead."));
+    router.replace("/client/leads");
+    // openView/openEdit/router/toast are stable enough; re-run only on id change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewParam, editParam]);
 
   // ---- Lead → Applicant conversion ----
   function openConvert(l: Lead) {
