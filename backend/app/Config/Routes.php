@@ -240,8 +240,9 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('lead-transfers/(:num)/reject', 'ClientController::rejectLeadTransfer/$1');
         $routes->post('lead-transfers/(:num)/cancel', 'ClientController::cancelLeadTransfer/$1');
         $routes->post('lead-transfer-mode', 'ClientController::saveLeadTransferMode');
-        $routes->get('auto-transfer-config', 'ClientController::getAutoTransferConfig');
-        $routes->post('auto-transfer-config', 'ClientController::saveAutoTransferConfig');
+        $routes->get('auto-transfer-rules', 'ClientController::getAutoTransferRules');
+        $routes->post('auto-transfer-rules', 'ClientController::saveAutoTransferRule');
+        $routes->post('auto-transfer-rules/(:num)/delete', 'ClientController::deleteAutoTransferRule/$1');
         $routes->post('auto-transfer-run', 'ClientController::runAutoTransferNow');
     });
 

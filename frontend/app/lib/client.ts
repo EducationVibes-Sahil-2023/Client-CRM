@@ -753,36 +753,85 @@ export const cancelLeadTransfer = (id: number) => clientPost(`/lead-transfers/${
 export const saveLeadTransferMode = (mode: "direct" | "approval") =>
   clientPost<{ message: string; mode: "direct" | "approval" }>("/lead-transfer-mode", { mode });
 
-// ---- Auto lead-transfer (cron configuration) ----
-export interface AutoTransferConfig {
-  enabled: boolean;
-  days_since_assigned: number;
+// ---- Auto lead-transfer (rules) ----
+export type AutoTransferRuleType = "transfer" | "distribute";
+export interface AutoTransferRuleConfig {
+  status_ids: number[];
+  lead_type_ids: number[];
+  source_ids: number[];
+  exclude_mass_assigned: boolean;
+  created_after: string;          // 'YYYY-MM-DD' or ''
   days_since_created: number;
   max_calls: number;
   count_connected_only: boolean;
   max_updates: number;
-  status_ids: number[];
+  assign_age_op: "gte" | "lt";
+  assign_age_value: number;
+  assign_age_unit: "calendar" | "working";
   max_transfers: number;
+  include_staff_ids: number[];
+  exclude_staff_ids: number[];
   target_staff_ids: number[];
-  assign_cursor: number;
 }
-export interface AutoTransferRun {
-  ran: boolean;
+export interface AutoTransferRule {
+  id: number;
+  name: string;
+  rule_type: AutoTransferRuleType;
+  enabled: boolean;
+  sequence: number;
+  config: AutoTransferRuleConfig;
+}
+export interface AutoTransferRunRule {
+  id: number;
+  name: string;
+  rule_type: string;
   reason: string | null;
   scanned: number;
-  transferred: number;
+  acted: number;
+  skipped_age: number;
   skipped_calls: number;
   skipped_updates: number;
   skipped_cap: number;
   skipped_pool: number;
+  skipped_dedupe: number;
   details: { lead_id: number; lead: string; from: string | null; to: string }[];
 }
-export const getAutoTransferConfig = () =>
-  clientGet<{ config: AutoTransferConfig; statuses: { id: number; name: string }[]; staff: { id: number; name: string }[] }>("/auto-transfer-config");
-export const saveAutoTransferConfig = (b: Omit<AutoTransferConfig, "assign_cursor">) =>
-  clientPost<{ message: string; config: AutoTransferConfig }>("/auto-transfer-config", b);
-export const runAutoTransferNow = (dryRun: boolean) =>
-  clientPost<{ result: AutoTransferRun; dry_run: boolean }>("/auto-transfer-run", { dry_run: dryRun ? 1 : 0 });
+export interface AutoTransferRunResult {
+  dry_run: boolean;
+  total: number;
+  rules: AutoTransferRunRule[];
+}
+export type IdName = { id: number; name: string };
+export interface AutoTransferBundle {
+  rules: AutoTransferRule[];
+  statuses: IdName[];
+  types: IdName[];
+  sources: IdName[];
+  staff: IdName[];
+}
+export type AutoTransferRuleInput = {
+  id?: number;
+  name: string;
+  rule_type: AutoTransferRuleType;
+  enabled: boolean;
+  sequence: number;
+} & AutoTransferRuleConfig;
+
+export const getAutoTransferRules = () => clientGet<AutoTransferBundle>("/auto-transfer-rules");
+export const saveAutoTransferRule = (b: AutoTransferRuleInput) =>
+  clientPost<{ message: string; id: number }>("/auto-transfer-rules", {
+    ...b,
+    enabled: b.enabled ? 1 : 0,
+    count_connected_only: b.count_connected_only ? 1 : 0,
+    exclude_mass_assigned: b.exclude_mass_assigned ? 1 : 0,
+  });
+export const deleteAutoTransferRule = (id: number) =>
+  clientPost<{ message: string }>(`/auto-transfer-rules/${id}/delete`);
+export const runAutoTransferNow = (dryRun: boolean, ruleId?: number) =>
+  clientPost<{ result: AutoTransferRunResult; dry_run: boolean }>("/auto-transfer-run", {
+    dry_run: dryRun ? 1 : 0,
+    ...(ruleId ? { rule_id: ruleId } : {}),
+  });
 
 // ---- Visitor requests ----
 export interface VisitorType { id: number; name: string; color: string; sequence: number; enabled: number | boolean }

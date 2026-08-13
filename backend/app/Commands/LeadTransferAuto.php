@@ -9,39 +9,36 @@ use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 
 /**
- * Auto lead-transfer — reassign stale leads to another counsellor per each
- * client's admin-configured rules. Wire to system cron; running it DAILY is
- * usually right (the rules are day-based), but hourly is harmless:
+ * Auto lead-transfer — apply each client's enabled auto-transfer RULES (built on
+ * the "Auto Lead Transfer" page). Wire to system cron; running it DAILY is usually
+ * right (rules are day-based), but hourly is harmless:
  *
  *   0 6 * * *  cd /path/to/backend && php spark leadtransfer:auto >> writable/logs/lead-transfer.log 2>&1
  *
- *   php spark leadtransfer:auto                # every enabled client
+ *   php spark leadtransfer:auto                # every client's enabled rules
  *   php spark leadtransfer:auto --client=3     # just one client
  *   php spark leadtransfer:auto --dry-run      # report matches, change nothing
- *   php spark leadtransfer:auto --client=3 --dry-run --force   # ignore the enabled flag
  *
- * Each run reads that client's `auto_transfer_config` setting and, if enabled,
- * moves every lead that matches (assigned N+ days ago, fewer than M calls by the
- * assigned rep, status in the selected set, transferred fewer than K times) to
- * the next counsellor in the pool. Disabled clients are skipped unless --force.
+ * Each enabled rule either TRANSFERS matching already-assigned leads to another
+ * counsellor, or DISTRIBUTES matching unassigned leads — per its criteria (status,
+ * type, source, created date/age, call count, assignment age, activity count,
+ * include/exclude staff, transfer cap). A lead is never moved twice in one run.
  */
 class LeadTransferAuto extends BaseCommand
 {
     protected $group       = 'Leads';
     protected $name        = 'leadtransfer:auto';
-    protected $description = 'Auto-transfer stale leads to another counsellor per each client\'s configured rules (wire to cron).';
-    protected $usage       = 'leadtransfer:auto [--client=ID] [--dry-run] [--force]';
+    protected $description = 'Apply each client\'s enabled auto lead-transfer rules (wire to cron).';
+    protected $usage       = 'leadtransfer:auto [--client=ID] [--dry-run]';
     protected $options     = [
         '--client'  => 'Only process this client id.',
-        '--dry-run' => 'Report what would transfer without changing anything.',
-        '--force'   => 'Run even for clients whose auto-transfer is disabled.',
+        '--dry-run' => 'Report what would move without changing anything.',
     ];
 
     public function run(array $params)
     {
         $only   = isset($params['client']) ? (int) $params['client'] : (int) (CLI::getOption('client') ?? 0);
         $dryRun = array_key_exists('dry-run', $params) || CLI::getOption('dry-run') !== null;
-        $force  = array_key_exists('force', $params) || CLI::getOption('force') !== null;
 
         $clients = (new ClientModel())->findAll();
         if ($only) {
@@ -70,34 +67,34 @@ class LeadTransferAuto extends BaseCommand
                 continue;
             }
 
-            $cfg = AutoLeadTransfer::readConfig((int) $c['id'], $db);
-            if (! $cfg['enabled'] && ! $force) {
-                continue; // silently skip clients who haven't turned it on
-            }
-
             try {
-                $res = AutoLeadTransfer::run((int) $c['id'], $db, $cfg, $dryRun);
+                $res = AutoLeadTransfer::runAll((int) $c['id'], $db, $dryRun);
             } catch (\Throwable $e) {
                 CLI::error("Client #{$c['id']}: run failed — " . $e->getMessage());
                 continue;
             }
+            if (! $res['rules']) {
+                continue; // no enabled rules for this client
+            }
 
             CLI::write("Client #{$c['id']} — {$c['db_name']}", 'cyan');
-            if ($res['reason']) {
-                CLI::write('  • skipped: ' . $res['reason'], 'yellow');
-                continue;
+            $verb = $dryRun ? 'would move' : 'moved';
+            foreach ($res['rules'] as $r) {
+                if ($r['reason']) {
+                    CLI::write("  • [{$r['name']}] skipped: {$r['reason']}", 'yellow');
+                    continue;
+                }
+                CLI::write("  • [{$r['name']}] ({$r['rule_type']}) scanned {$r['scanned']}; {$verb} {$r['acted']}"
+                    . "; skipped (age {$r['skipped_age']}, calls {$r['skipped_calls']}, updates {$r['skipped_updates']}, cap {$r['skipped_cap']}, pool {$r['skipped_pool']}, dup {$r['skipped_dedupe']})",
+                    $r['acted'] > 0 ? 'green' : 'dark_gray');
+                foreach ($r['details'] as $d) {
+                    CLI::write("      → {$d['lead']}: " . ($d['from'] ?? 'Unassigned') . " ⇒ {$d['to']}", 'dark_gray');
+                }
             }
-            $verb = $dryRun ? 'would transfer' : 'transferred';
-            CLI::write("  • scanned {$res['scanned']} lead(s); {$verb} {$res['transferred']}"
-                . "; skipped (calls {$res['skipped_calls']}, updates {$res['skipped_updates']}, cap {$res['skipped_cap']}, pool {$res['skipped_pool']})",
-                $res['transferred'] > 0 ? 'green' : 'dark_gray');
-            foreach ($res['details'] as $d) {
-                CLI::write("      → {$d['lead']}: " . ($d['from'] ?? 'Unassigned') . " ⇒ {$d['to']}", 'dark_gray');
-            }
-            $grandTotal += $res['transferred'];
+            $grandTotal += $res['total'];
         }
 
-        CLI::write(($dryRun ? 'Dry run complete — ' : 'Done — ') . "{$grandTotal} lead(s) " . ($dryRun ? 'would move.' : 'transferred.'), 'green');
+        CLI::write(($dryRun ? 'Dry run complete — ' : 'Done — ') . "{$grandTotal} lead(s) " . ($dryRun ? 'would move.' : 'moved.'), 'green');
 
         return EXIT_SUCCESS;
     }

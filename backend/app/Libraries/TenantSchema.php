@@ -37,6 +37,7 @@ class TenantSchema
         'fb_forms',
         'sheet_syncs',
         'lead_transfers',
+        'auto_transfer_rules',
         'lead_reminders',
         'lead_notes',
         'visitor_types',

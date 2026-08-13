@@ -15,6 +15,7 @@ use App\Libraries\TenantManager;
 use App\Models\ActivityLogModel;
 use App\Models\AnnouncementModel;
 use App\Models\ApplicantModel;
+use App\Models\AutoTransferRuleModel;
 use App\Models\AnnouncementReadModel;
 use App\Models\AppNotificationModel;
 use App\Models\AssetAllocationModel;
@@ -4493,7 +4494,7 @@ class ClientController extends ApiController
             $row['decided_at'] = date('Y-m-d H:i:s');
             $id                = $model->insert($row);
 
-            (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d H:i:s')]);
+            (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d H:i:s'), 'mass_assigned' => 0]);
             $this->logActivity('transferred', 'lead', $leadId, "Lead transferred to {$toName}");
             $this->notifyStaff($toId, 'lead_transfer', 'Lead assigned to you', "{$leadName} was transferred to you.", '/client/leads');
 
@@ -4524,7 +4525,7 @@ class ClientController extends ApiController
             return $this->failNotFound('Pending transfer not found');
         }
         $model->update($id, ['status' => 'approved', 'decided_by' => $this->actorId() ?: null, 'decided_at' => date('Y-m-d H:i:s'), 'decision_note' => trim((string) $this->input('note')) ?: null]);
-        (new LeadModel())->update((int) $t['lead_id'], ['assigned_to' => (int) $t['to_staff_id'], 'assigned_date' => date('Y-m-d H:i:s'), 'pending_transfer' => 0]);
+        (new LeadModel())->update((int) $t['lead_id'], ['assigned_to' => (int) $t['to_staff_id'], 'assigned_date' => date('Y-m-d H:i:s'), 'pending_transfer' => 0, 'mass_assigned' => 0]);
 
         $leadName = $this->leadLabel($cid, (int) $t['lead_id']);
         $this->logActivity('transfer_approved', 'lead', (int) $t['lead_id'], 'Transfer approved');
@@ -4598,27 +4599,56 @@ class ClientController extends ApiController
         return $this->respond(['message' => 'Saved', 'mode' => $mode]);
     }
 
-    /** This client's stored auto-transfer config, normalised over the defaults. */
-    private function autoTransferConfig(): array
+    /** Read + validate the criteria fields posted for a rule into a config array. */
+    private function autoTransferConfigInput(): array
     {
-        $raw = $this->settingsMap()[AutoLeadTransfer::SETTING_KEY] ?? '';
-        $stored = $raw !== '' ? json_decode($raw, true) : [];
-
-        return AutoLeadTransfer::normalise(array_merge(AutoLeadTransfer::DEFAULTS, is_array($stored) ? $stored : []));
+        return AutoLeadTransfer::normaliseConfig([
+            'status_ids'            => (array) $this->input('status_ids'),
+            'lead_type_ids'         => (array) $this->input('lead_type_ids'),
+            'source_ids'            => (array) $this->input('source_ids'),
+            'exclude_mass_assigned' => (int) $this->input('exclude_mass_assigned') === 1,
+            'created_after'         => (string) $this->input('created_after'),
+            'days_since_created'    => (int) $this->input('days_since_created'),
+            'max_calls'             => (int) $this->input('max_calls'),
+            'count_connected_only'  => (int) $this->input('count_connected_only') === 1,
+            'max_updates'           => (int) $this->input('max_updates'),
+            'assign_age_op'         => (string) $this->input('assign_age_op'),
+            'assign_age_value'      => (int) $this->input('assign_age_value'),
+            'assign_age_unit'       => (string) $this->input('assign_age_unit'),
+            'max_transfers'         => (int) $this->input('max_transfers'),
+            'include_staff_ids'     => (array) $this->input('include_staff_ids'),
+            'exclude_staff_ids'     => (array) $this->input('exclude_staff_ids'),
+            'target_staff_ids'      => (array) $this->input('target_staff_ids'),
+        ]);
     }
 
     /**
-     * GET /client/auto-transfer-config — the cron config plus the pickers the admin
-     * needs (trigger statuses + the active counsellor pool).
+     * GET /client/auto-transfer-rules — every rule (criteria decoded) plus the
+     * pickers the admin needs (statuses, lead types, sources, active staff).
      */
-    public function getAutoTransferConfig()
+    public function getAutoTransferRules()
     {
         if ($resp = $this->requirePermission('lead_transfer')) {
             return $resp;
         }
         $cid = $this->clientId();
 
-        // Trigger statuses = top-level lead statuses (leads.status_id points at these).
+        // Seed the legacy single-config into a first rule (one-time) so nothing is lost.
+        AutoLeadTransfer::readRules($cid, (new TenantManager())->forClient($cid), false);
+
+        $rules = [];
+        foreach ((new AutoTransferRuleModel())->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->findAll() as $r) {
+            $rules[] = [
+                'id'        => (int) $r['id'],
+                'name'      => (string) $r['name'],
+                'rule_type' => (string) $r['rule_type'],
+                'enabled'   => (int) $r['enabled'] === 1,
+                'sequence'  => (int) $r['sequence'],
+                'config'    => AutoLeadTransfer::ruleConfig($r),
+            ];
+        }
+
+        // Top-level lead statuses (leads.status_id points at these).
         $statuses = [];
         foreach ((new LeadStatusModel())->where('client_id', $cid)->orderBy('sequence', 'ASC')->findAll() as $s) {
             if (! empty($s['parent_id'])) {
@@ -4626,8 +4656,9 @@ class ClientController extends ApiController
             }
             $statuses[] = ['id' => (int) $s['id'], 'name' => (string) $s['name']];
         }
+        $types = array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadTypeModel::class, $cid));
+        $sources = array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadSourceModel::class, $cid));
 
-        // Reassignment pool = active team members.
         $staff = [];
         foreach ((new ClientStaffModel())->where('client_id', $cid)->orderBy('name', 'ASC')->findAll() as $m) {
             if ((string) ($m['status'] ?? '') === 'inactive') {
@@ -4637,52 +4668,83 @@ class ClientController extends ApiController
         }
 
         return $this->respond([
-            'config'   => $this->autoTransferConfig(),
+            'rules'    => $rules,
             'statuses' => $statuses,
+            'types'    => $types,
+            'sources'  => $sources,
             'staff'    => $staff,
         ]);
     }
 
-    /** POST /client/auto-transfer-config — admin saves the cron rules. */
-    public function saveAutoTransferConfig()
+    /** POST /client/auto-transfer-rules — create or update a rule (admin only). */
+    public function saveAutoTransferRule()
     {
         if (! $this->isAdmin()) {
-            return $this->failForbidden('Only an admin can change auto-transfer settings.');
+            return $this->failForbidden('Only an admin can change auto-transfer rules.');
+        }
+        $cid  = $this->clientId();
+        $id   = (int) $this->input('id');
+        $name = trim((string) $this->input('name'));
+        $type = (string) $this->input('rule_type') === 'distribute' ? 'distribute' : 'transfer';
+        $enabled = (int) $this->input('enabled') === 1;
+        $cfg  = $this->autoTransferConfigInput();
+
+        if ($name === '') {
+            return $this->failValidationErrors(['name' => 'Give the rule a name.']);
+        }
+        // An enabled rule must narrow by at least one of status / type / source,
+        // otherwise it would match far too broadly to run automatically.
+        if ($enabled && ! $cfg['status_ids'] && ! $cfg['lead_type_ids'] && ! $cfg['source_ids']) {
+            return $this->failValidationErrors(['status_ids' => 'Pick at least one status, lead type, or source before enabling.']);
         }
 
-        $enabled   = (int) $this->input('enabled') === 1;
-        $statusIds = array_values(array_filter(array_map('intval', (array) $this->input('status_ids'))));
+        $model = new AutoTransferRuleModel();
+        $row   = [
+            'client_id' => $cid,
+            'name'      => $name,
+            'rule_type' => $type,
+            'enabled'   => $enabled ? 1 : 0,
+            'sequence'  => (int) $this->input('sequence'),
+            'config'    => json_encode($cfg),
+        ];
 
-        // A trigger status is mandatory when enabling — without it the rule would
-        // match on day/call count alone, which is too broad to run automatically.
-        if ($enabled && ! $statusIds) {
-            return $this->failValidationErrors(['status_ids' => 'Select at least one trigger status before enabling.']);
+        if ($id > 0) {
+            $existing = $model->where('client_id', $cid)->find($id);
+            if (! $existing) {
+                return $this->failNotFound('Rule not found');
+            }
+            $model->update($id, $row); // assign_cursor preserved (not in $row)
+        } else {
+            $row['assign_cursor'] = 0;
+            $id                   = (int) $model->insert($row);
         }
+        $this->logActivity('updated', 'settings', null, "Auto-transfer rule '{$name}' saved");
 
-        $next = AutoLeadTransfer::normalise([
-            'enabled'              => $enabled,
-            'days_since_assigned'  => (int) $this->input('days_since_assigned'),
-            'days_since_created'   => (int) $this->input('days_since_created'),
-            'max_calls'            => (int) $this->input('max_calls'),
-            'count_connected_only' => (int) $this->input('count_connected_only') === 1,
-            'max_updates'          => (int) $this->input('max_updates'),
-            'status_ids'           => $statusIds,
-            'max_transfers'        => (int) $this->input('max_transfers'),
-            'target_staff_ids'     => array_values(array_filter(array_map('intval', (array) $this->input('target_staff_ids')))),
-            // Preserve the round-robin cursor across edits so fairness isn't reset.
-            'assign_cursor'        => $this->autoTransferConfig()['assign_cursor'],
-        ]);
+        return $this->respond(['message' => 'Saved', 'id' => $id]);
+    }
 
-        $this->setSetting(AutoLeadTransfer::SETTING_KEY, json_encode($next));
-        $this->logActivity('updated', 'settings', null, 'Auto lead-transfer ' . ($enabled ? 'enabled' : 'disabled'));
+    /** POST /client/auto-transfer-rules/{id}/delete — soft-delete a rule. */
+    public function deleteAutoTransferRule(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can delete auto-transfer rules.');
+        }
+        $cid   = $this->clientId();
+        $model = new AutoTransferRuleModel();
+        $rule  = $model->where('client_id', $cid)->find($id);
+        if (! $rule) {
+            return $this->failNotFound('Rule not found');
+        }
+        $model->delete($id);
+        $this->logActivity('deleted', 'settings', null, "Auto-transfer rule '{$rule['name']}' deleted");
 
-        return $this->respond(['message' => 'Saved', 'config' => $next]);
+        return $this->respond(['message' => 'Deleted']);
     }
 
     /**
      * POST /client/auto-transfer-run — run the rules once for this client now.
-     * `dry_run=1` previews matches without moving anything (the default is a real
-     * run). Uses the saved config so "Run now" behaves exactly like the cron.
+     * `dry_run=1` previews matches without moving anything; `rule_id` runs just
+     * that one rule (even if disabled). Mirrors the cron exactly.
      */
     public function runAutoTransferNow()
     {
@@ -4691,18 +4753,19 @@ class ClientController extends ApiController
         }
         $cid    = $this->clientId();
         $dryRun = (int) $this->input('dry_run') === 1;
+        $ruleId = (int) $this->input('rule_id') ?: null;
 
         try {
             $db  = (new TenantManager())->forClient($cid);
-            $res = AutoLeadTransfer::run($cid, $db, $this->autoTransferConfig(), $dryRun);
+            $res = AutoLeadTransfer::runAll($cid, $db, $dryRun, $ruleId);
         } catch (\Throwable $e) {
             log_message('error', 'Auto-transfer run failed: ' . $e->getMessage());
 
             return $this->failServerError('Could not run auto-transfer.');
         }
 
-        if (! $dryRun && $res['transferred'] > 0) {
-            $this->logActivity('transferred', 'lead', null, "Auto-transfer moved {$res['transferred']} lead(s)");
+        if (! $dryRun && $res['total'] > 0) {
+            $this->logActivity('transferred', 'lead', null, "Auto-transfer moved {$res['total']} lead(s)");
         }
 
         return $this->respond(['result' => $res, 'dry_run' => $dryRun]);
@@ -5033,8 +5096,11 @@ class ClientController extends ApiController
         $newAssigned = (int) ($data['assigned_to'] ?? 0);
         if ($newAssigned === 0) {
             $data['assigned_date'] = null;
+            $data['mass_assigned'] = 0;
         } elseif ($newAssigned !== $oldAssigned) {
             $data['assigned_date'] = date('Y-m-d H:i:s');
+            // A deliberate single reassignment is no longer a "mass" assignment.
+            $data['mass_assigned'] = 0;
         } else {
             unset($data['assigned_date']);
         }
@@ -5239,6 +5305,9 @@ class ClientController extends ApiController
                 $cursor++;
                 $data['assigned_to']   = $assignTo;
                 $data['assigned_date'] = $assignTo ? $assignWhen : null;
+                // Bulk reassignment IS a "mass assignment" (auto-transfer rules can
+                // exclude these); an unassign clears the flag.
+                $data['mass_assigned'] = $assignTo ? 1 : 0;
                 if ($assignTo && $assignTo !== (int) ($lead['assigned_to'] ?? 0)) {
                     $perAssignee[$assignTo] = ($perAssignee[$assignTo] ?? 0) + 1;
                 }
@@ -5487,6 +5556,9 @@ class ClientController extends ApiController
                 'reference_name' => trim((string) ($row['reference_name'] ?? '')) ?: null,
                 'email'          => $email !== '' ? $email : null,
                 'assigned_to'    => $assignTo,
+                // Round-robin distribution = mass assignment; an explicit per-row
+                // "Assigned to" is a deliberate assignment, so not flagged.
+                'mass_assigned'  => (! $rowAssign && $assignTo) ? 1 : 0,
                 'assigned_date'  => $assignTo ? $now : null,
                 'city'           => trim((string) ($row['city'] ?? '')) ?: null,
                 'state'          => trim((string) ($row['state'] ?? '')) ?: null,

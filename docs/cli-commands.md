@@ -19,7 +19,7 @@ Client **#1** = `crm_education_vibes`. Most commands take `--client=ID` to scope
 | `php spark fb:poll` | Pull new Facebook Lead Ads leads for every client and ingest them. Backfill/safety-net alongside the real-time webhook (idempotent on `leadgen_id`). | `*/5 * * * *` |
 | `php spark sheets:sync` | Sync every client's connected Google Sheets into leads (create/update + write back "CRM Status"). | `*/5 * * * *` |
 | `php spark backup:run [--force] [--main-only]` | Run scheduled DB backups to `writable/backups` when due. `--force` ignores the schedule; `--main-only` skips tenant DBs. | `0 2 * * *` |
-| `php spark leadtransfer:auto [--client=ID] [--dry-run] [--force]` | Auto-transfer stale leads to another counsellor per each client's admin rules (Auto Lead Transfer page). Moves leads matching: assigned N+ days ago, (optional) created N+ days ago, dialled fewer than M times by the assigned rep, (optional) at most X activity updates, in a selected status, transferred fewer than K times. Skips clients who haven't enabled it (`--force` overrides). | `0 6 * * *` |
+| `php spark leadtransfer:auto [--client=ID] [--dry-run]` | Apply each client's enabled auto lead-transfer **rules** (Auto Lead Transfer page). Each rule transfers matching already-assigned leads to another counsellor, or distributes matching unassigned leads — by status/type/source, created date/age, call count, assignment age (working or calendar days), activity count, include/exclude staff, and a transfer cap. A lead is never moved twice per run. | `0 6 * * *` |
 
 Example crontab lines:
 
