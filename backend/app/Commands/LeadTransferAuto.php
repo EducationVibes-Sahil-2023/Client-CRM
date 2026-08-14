@@ -3,26 +3,28 @@
 namespace App\Commands;
 
 use App\Libraries\AutoLeadTransfer;
+use App\Libraries\LeadNotify;
 use App\Libraries\TenantManager;
 use App\Models\ClientModel;
 use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 
 /**
- * Auto lead-transfer — apply each client's enabled auto-transfer RULES (built on
- * the "Auto Lead Transfer" page). Wire to system cron; running it DAILY is usually
- * right (rules are day-based), but hourly is harmless:
+ * Lead automation — apply each client's enabled auto-transfer RULES and send their
+ * lead NOTIFICATION reminders (both built on the "Auto Lead Transfer" page).
  *
- *   0 6 * * *  cd /path/to/backend && php spark leadtransfer:auto >> writable/logs/lead-transfer.log 2>&1
+ * Rules and reminders can be hour-based (e.g. "not called in 3 hours"), so wire
+ * this to run every 15 minutes; day-based rules are unaffected by the cadence:
  *
- *   php spark leadtransfer:auto                # every client's enabled rules
+ *   0,15,30,45 * * * *  cd /path/to/backend && php spark leadtransfer:auto >> writable/logs/lead-automation.log 2>&1
+ *
+ *   php spark leadtransfer:auto                # every client
  *   php spark leadtransfer:auto --client=3     # just one client
- *   php spark leadtransfer:auto --dry-run      # report matches, change nothing
+ *   php spark leadtransfer:auto --dry-run      # report matches, change/send nothing
  *
- * Each enabled rule either TRANSFERS matching already-assigned leads to another
- * counsellor, or DISTRIBUTES matching unassigned leads — per its criteria (status,
- * type, source, created date/age, call count, assignment age, activity count,
- * include/exclude staff, transfer cap). A lead is never moved twice in one run.
+ * Transfer rules reassign matching already-assigned leads (or distribute unassigned
+ * ones); notification rules send templated in-app + push reminders to the assigned
+ * rep and/or their team leader. Each is idempotent per assignment cycle.
  */
 class LeadTransferAuto extends BaseCommand
 {
@@ -68,13 +70,14 @@ class LeadTransferAuto extends BaseCommand
             }
 
             try {
-                $res = AutoLeadTransfer::runAll((int) $c['id'], $db, $dryRun);
+                $res    = AutoLeadTransfer::runAll((int) $c['id'], $db, $dryRun);
+                $notify = LeadNotify::runAll((int) $c['id'], $db, $dryRun);
             } catch (\Throwable $e) {
                 CLI::error("Client #{$c['id']}: run failed — " . $e->getMessage());
                 continue;
             }
-            if (! $res['rules']) {
-                continue; // no enabled rules for this client
+            if (! $res['rules'] && ! $notify['rules']) {
+                continue; // nothing enabled for this client
             }
 
             CLI::write("Client #{$c['id']} — {$c['db_name']}", 'cyan');
@@ -91,10 +94,23 @@ class LeadTransferAuto extends BaseCommand
                     CLI::write("      → {$d['lead']}: " . ($d['from'] ?? 'Unassigned') . " ⇒ {$d['to']}", 'dark_gray');
                 }
             }
-            $grandTotal += $res['total'];
+            $nverb = $dryRun ? 'would notify' : 'notified';
+            foreach ($notify['rules'] as $r) {
+                if ($r['reason']) {
+                    CLI::write("  • [notify: {$r['name']}] skipped: {$r['reason']}", 'yellow');
+                    continue;
+                }
+                CLI::write("  • [notify: {$r['name']}] scanned {$r['scanned']}; {$nverb} {$r['sent']}"
+                    . "; skipped (age {$r['skipped_age']}, calls {$r['skipped_calls']}, updates {$r['skipped_updates']}, sent {$r['skipped_sent']}, no-recipient {$r['skipped_recipient']})",
+                    $r['sent'] > 0 ? 'green' : 'dark_gray');
+                foreach ($r['details'] as $d) {
+                    CLI::write("      → {$d['lead']} → {$d['to']}: {$d['message']}", 'dark_gray');
+                }
+            }
+            $grandTotal += $res['total'] + $notify['total'];
         }
 
-        CLI::write(($dryRun ? 'Dry run complete — ' : 'Done — ') . "{$grandTotal} lead(s) " . ($dryRun ? 'would move.' : 'moved.'), 'green');
+        CLI::write(($dryRun ? 'Dry run complete — ' : 'Done — ') . "{$grandTotal} action(s) " . ($dryRun ? 'would run.' : 'applied.'), 'green');
 
         return EXIT_SUCCESS;
     }

@@ -19,7 +19,7 @@ Client **#1** = `crm_education_vibes`. Most commands take `--client=ID` to scope
 | `php spark fb:poll` | Pull new Facebook Lead Ads leads for every client and ingest them. Backfill/safety-net alongside the real-time webhook (idempotent on `leadgen_id`). | `*/5 * * * *` |
 | `php spark sheets:sync` | Sync every client's connected Google Sheets into leads (create/update + write back "CRM Status"). | `*/5 * * * *` |
 | `php spark backup:run [--force] [--main-only]` | Run scheduled DB backups to `writable/backups` when due. `--force` ignores the schedule; `--main-only` skips tenant DBs. | `0 2 * * *` |
-| `php spark leadtransfer:auto [--client=ID] [--dry-run]` | Apply each client's enabled auto lead-transfer **rules** (Auto Lead Transfer page). Each rule transfers matching already-assigned leads to another counsellor, or distributes matching unassigned leads — by status/type/source, created date/age, call count, assignment age (working or calendar days), activity count, include/exclude staff, and a transfer cap. A lead is never moved twice per run. | `0 6 * * *` |
+| `php spark leadtransfer:auto [--client=ID] [--dry-run]` | Apply each client's enabled **transfer rules** AND send their **lead notifications** (Auto Lead Transfer page). Transfer rules reassign/distribute matching leads; notification rules send templated in-app + web-push reminders to the assigned rep and/or their team leader once a lead sits unworked past an hour/day threshold. Criteria: status/type/source, created date/age, call count, assignment age (clock/working hours or calendar/working days), activity count, etc. Idempotent per assignment cycle. Run **every 15 min** for hour-based rules. | `0,15,30,45 * * * *` |
 
 Example crontab lines:
 
@@ -27,7 +27,7 @@ Example crontab lines:
 */5 * * * *  cd /var/www/crm/backend && php spark fb:poll          >> writable/logs/fb-poll.log 2>&1
 */5 * * * *  cd /var/www/crm/backend && php spark sheets:sync       >> writable/logs/sheets-sync.log 2>&1
 0   2 * * *  cd /var/www/crm/backend && php spark backup:run        >> writable/logs/backup.log 2>&1
-0   6 * * *  cd /var/www/crm/backend && php spark leadtransfer:auto >> writable/logs/lead-transfer.log 2>&1
+0,15,30,45 * * * *  cd /var/www/crm/backend && php spark leadtransfer:auto >> writable/logs/lead-automation.log 2>&1
 ```
 
 ---

@@ -754,6 +754,7 @@ export const saveLeadTransferMode = (mode: "direct" | "approval") =>
   clientPost<{ message: string; mode: "direct" | "approval" }>("/lead-transfer-mode", { mode });
 
 // ---- Auto lead-transfer (rules) ----
+export type AgeUnit = "calendar_days" | "working_days" | "clock_hours" | "working_hours";
 export type AutoTransferRuleType = "transfer" | "distribute";
 export interface AutoTransferRuleConfig {
   status_ids: number[];
@@ -767,7 +768,7 @@ export interface AutoTransferRuleConfig {
   max_updates: number;
   assign_age_op: "gte" | "lt";
   assign_age_value: number;
-  assign_age_unit: "calendar" | "working";
+  assign_age_unit: AgeUnit;
   max_transfers: number;
   include_staff_ids: number[];
   exclude_staff_ids: number[];
@@ -829,6 +830,78 @@ export const deleteAutoTransferRule = (id: number) =>
   clientPost<{ message: string }>(`/auto-transfer-rules/${id}/delete`);
 export const runAutoTransferNow = (dryRun: boolean, ruleId?: number) =>
   clientPost<{ result: AutoTransferRunResult; dry_run: boolean }>("/auto-transfer-run", {
+    dry_run: dryRun ? 1 : 0,
+    ...(ruleId ? { rule_id: ruleId } : {}),
+  });
+
+// ---- Lead notifications (timed reminders) ----
+export interface LeadNotificationConfig {
+  status_ids: number[];
+  lead_type_ids: number[];
+  source_ids: number[];
+  exclude_mass_assigned: boolean;
+  created_after: string;
+  days_since_created: number;
+  max_calls: number;
+  count_connected_only: boolean;
+  max_updates: number;
+  age_value: number;
+  age_unit: AgeUnit;
+  notify_rep: boolean;
+  notify_leader: boolean;
+  message: string;
+  push_enabled: boolean;
+}
+export interface LeadNotificationRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  sequence: number;
+  config: LeadNotificationConfig;
+}
+export interface LeadNotificationRunRule {
+  id: number;
+  name: string;
+  reason: string | null;
+  scanned: number;
+  sent: number;
+  skipped_age: number;
+  skipped_calls: number;
+  skipped_updates: number;
+  skipped_sent: number;
+  skipped_recipient: number;
+  details: { lead_id: number; lead: string; to: string; message: string }[];
+}
+export interface LeadNotificationRunResult {
+  dry_run: boolean;
+  total: number;
+  rules: LeadNotificationRunRule[];
+}
+export interface LeadNotificationBundle {
+  rules: LeadNotificationRule[];
+  variables: string[];
+  statuses: IdName[];
+  types: IdName[];
+  sources: IdName[];
+  staff: IdName[];
+}
+export type LeadNotificationInput = { id?: number; name: string; enabled: boolean; sequence: number } & LeadNotificationConfig;
+
+export const getLeadNotifications = () => clientGet<LeadNotificationBundle>("/lead-notifications");
+export const saveLeadNotification = (b: LeadNotificationInput) =>
+  clientPost<{ message: string; id: number }>("/lead-notifications", {
+    ...b,
+    enabled: b.enabled ? 1 : 0,
+    exclude_mass_assigned: b.exclude_mass_assigned ? 1 : 0,
+    count_connected_only: b.count_connected_only ? 1 : 0,
+    notify_rep: b.notify_rep ? 1 : 0,
+    notify_leader: b.notify_leader ? 1 : 0,
+    push_enabled: b.push_enabled ? 1 : 0,
+  });
+export const deleteLeadNotification = (id: number) =>
+  clientPost<{ message: string }>(`/lead-notifications/${id}/delete`);
+export const runLeadNotificationsNow = (dryRun: boolean, ruleId?: number) =>
+  clientPost<{ result: LeadNotificationRunResult; dry_run: boolean }>("/lead-notifications-run", {
     dry_run: dryRun ? 1 : 0,
     ...(ruleId ? { rule_id: ruleId } : {}),
   });

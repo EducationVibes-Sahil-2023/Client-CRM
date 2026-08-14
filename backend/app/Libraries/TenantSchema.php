@@ -38,6 +38,8 @@ class TenantSchema
         'sheet_syncs',
         'lead_transfers',
         'auto_transfer_rules',
+        'lead_notification_rules',
+        'lead_notification_log',
         'lead_reminders',
         'lead_notes',
         'visitor_types',

@@ -10,7 +10,6 @@ use App\Models\LeadModel;
 use App\Models\LeadTransferModel;
 use App\Models\SettingsModel;
 use CodeIgniter\Database\ConnectionInterface;
-use DateTime;
 
 /**
  * Auto lead-transfer RULES engine — sessionless & tenant-explicit, so it runs the
@@ -46,8 +45,8 @@ class AutoLeadTransfer
         'count_connected_only'  => false,
         'max_updates'           => 0,         // lead has ≤ this many activity entries (0 = ignore)
         'assign_age_op'         => 'gte',     // 'gte' (at least) | 'lt' (less than)
-        'assign_age_value'      => 0,         // in the unit below (0 = ignore the age filter)
-        'assign_age_unit'       => 'calendar',// 'calendar' | 'working'
+        'assign_age_value'      => 0,         // in the unit below (0 = ignore the age filter); may be fractional (e.g. 2.5)
+        'assign_age_unit'       => 'calendar_days', // calendar_days | working_days | clock_hours | working_hours
         'max_transfers'         => 3,         // stop after this many transfers per lead
         'include_staff_ids'     => [],        // only leads currently assigned to these (empty = any)
         'exclude_staff_ids'     => [],        // never move leads assigned to these
@@ -61,7 +60,7 @@ class AutoLeadTransfer
     {
         $ids = static fn ($v) => array_values(array_unique(array_filter(array_map('intval', (array) $v))));
         $op  = in_array($c['assign_age_op'] ?? '', ['gte', 'lt'], true) ? $c['assign_age_op'] : 'gte';
-        $unit = in_array($c['assign_age_unit'] ?? '', ['calendar', 'working'], true) ? $c['assign_age_unit'] : 'calendar';
+        $unit = self::normaliseAgeUnit($c['assign_age_unit'] ?? '');
         $after = trim((string) ($c['created_after'] ?? ''));
         if ($after !== '' && ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $after)) {
             $after = '';
@@ -78,13 +77,22 @@ class AutoLeadTransfer
             'count_connected_only'  => ! empty($c['count_connected_only']),
             'max_updates'           => max(0, (int) ($c['max_updates'] ?? 0)),
             'assign_age_op'         => $op,
-            'assign_age_value'      => max(0, (int) ($c['assign_age_value'] ?? 0)),
+            'assign_age_value'      => max(0, (float) ($c['assign_age_value'] ?? 0)),
             'assign_age_unit'       => $unit,
             'max_transfers'         => max(1, (int) ($c['max_transfers'] ?? 1)),
             'include_staff_ids'     => $ids($c['include_staff_ids'] ?? []),
             'exclude_staff_ids'     => $ids($c['exclude_staff_ids'] ?? []),
             'target_staff_ids'      => $ids($c['target_staff_ids'] ?? []),
         ];
+    }
+
+    /** Normalise an age unit, mapping the legacy 'calendar'/'working' (days) values. */
+    public static function normaliseAgeUnit($raw): string
+    {
+        $map  = ['calendar' => 'calendar_days', 'working' => 'working_days'];
+        $unit = $map[(string) $raw] ?? (string) $raw;
+
+        return in_array($unit, ['calendar_days', 'working_days', 'clock_hours', 'working_hours'], true) ? $unit : 'calendar_days';
     }
 
     /** Decode + normalise a rule row's JSON config. */
@@ -235,7 +243,6 @@ class AutoLeadTransfer
         $cursor    = (int) $rule['assign_cursor'];
         $poolN     = count($pool);
         $now       = date('Y-m-d H:i:s');
-        $nowDt     = new DateTime($now);
 
         foreach ($leads as $lead) {
             $leadId = (int) $lead['id'];
@@ -246,15 +253,9 @@ class AutoLeadTransfer
             $owner = (int) ($lead['assigned_to'] ?? 0);
 
             if (! $distribute) {
-                // Assignment age (working or calendar days), when a value is set.
+                // Assignment age (calendar/working days or clock/working hours).
                 if ($cfg['assign_age_value'] > 0) {
-                    $assignedDt = new DateTime((string) $lead['assigned_date']);
-                    if ($cfg['assign_age_unit'] === 'working') {
-                        [$sch, $hol] = WorkingDays::scheduleFor($ctx['work'], $owner);
-                        $age         = WorkingDays::elapsedWorkingDays($sch, $hol, $assignedDt, $nowDt);
-                    } else {
-                        $age = WorkingDays::elapsedCalendarDays($assignedDt, $nowDt);
-                    }
+                    $age    = WorkingDays::age($ctx['work'], $lead, $cfg['assign_age_unit']);
                     $passes = $cfg['assign_age_op'] === 'lt' ? ($age < $cfg['assign_age_value']) : ($age >= $cfg['assign_age_value']);
                     if (! $passes) {
                         $out['skipped_age']++;

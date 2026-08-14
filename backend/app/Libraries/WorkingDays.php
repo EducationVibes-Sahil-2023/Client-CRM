@@ -100,4 +100,40 @@ class WorkingDays
 
         return $b >= $a ? (int) $a->diff($b)->days : 0;
     }
+
+    /**
+     * How long since a lead was assigned, in the given unit:
+     *   clock_hours   — wall-clock hours (fractional)
+     *   working_hours — working hours within the assigned staff's shift (fractional)
+     *   working_days  — whole working days (weekends + holidays excluded)
+     *   calendar_days — whole calendar days
+     * `$ctx` is a WorkingDays::loadContext() result; `$lead` needs assigned_date + assigned_to.
+     */
+    public static function age(array $ctx, array $lead, string $unit): float
+    {
+        if (empty($lead['assigned_date'])) {
+            return 0.0;
+        }
+        $assigned = new DateTime((string) $lead['assigned_date']);
+        $now      = new DateTime();
+        if ($now <= $assigned) {
+            return 0.0;
+        }
+        $staffId = (int) ($lead['assigned_to'] ?? 0);
+
+        switch ($unit) {
+            case 'clock_hours':
+                return ($now->getTimestamp() - $assigned->getTimestamp()) / 3600;
+            case 'working_hours':
+                [$sch, $hol] = self::scheduleFor($ctx, $staffId);
+
+                return FirstResponseService::workingSeconds($sch, $hol, $assigned, $now) / 3600;
+            case 'working_days':
+                [$sch, $hol] = self::scheduleFor($ctx, $staffId);
+
+                return (float) self::elapsedWorkingDays($sch, $hol, $assigned, $now);
+            default: // calendar_days
+                return (float) self::elapsedCalendarDays($assigned, $now);
+        }
+    }
 }

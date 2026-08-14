@@ -8,6 +8,7 @@ use App\Libraries\GoogleCalendarService;
 use App\Libraries\HtmlSanitizer;
 use App\Libraries\MailerService;
 use App\Libraries\AutoLeadTransfer;
+use App\Libraries\LeadNotify;
 use App\Libraries\PasswordPolicy;
 use App\Libraries\PushService;
 use App\Libraries\SecondaryDb;
@@ -16,6 +17,7 @@ use App\Models\ActivityLogModel;
 use App\Models\AnnouncementModel;
 use App\Models\ApplicantModel;
 use App\Models\AutoTransferRuleModel;
+use App\Models\LeadNotificationRuleModel;
 use App\Models\AnnouncementReadModel;
 use App\Models\AppNotificationModel;
 use App\Models\AssetAllocationModel;
@@ -4648,6 +4650,12 @@ class ClientController extends ApiController
             ];
         }
 
+        return $this->respond(['rules' => $rules] + $this->leadRuleLookups($cid));
+    }
+
+    /** Picker lists shared by the auto-transfer + lead-notification rule editors. */
+    private function leadRuleLookups(int $cid): array
+    {
         // Top-level lead statuses (leads.status_id points at these).
         $statuses = [];
         foreach ((new LeadStatusModel())->where('client_id', $cid)->orderBy('sequence', 'ASC')->findAll() as $s) {
@@ -4656,7 +4664,7 @@ class ClientController extends ApiController
             }
             $statuses[] = ['id' => (int) $s['id'], 'name' => (string) $s['name']];
         }
-        $types = array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadTypeModel::class, $cid));
+        $types   = array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadTypeModel::class, $cid));
         $sources = array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadSourceModel::class, $cid));
 
         $staff = [];
@@ -4667,13 +4675,7 @@ class ClientController extends ApiController
             $staff[] = ['id' => (int) $m['id'], 'name' => (string) $m['name']];
         }
 
-        return $this->respond([
-            'rules'    => $rules,
-            'statuses' => $statuses,
-            'types'    => $types,
-            'sources'  => $sources,
-            'staff'    => $staff,
-        ]);
+        return ['statuses' => $statuses, 'types' => $types, 'sources' => $sources, 'staff' => $staff];
     }
 
     /** POST /client/auto-transfer-rules — create or update a rule (admin only). */
@@ -4766,6 +4768,150 @@ class ClientController extends ApiController
 
         if (! $dryRun && $res['total'] > 0) {
             $this->logActivity('transferred', 'lead', null, "Auto-transfer moved {$res['total']} lead(s)");
+        }
+
+        return $this->respond(['result' => $res, 'dry_run' => $dryRun]);
+    }
+
+    // -------------------------------------------------- LEAD NOTIFICATIONS
+
+    /** Read the criteria + timing + message fields posted for a notification rule. */
+    private function leadNotificationInput(): array
+    {
+        return LeadNotify::normaliseConfig([
+            'status_ids'            => (array) $this->input('status_ids'),
+            'lead_type_ids'         => (array) $this->input('lead_type_ids'),
+            'source_ids'            => (array) $this->input('source_ids'),
+            'exclude_mass_assigned' => (int) $this->input('exclude_mass_assigned') === 1,
+            'created_after'         => (string) $this->input('created_after'),
+            'days_since_created'    => (int) $this->input('days_since_created'),
+            'max_calls'             => (int) $this->input('max_calls'),
+            'count_connected_only'  => (int) $this->input('count_connected_only') === 1,
+            'max_updates'           => (int) $this->input('max_updates'),
+            'age_value'             => (float) $this->input('age_value'),
+            'age_unit'              => (string) $this->input('age_unit'),
+            'notify_rep'            => (int) $this->input('notify_rep') === 1,
+            'notify_leader'         => (int) $this->input('notify_leader') === 1,
+            'message'               => (string) $this->input('message'),
+            'push_enabled'          => (int) $this->input('push_enabled') === 1,
+        ]);
+    }
+
+    /** GET /client/lead-notifications — rules (decoded) + pickers + message variables. */
+    public function getLeadNotifications()
+    {
+        if ($resp = $this->requirePermission('lead_transfer')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        $rules = [];
+        foreach ((new LeadNotificationRuleModel())->where('client_id', $cid)->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->findAll() as $r) {
+            $rules[] = [
+                'id'       => (int) $r['id'],
+                'name'     => (string) $r['name'],
+                'enabled'  => (int) $r['enabled'] === 1,
+                'sequence' => (int) $r['sequence'],
+                'config'   => LeadNotify::ruleConfig($r),
+            ];
+        }
+
+        return $this->respond(['rules' => $rules, 'variables' => LeadNotify::VARIABLES] + $this->leadRuleLookups($cid));
+    }
+
+    /** POST /client/lead-notifications — create or update a notification rule. */
+    public function saveLeadNotification()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can change lead notifications.');
+        }
+        $cid     = $this->clientId();
+        $id      = (int) $this->input('id');
+        $name    = trim((string) $this->input('name'));
+        $enabled = (int) $this->input('enabled') === 1;
+        $cfg     = $this->leadNotificationInput();
+
+        if ($name === '') {
+            return $this->failValidationErrors(['name' => 'Give the notification a name.']);
+        }
+        if ($enabled) {
+            if ($cfg['message'] === '') {
+                return $this->failValidationErrors(['message' => 'Write a message before enabling.']);
+            }
+            if ($cfg['age_value'] <= 0) {
+                return $this->failValidationErrors(['age_value' => 'Set a time threshold before enabling.']);
+            }
+            if (! $cfg['notify_rep'] && ! $cfg['notify_leader']) {
+                return $this->failValidationErrors(['notify_rep' => 'Choose at least one recipient before enabling.']);
+            }
+        }
+
+        $model = new LeadNotificationRuleModel();
+        $row   = [
+            'client_id' => $cid,
+            'name'      => $name,
+            'enabled'   => $enabled ? 1 : 0,
+            'sequence'  => (int) $this->input('sequence'),
+            'config'    => json_encode($cfg),
+        ];
+
+        if ($id > 0) {
+            $existing = $model->where('client_id', $cid)->find($id);
+            if (! $existing) {
+                return $this->failNotFound('Notification not found');
+            }
+            $model->update($id, $row);
+        } else {
+            $id = (int) $model->insert($row);
+        }
+        $this->logActivity('updated', 'settings', null, "Lead notification '{$name}' saved");
+
+        return $this->respond(['message' => 'Saved', 'id' => $id]);
+    }
+
+    /** POST /client/lead-notifications/{id}/delete — soft-delete a notification rule. */
+    public function deleteLeadNotification(int $id)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can delete lead notifications.');
+        }
+        $cid   = $this->clientId();
+        $model = new LeadNotificationRuleModel();
+        $rule  = $model->where('client_id', $cid)->find($id);
+        if (! $rule) {
+            return $this->failNotFound('Notification not found');
+        }
+        $model->delete($id);
+        $this->logActivity('deleted', 'settings', null, "Lead notification '{$rule['name']}' deleted");
+
+        return $this->respond(['message' => 'Deleted']);
+    }
+
+    /**
+     * POST /client/lead-notifications-run — send matching notifications now.
+     * `dry_run=1` previews (renders messages + recipients) without sending;
+     * `rule_id` runs just that rule (even if disabled).
+     */
+    public function runLeadNotificationsNow()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only an admin can run lead notifications.');
+        }
+        $cid    = $this->clientId();
+        $dryRun = (int) $this->input('dry_run') === 1;
+        $ruleId = (int) $this->input('rule_id') ?: null;
+
+        try {
+            $db  = (new TenantManager())->forClient($cid);
+            $res = LeadNotify::runAll($cid, $db, $dryRun, $ruleId);
+        } catch (\Throwable $e) {
+            log_message('error', 'Lead notifications run failed: ' . $e->getMessage());
+
+            return $this->failServerError('Could not run lead notifications.');
+        }
+
+        if (! $dryRun && $res['total'] > 0) {
+            $this->logActivity('updated', 'lead', null, "Lead notifications sent {$res['total']} reminder(s)");
         }
 
         return $this->respond(['result' => $res, 'dry_run' => $dryRun]);

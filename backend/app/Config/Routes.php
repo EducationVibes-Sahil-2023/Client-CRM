@@ -244,6 +244,10 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('auto-transfer-rules', 'ClientController::saveAutoTransferRule');
         $routes->post('auto-transfer-rules/(:num)/delete', 'ClientController::deleteAutoTransferRule/$1');
         $routes->post('auto-transfer-run', 'ClientController::runAutoTransferNow');
+        $routes->get('lead-notifications', 'ClientController::getLeadNotifications');
+        $routes->post('lead-notifications', 'ClientController::saveLeadNotification');
+        $routes->post('lead-notifications/(:num)/delete', 'ClientController::deleteLeadNotification/$1');
+        $routes->post('lead-notifications-run', 'ClientController::runLeadNotificationsNow');
     });
 
     // Visitor requests — log + admin-defined types/statuses (the 'visitors' module).
