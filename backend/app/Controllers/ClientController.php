@@ -4418,6 +4418,32 @@ class ClientController extends ApiController
         }
     }
 
+    /**
+     * Fan out transfer notifications (in-app + push) for a single manual transfer:
+     * the NEW counsellor (rich message), the OLD counsellor, the new counsellor's
+     * team leader, and the client admins.
+     */
+    private function notifyTransferParties(int $cid, array $lead, int $fromId, int $toId): void
+    {
+        $name  = ($lead['name'] ?? '') !== '' ? (string) $lead['name'] : (string) ($lead['phone'] ?? 'Lead');
+        $phone = (string) ($lead['phone'] ?? '');
+        $who   = $phone !== '' ? "{$name} ({$phone})" : $name;
+
+        $staffModel = new ClientStaffModel();
+        $to         = $staffModel->where('client_id', $cid)->find($toId);
+        $toName     = $to['name'] ?? 'a counsellor';
+
+        $this->notifyStaff($toId, 'lead_transfer', 'Lead assigned to you', "{$who} was transferred to you.", '/client/leads');
+        if ($fromId > 0 && $fromId !== $toId) {
+            $this->notifyStaff($fromId, 'lead_transfer', 'Lead transferred away', "{$who} was transferred from you to {$toName}.", '/client/leads');
+        }
+        $leader = $to && $to['reports_to'] !== null ? (int) $to['reports_to'] : 0;
+        if ($leader > 0 && $leader !== $toId && $leader !== $fromId) {
+            $this->notifyStaff($leader, 'lead_transfer', 'Team lead transfer', "{$who} was transferred to {$toName}.", '/client/leads');
+        }
+        $this->notifyClientAdmins('lead_transfer', 'Lead transferred', "{$who} was transferred to {$toName}.", '/client/transfer-report');
+    }
+
     /** GET /client/lead-transfers — transfer requests + the current mode. */
     public function leadTransfers()
     {
@@ -4518,7 +4544,7 @@ class ClientController extends ApiController
 
             (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d H:i:s'), 'mass_assigned' => 0]);
             $this->logActivity('transferred', 'lead', $leadId, "Lead transferred to {$toName}");
-            $this->notifyStaff($toId, 'lead_transfer', 'Lead assigned to you', "{$leadName} was transferred to you.", '/client/leads');
+            $this->notifyTransferParties($cid, $lead, (int) $lead['assigned_to'], $toId);
 
             return $this->respondCreated(['message' => 'Lead transferred', 'id' => $id, 'status' => 'approved']);
         }
@@ -4561,7 +4587,9 @@ class ClientController extends ApiController
 
         $leadName = $this->leadLabel($cid, (int) $t['lead_id']);
         $this->logActivity('transfer_approved', 'lead', (int) $t['lead_id'], 'Transfer approved');
-        $this->notifyStaff((int) $t['to_staff_id'], 'lead_transfer', 'Lead assigned to you', "{$leadName}'s transfer was approved.", '/client/leads');
+        if ($lead) {
+            $this->notifyTransferParties($cid, $lead, (int) ($t['from_staff_id'] ?? 0), (int) $t['to_staff_id']);
+        }
         if ($t['requested_by']) {
             $this->notifyStaff((int) $t['requested_by'], 'lead_transfer', 'Transfer approved', "Your transfer of {$leadName} was approved.", '/client/leads');
         }

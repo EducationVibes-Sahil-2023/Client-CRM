@@ -9,6 +9,7 @@ use App\Models\ClientStaffModel;
 use App\Models\LeadModel;
 use App\Models\LeadTransferModel;
 use App\Models\SettingsModel;
+use App\Models\UserModel;
 use CodeIgniter\Database\ConnectionInterface;
 
 /**
@@ -137,16 +138,18 @@ class AutoLeadTransfer
 
         // Build the shared per-client context once (staff names, active pool,
         // shift/holiday calendar for working-day maths).
-        $names  = [];
-        $active = [];
+        $names     = [];
+        $active    = [];
+        $reportsTo = [];
         foreach ((new ClientStaffModel($db))->where('client_id', $cid)->findAll() as $s) {
-            $id         = (int) $s['id'];
-            $names[$id] = (string) ($s['name'] ?? "#{$id}");
+            $id             = (int) $s['id'];
+            $names[$id]     = (string) ($s['name'] ?? "#{$id}");
+            $reportsTo[$id] = $s['reports_to'] !== null ? (int) $s['reports_to'] : 0;
             if ((string) ($s['status'] ?? '') !== 'inactive') {
                 $active[] = $id;
             }
         }
-        $ctx = ['names' => $names, 'active' => $active, 'work' => WorkingDays::loadContext($db, $cid)];
+        $ctx = ['names' => $names, 'active' => $active, 'reportsTo' => $reportsTo, 'work' => WorkingDays::loadContext($db, $cid)];
 
         $out   = ['dry_run' => $dryRun, 'total' => 0, 'rules' => []];
         $acted = [];
@@ -338,7 +341,7 @@ class AutoLeadTransfer
 
             if ($distribute) {
                 self::logAction($db, $cid, $leadId, 'assigned', 'Auto-distributed to ' . ($ctx['names'][$pick] ?? "#{$pick}"));
-                self::notify($cid, $pick, $label, false);
+                self::notifyTransfer($cid, $ctx, $lead, $owner, $pick, false);
             } else {
                 $transferM->insert([
                     'client_id'     => $cid,
@@ -357,13 +360,16 @@ class AutoLeadTransfer
                     'update_count'  => $updateCount,
                 ]);
                 self::logAction($db, $cid, $leadId, 'transferred', 'Auto-transferred to ' . ($ctx['names'][$pick] ?? "#{$pick}"));
-                self::notify($cid, $pick, $label, true);
+                self::notifyTransfer($cid, $ctx, $lead, $owner, $pick, true);
             }
         }
 
-        // Persist the advanced round-robin cursor for next time.
+        // Persist the advanced round-robin cursor + notify admins with a per-run
+        // summary (so they aren't spammed one notification per lead).
         if (! $dryRun && $out['acted'] > 0) {
             (new AutoTransferRuleModel($db))->update((int) $rule['id'], ['assign_cursor' => $cursor]);
+            $verb = $distribute ? 'distributed' : 'transferred';
+            self::notifyAdmins($cid, 'Auto lead ' . $verb, "{$out['acted']} lead(s) {$verb} by rule \"{$rule['name']}\".");
         }
 
         return $out;
@@ -427,23 +433,59 @@ class AutoLeadTransfer
         }
     }
 
-    /** In-app + push notification to the counsellor now owning the lead. */
-    private static function notify(int $cid, int $staffId, string $leadLabel, bool $isTransfer): void
+    /**
+     * Fan out in-app + push notifications for one transfer/assignment: the NEW
+     * counsellor (rich, with lead name + phone), the OLD counsellor (lead taken
+     * away), and the new counsellor's team leader.
+     */
+    private static function notifyTransfer(int $cid, array $ctx, array $lead, int $fromId, int $toId, bool $isTransfer): void
     {
-        $title = 'Lead assigned to you';
-        $body  = $isTransfer ? "{$leadLabel} was auto-transferred to you." : "{$leadLabel} was assigned to you.";
+        $name  = ($lead['name'] ?? '') !== '' ? (string) $lead['name'] : (string) ($lead['phone'] ?? 'Lead');
+        $phone = (string) ($lead['phone'] ?? '');
+        $who   = $phone !== '' ? "{$name} ({$phone})" : $name;
+        $toName = $ctx['names'][$toId] ?? "#{$toId}";
+        $verb   = $isTransfer ? 'transferred' : 'assigned';
+
+        self::pushStaff($cid, $toId, 'New lead assigned to you', "{$who} was {$verb} to you.");
+        if ($isTransfer && $fromId > 0 && $fromId !== $toId) {
+            self::pushStaff($cid, $fromId, 'Lead transferred away', "{$who} was transferred from you to {$toName}.");
+        }
+        $leader = (int) ($ctx['reportsTo'][$toId] ?? 0);
+        if ($leader > 0 && $leader !== $toId && $leader !== $fromId) {
+            self::pushStaff($cid, $leader, 'Team lead transfer', "{$who} was {$verb} to {$toName}.");
+        }
+    }
+
+    /** In-app + push to one staff member. */
+    private static function pushStaff(int $cid, int $staffId, string $title, string $body): void
+    {
+        if ($staffId <= 0) {
+            return;
+        }
         try {
             (new AppNotificationModel())->insert([
-                'recipient_type' => 'staff',
-                'recipient_id'   => $staffId,
-                'type'           => 'lead_transfer',
-                'title'          => mb_substr($title, 0, 255),
-                'body'           => mb_substr($body, 0, 500),
-                'link'           => '/client/leads',
+                'recipient_type' => 'staff', 'recipient_id' => $staffId, 'type' => 'lead_transfer',
+                'title' => mb_substr($title, 0, 255), 'body' => mb_substr($body, 0, 500), 'link' => '/client/leads',
             ]);
             PushService::sendToRecipient($cid, 'staff', $staffId, $title, $body, '/client/leads');
         } catch (\Throwable $e) {
-            log_message('error', 'Auto-transfer notify failed: ' . $e->getMessage());
+            log_message('error', 'Transfer notify failed: ' . $e->getMessage());
+        }
+    }
+
+    /** In-app + push summary to every client admin. */
+    private static function notifyAdmins(int $cid, string $title, string $body): void
+    {
+        try {
+            foreach ((new UserModel())->where('client_id', $cid)->where('role', 'client_admin')->findAll() as $a) {
+                (new AppNotificationModel())->insert([
+                    'recipient_type' => 'user', 'recipient_id' => (int) $a['id'], 'type' => 'lead_transfer',
+                    'title' => mb_substr($title, 0, 255), 'body' => mb_substr($body, 0, 500), 'link' => '/client/transfer-report',
+                ]);
+                PushService::sendToRecipient($cid, 'user', (int) $a['id'], $title, $body, '/client/transfer-report');
+            }
+        } catch (\Throwable $e) {
+            log_message('error', 'Admin transfer notify failed: ' . $e->getMessage());
         }
     }
 

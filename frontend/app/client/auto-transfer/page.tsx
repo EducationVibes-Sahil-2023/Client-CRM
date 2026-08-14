@@ -4,13 +4,15 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   getAutoTransferRules, saveAutoTransferRule, deleteAutoTransferRule, runAutoTransferNow,
   getLeadNotifications, saveLeadNotification, deleteLeadNotification, runLeadNotificationsNow,
+  getTransferReportLogs,
   type AutoTransferBundle, type AutoTransferRule, type AutoTransferRuleConfig, type AutoTransferRuleType, type AutoTransferRunResult,
   type LeadNotificationBundle, type LeadNotificationRule, type LeadNotificationConfig, type LeadNotificationRunResult,
-  type AgeUnit, type IdName,
+  type AgeUnit, type IdName, type TransferLogRow, type TransferReportFilters,
 } from "../../lib/client";
+import Link from "next/link";
 import { useToast } from "../../components/toast/ToastProvider";
 import { useConfirm } from "../../components/confirm/ConfirmProvider";
-import { PageHeader, Card, Drawer, SkeletonText } from "../../admin/ui";
+import { PageHeader, Card, Drawer, SkeletonText, fmtDateTime } from "../../admin/ui";
 
 const btnPrimary = "rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60";
 const btnGhost = "rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60";
@@ -409,12 +411,155 @@ function NotifyRunResults({ result }: { result: LeadNotificationRunResult }) {
   );
 }
 
+// ---------------------------------------------------------- transferred leads
+
+const LOG_COLS: [string, keyof TransferLogRow][] = [
+  ["ID", "id"], ["Name", "name"], ["Phone", "phone"], ["Source", "source"], ["Updates", "update_count"],
+  ["Sub Status", "sub_status"], ["Old Status", "old_status"], ["New Status", "new_status"], ["Current", "current_status"],
+  ["Old Assigned", "old_assigned"], ["New Assigned", "new_assigned"], ["Date", "date"],
+];
+
+function TransferLeadsTab({ lk }: { lk: AutoTransferBundle }) {
+  const toast = useToast();
+  const [rows, setRows] = useState<TransferLogRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(50);
+  const [searchBox, setSearchBox] = useState("");
+  const [search, setSearch] = useState("");
+  const [sourceId, setSourceId] = useState(0);
+  const [statusId, setStatusId] = useState(0);
+  const [updateCount, setUpdateCount] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => { setSearch(searchBox); setPage(1); }, 400);
+    return () => clearTimeout(t);
+  }, [searchBox]);
+
+  const filt = (): TransferReportFilters => ({
+    tab: "auto",
+    source_id: sourceId || undefined,
+    status_id: statusId || undefined,
+    update_count: updateCount || undefined,
+    date_from: dateFrom || undefined,
+    date_to: dateTo || undefined,
+    search: search || undefined,
+  });
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoading(true);
+    getTransferReportLogs({ ...filt(), page, per_page: perPage })
+      .then((d) => { setRows(d.rows); setTotal(d.total); setLoading(false); })
+      .catch(() => { toast.error("Could not load transfer logs."); setLoading(false); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, perPage, search, sourceId, statusId, updateCount, dateFrom, dateTo]);
+
+  async function exportCsv() {
+    setExporting(true);
+    try {
+      const all: TransferLogRow[] = [];
+      for (let p = 1; p <= 50 && all.length < total; p++) {
+        const d = await getTransferReportLogs({ ...filt(), page: p, per_page: 200 });
+        all.push(...d.rows);
+        if (d.rows.length < 200) break;
+      }
+      const cell = (v: unknown) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+      const csv = [LOG_COLS.map((c) => c[0]).join(","), ...all.map((r) => LOG_COLS.map((c) => cell(r[c[1]])).join(","))].join("\n");
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = "auto-transfer-leads.csv"; a.click();
+      URL.revokeObjectURL(url);
+    } catch { toast.error("Export failed."); }
+    setExporting(false);
+  }
+
+  const lastPage = Math.max(1, Math.ceil(total / perPage));
+
+  return (
+    <Card className="space-y-4">
+      {/* Filters */}
+      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <select value={sourceId} onChange={(e) => { setSourceId(Number(e.target.value)); setPage(1); }} className={textCls}>
+          <option value={0}>All sources</option>
+          {lk.sources.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+        </select>
+        <select value={statusId} onChange={(e) => { setStatusId(Number(e.target.value)); setPage(1); }} className={textCls}>
+          <option value={0}>All current status</option>
+          {lk.statuses.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+        </select>
+        <select value={updateCount} onChange={(e) => { setUpdateCount(e.target.value); setPage(1); }} className={textCls}>
+          <option value="">Any updates</option>
+          {["0", "1", "2", "3", "4"].map((n) => <option key={n} value={n}>{n} updates</option>)}
+          <option value="5plus">5+ updates</option>
+        </select>
+        <input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} className={textCls} />
+        <input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} className={textCls} />
+        <input value={searchBox} onChange={(e) => setSearchBox(e.target.value)} placeholder="Search name / phone…" className={textCls} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="text-xs text-slate-400">{loading ? "Loading…" : `Showing ${rows.length} of ${total} auto-transferred leads`}</p>
+        <div className="ml-auto flex items-center gap-2">
+          <select value={perPage} onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }} className={textCls + " w-auto"}>
+            {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <button onClick={exportCsv} disabled={exporting} className={btnGhost}>{exporting ? "Exporting…" : "Export"}</button>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border border-slate-100">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-slate-900 text-left text-xs font-semibold uppercase tracking-wider text-white">
+              {LOG_COLS.map((c) => <th key={c[0]} className="whitespace-nowrap px-3 py-2.5">{c[0]}</th>)}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map((r) => (
+              <tr key={r.id} className="hover:bg-slate-50">
+                <td className="px-3 py-2 text-slate-500">{r.id}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-800">{r.name || "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.phone}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.source}</td>
+                <td className="px-3 py-2 text-center text-slate-600">{r.update_count}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.sub_status}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.old_status}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.new_status}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.current_status}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-600">{r.old_assigned}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-700">{r.new_assigned}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-slate-500">{r.date ? fmtDateTime(r.date) : "—"}</td>
+              </tr>
+            ))}
+            {!loading && rows.length === 0 && (
+              <tr><td colSpan={LOG_COLS.length} className="px-3 py-10 text-center text-sm text-slate-400">No auto-transferred leads yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-slate-400">Page {page} of {lastPage}</span>
+        <div className="flex gap-2">
+          <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} className={btnGhost}>Previous</button>
+          <button onClick={() => setPage((p) => Math.min(lastPage, p + 1))} disabled={page >= lastPage} className={btnGhost}>Next</button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // --------------------------------------------------------------------- page
 
 export default function AutoTransferPage() {
   const toast = useToast();
   const confirm = useConfirm();
-  const [tab, setTab] = useState<"rules" | "notify">("rules");
+  const [tab, setTab] = useState<"rules" | "notify" | "leads">("rules");
   const [loading, setLoading] = useState(true);
 
   const [bundle, setBundle] = useState<AutoTransferBundle | null>(null);
@@ -506,33 +651,39 @@ export default function AutoTransferPage() {
         subtitle="Automatically move cold leads to another counsellor, and send timed reminders when a lead goes unworked. A background job applies everything; you can also run on demand."
         action={
           <div className="flex flex-wrap gap-2">
-            {tab === "rules" ? (
+            {tab === "rules" && (
               <>
                 <button onClick={() => runRules(true)} disabled={running || loading} className={btnGhost}>{running ? "Working…" : "Preview all"}</button>
                 <button onClick={() => runRules(false)} disabled={running || loading} className={btnGhost}>Run all now</button>
                 <button onClick={() => setEditing(newDraft())} disabled={loading} className={btnPrimary}>+ Add rule</button>
               </>
-            ) : (
+            )}
+            {tab === "notify" && (
               <>
                 <button onClick={() => runNotify(true)} disabled={nRunning || loading} className={btnGhost}>{nRunning ? "Working…" : "Preview all"}</button>
                 <button onClick={() => runNotify(false)} disabled={nRunning || loading} className={btnGhost}>Send all now</button>
                 <button onClick={() => setNEditing(newNotify())} disabled={loading} className={btnPrimary}>+ Add notification</button>
               </>
             )}
+            {tab === "leads" && (
+              <Link href="/client/transfer-report" className={btnGhost}>Open full report</Link>
+            )}
           </div>
         }
       />
 
       <div className="flex gap-1 rounded-xl bg-slate-100 p-1">
-        {(["rules", "notify"] as const).map((t) => (
+        {(["rules", "notify", "leads"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition ${tab === t ? "bg-white text-emerald-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
-            {t === "rules" ? "Transfer rules" : "Notifications"}
+            {t === "rules" ? "Transfer rules" : t === "notify" ? "Notifications" : "Auto Transfer Leads"}
           </button>
         ))}
       </div>
 
       {loading ? (
         <Card><SkeletonText lines={6} /></Card>
+      ) : tab === "leads" ? (
+        bundle && <TransferLeadsTab lk={bundle} />
       ) : tab === "rules" ? (
         <>
           {rules.length === 0 ? (
