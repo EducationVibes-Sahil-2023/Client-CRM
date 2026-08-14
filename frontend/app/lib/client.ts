@@ -765,6 +765,7 @@ export interface AutoTransferRuleConfig {
   days_since_created: number;
   max_calls: number;
   count_connected_only: boolean;
+  check_updates: boolean;
   max_updates: number;
   assign_age_op: "gte" | "lt";
   assign_age_value: number;
@@ -824,6 +825,7 @@ export const saveAutoTransferRule = (b: AutoTransferRuleInput) =>
     ...b,
     enabled: b.enabled ? 1 : 0,
     count_connected_only: b.count_connected_only ? 1 : 0,
+    check_updates: b.check_updates ? 1 : 0,
     exclude_mass_assigned: b.exclude_mass_assigned ? 1 : 0,
   });
 export const deleteAutoTransferRule = (id: number) =>
@@ -844,6 +846,7 @@ export interface LeadNotificationConfig {
   days_since_created: number;
   max_calls: number;
   count_connected_only: boolean;
+  check_updates: boolean;
   max_updates: number;
   age_value: number;
   age_unit: AgeUnit;
@@ -894,6 +897,7 @@ export const saveLeadNotification = (b: LeadNotificationInput) =>
     enabled: b.enabled ? 1 : 0,
     exclude_mass_assigned: b.exclude_mass_assigned ? 1 : 0,
     count_connected_only: b.count_connected_only ? 1 : 0,
+    check_updates: b.check_updates ? 1 : 0,
     notify_rep: b.notify_rep ? 1 : 0,
     notify_leader: b.notify_leader ? 1 : 0,
     push_enabled: b.push_enabled ? 1 : 0,

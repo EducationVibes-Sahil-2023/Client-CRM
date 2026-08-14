@@ -43,7 +43,8 @@ class AutoLeadTransfer
         'days_since_created'    => 0,         // created ≥ this many days ago (0 = ignore)
         'max_calls'             => 0,         // transfer only if assigned rep dialled fewer (0 = ignore)
         'count_connected_only'  => false,
-        'max_updates'           => 0,         // lead has ≤ this many activity entries (0 = ignore)
+        'check_updates'         => false,     // enable the update-count filter below (lets 0 be a real threshold)
+        'max_updates'           => 0,         // when check_updates: lead has ≤ this many activity entries SINCE assignment
         'assign_age_op'         => 'gte',     // 'gte' (at least) | 'lt' (less than)
         'assign_age_value'      => 0,         // in the unit below (0 = ignore the age filter); may be fractional (e.g. 2.5)
         'assign_age_unit'       => 'calendar_days', // calendar_days | working_days | clock_hours | working_hours
@@ -75,6 +76,7 @@ class AutoLeadTransfer
             'days_since_created'    => max(0, (int) ($c['days_since_created'] ?? 0)),
             'max_calls'             => max(0, (int) ($c['max_calls'] ?? 0)),
             'count_connected_only'  => ! empty($c['count_connected_only']),
+            'check_updates'         => ! empty($c['check_updates']),
             'max_updates'           => max(0, (int) ($c['max_updates'] ?? 0)),
             'assign_age_op'         => $op,
             'assign_age_value'      => max(0, (float) ($c['assign_age_value'] ?? 0)),
@@ -278,10 +280,15 @@ class AutoLeadTransfer
                 }
             }
 
-            // Update/activity count (barely-worked filter) — applies to both types.
-            if ($cfg['max_updates'] > 0) {
-                $updates = (new ActivityLogModel($db))->where('entity_type', 'lead')->where('entity_id', $leadId)->countAllResults();
-                if ($updates > $cfg['max_updates']) {
+            // Update count since assignment (barely-worked filter). For transfer rules
+            // it counts activity AFTER assigned_date, so "0" = untouched since assigned;
+            // for distribute (no owner) it counts all activity on the lead.
+            if ($cfg['check_updates']) {
+                $uq = (new ActivityLogModel($db))->where('entity_type', 'lead')->where('entity_id', $leadId);
+                if (! $distribute && ! empty($lead['assigned_date'])) {
+                    $uq->where('created_at >', (string) $lead['assigned_date']);
+                }
+                if ($uq->countAllResults() > $cfg['max_updates']) {
                     $out['skipped_updates']++;
                     continue;
                 }

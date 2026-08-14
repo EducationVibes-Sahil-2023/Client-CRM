@@ -32,7 +32,7 @@ const names = (ids: number[], opts: IdName[]) => ids.map((id) => opts.find((o) =
 type Draft = { id?: number; name: string; rule_type: AutoTransferRuleType; enabled: boolean; sequence: number } & AutoTransferRuleConfig;
 const blankConfig = (): AutoTransferRuleConfig => ({
   status_ids: [], lead_type_ids: [], source_ids: [], exclude_mass_assigned: false,
-  created_after: "", days_since_created: 0, max_calls: 0, count_connected_only: false, max_updates: 0,
+  created_after: "", days_since_created: 0, max_calls: 0, count_connected_only: false, check_updates: false, max_updates: 0,
   assign_age_op: "gte", assign_age_value: 0, assign_age_unit: "calendar_days",
   max_transfers: 3, include_staff_ids: [], exclude_staff_ids: [], target_staff_ids: [],
 });
@@ -43,7 +43,7 @@ const ruleToDraft = (r: AutoTransferRule): Draft => ({ id: r.id, name: r.name, r
 type NotifyDraft = { id?: number; name: string; enabled: boolean; sequence: number } & LeadNotificationConfig;
 const blankNotify = (): LeadNotificationConfig => ({
   status_ids: [], lead_type_ids: [], source_ids: [], exclude_mass_assigned: false,
-  created_after: "", days_since_created: 0, max_calls: 1, count_connected_only: false, max_updates: 0,
+  created_after: "", days_since_created: 0, max_calls: 1, count_connected_only: false, check_updates: false, max_updates: 0,
   age_value: 2, age_unit: "clock_hours", notify_rep: true, notify_leader: false,
   message: "Follow up with {name} ({phone}) — no response yet.", push_enabled: true,
 });
@@ -125,6 +125,25 @@ function AgeInput({ op, value, unit, onOp, onValue, onUnit, showOp }: { op?: "gt
   );
 }
 
+function UpdatesField({ check, value, onCheck, onValue }: { check: boolean; value: number; onCheck: (v: boolean) => void; onValue: (v: number) => void }) {
+  return (
+    <div>
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={check} onChange={(e) => onCheck(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+        <span className="text-sm font-medium text-slate-700">Limit updates since assignment</span>
+      </label>
+      {check && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-600">at most</span>
+          <input type="number" min={0} value={String(value)} onChange={(e) => onValue(Math.max(0, Number(e.target.value) || 0))} className={numCls} />
+          <span className="text-sm text-slate-600">update(s) after the lead was assigned</span>
+        </div>
+      )}
+      <p className="mt-1 text-xs text-slate-400">Counts status changes, notes, reminders etc. logged after assignment. <b>0</b> = untouched since assigned.</p>
+    </div>
+  );
+}
+
 // --------------------------------------------------------------- transfer UI
 
 function RuleCard({ rule, lk, busy, onEdit, onToggle, onDelete, onPreview, onRun }: {
@@ -138,7 +157,7 @@ function RuleCard({ rule, lk, busy, onEdit, onToggle, onDelete, onPreview, onRun
   if (c.source_ids.length) rows.push({ label: "Lead Source", value: names(c.source_ids, lk.sources) });
   if (c.created_after) rows.push({ label: "Created After", value: c.created_after });
   if (c.days_since_created > 0) rows.push({ label: "Created Age", value: `≥ ${c.days_since_created} days` });
-  if (c.max_updates > 0) rows.push({ label: "Updates", value: `≤ ${c.max_updates}` });
+  if (c.check_updates) rows.push({ label: "Updates", value: `≤ ${c.max_updates} since assign` });
   if (rule.rule_type === "transfer") {
     if (c.max_calls > 0) rows.push({ label: "Call Count", value: `Less than ${c.max_calls}${c.count_connected_only ? " connected" : ""} calls` });
     if (c.assign_age_value > 0) rows.push({ label: "Assignment Age", value: `${c.assign_age_op === "lt" ? "Less than" : "At least"} ${c.assign_age_value} ${ageUnitLabel(c.assign_age_unit)}` });
@@ -211,7 +230,7 @@ function RuleEditor({ initial, lk, saving, onClose, onSave }: { initial: Draft; 
           <Field title="Created after" hint="Absolute cutoff — only leads created after this date."><input type="date" value={d.created_after} onChange={(e) => up({ created_after: e.target.value })} className={textCls} /></Field>
           <NumberField label="Created at least ago" unit="days" help="0 = ignore." value={d.days_since_created} onChange={(v) => up({ days_since_created: v })} />
         </div>
-        <NumberField label="At most this many updates" unit="updates" help="0 = ignore. Activity entries on the lead." value={d.max_updates} onChange={(v) => up({ max_updates: v })} />
+        <UpdatesField check={d.check_updates} value={d.max_updates} onCheck={(v) => up({ check_updates: v })} onValue={(v) => up({ max_updates: v })} />
         {isTransfer && (
           <>
             <hr className="border-slate-100" />
@@ -348,6 +367,7 @@ function NotifyEditor({ initial, lk, saving, onClose, onSave }: { initial: Notif
           <Field title="Created after"><input type="date" value={d.created_after} onChange={(e) => up({ created_after: e.target.value })} className={textCls} /></Field>
           <NumberField label="Created at least ago" unit="days" help="0 = ignore." value={d.days_since_created} onChange={(v) => up({ days_since_created: v })} />
         </div>
+        <UpdatesField check={d.check_updates} value={d.max_updates} onCheck={(v) => up({ check_updates: v })} onValue={(v) => up({ max_updates: v })} />
         <label className="flex items-center gap-2"><input type="checkbox" checked={d.exclude_mass_assigned} onChange={(e) => up({ exclude_mass_assigned: e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" /><span className="text-sm text-slate-700">Exclude mass-assigned leads</span></label>
       </div>
     </Drawer>

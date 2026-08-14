@@ -40,6 +40,7 @@ class LeadNotify
         'days_since_created'    => 0,
         'max_calls'             => 1,        // remind only if fewer than this many calls (0 = ignore)
         'count_connected_only'  => false,
+        'check_updates'         => false,    // enable the "≤ N updates since assignment" filter
         'max_updates'           => 0,
         'age_value'             => 2,        // fire once age ≥ this (may be fractional)
         'age_unit'              => 'clock_hours',
@@ -66,6 +67,7 @@ class LeadNotify
             'days_since_created'    => max(0, (int) ($c['days_since_created'] ?? 0)),
             'max_calls'             => max(0, (int) ($c['max_calls'] ?? 0)),
             'count_connected_only'  => ! empty($c['count_connected_only']),
+            'check_updates'         => ! empty($c['check_updates']),
             'max_updates'           => max(0, (int) ($c['max_updates'] ?? 0)),
             'age_value'             => max(0, (float) ($c['age_value'] ?? 0)),
             'age_unit'              => AutoLeadTransfer::normaliseAgeUnit($c['age_unit'] ?? ''),
@@ -204,9 +206,12 @@ class LeadNotify
                 $out['skipped_age']++;
                 continue;
             }
-            if ($cfg['max_updates'] > 0) {
-                $updates = $db->table('activity_logs')->where('entity_type', 'lead')->where('entity_id', $leadId)->countAllResults();
-                if ($updates > $cfg['max_updates']) {
+            if ($cfg['check_updates']) {
+                $uq = $db->table('activity_logs')->where('entity_type', 'lead')->where('entity_id', $leadId);
+                if (! empty($lead['assigned_date'])) {
+                    $uq->where('created_at >', (string) $lead['assigned_date']);
+                }
+                if ($uq->countAllResults() > $cfg['max_updates']) {
                     $out['skipped_updates']++;
                     continue;
                 }
