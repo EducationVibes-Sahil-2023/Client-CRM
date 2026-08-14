@@ -754,7 +754,7 @@ export const saveLeadTransferMode = (mode: "direct" | "approval") =>
   clientPost<{ message: string; mode: "direct" | "approval" }>("/lead-transfer-mode", { mode });
 
 // ---- Auto lead-transfer (rules) ----
-export type AgeUnit = "calendar_days" | "working_days" | "clock_hours" | "working_hours";
+export type AgeUnit = "calendar_days" | "working_days" | "clock_hours" | "working_hours" | "clock_minutes" | "working_minutes";
 export type AutoTransferRuleType = "transfer" | "distribute";
 export interface AutoTransferRuleConfig {
   status_ids: number[];
@@ -771,6 +771,7 @@ export interface AutoTransferRuleConfig {
   assign_age_value: number;
   assign_age_unit: AgeUnit;
   max_transfers: number;
+  new_status_id: number;
   include_staff_ids: number[];
   exclude_staff_ids: number[];
   target_staff_ids: number[];
@@ -909,6 +910,36 @@ export const runLeadNotificationsNow = (dryRun: boolean, ruleId?: number) =>
     dry_run: dryRun ? 1 : 0,
     ...(ruleId ? { rule_id: ruleId } : {}),
   });
+
+// ---- Auto-transfer report ----
+export interface TransferStat { id: number; name: string; count: number }
+export interface TransferReportTab { key: string; label: string; count: number }
+export interface TransferReport {
+  summary: { total: number; active_counselors: number; top_counselor: TransferStat | null };
+  chart: { transfer: TransferStat[]; assignation: TransferStat[] };
+  ranking: { sources: TransferStat[]; counselors: TransferStat[] };
+  tabs: TransferReportTab[];
+  filters: { departments: IdName[]; counselors: IdName[]; sources: IdName[]; statuses: IdName[] };
+}
+export interface TransferLogRow {
+  id: number; lead_id: number; name: string; phone: string; source: string;
+  update_count: number; sub_status: string; old_status: string; new_status: string;
+  current_status: string; old_assigned: string; new_assigned: string; auto: boolean; date: string;
+}
+export interface TransferReportFilters {
+  tab?: string; department_id?: number; counselor_id?: number; source_id?: number;
+  status_id?: number; update_count?: string; date_from?: string; date_to?: string; search?: string;
+}
+const atQs = (f: Record<string, unknown>) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (v !== undefined && v !== null && v !== "" && v !== 0) p.set(k, String(v));
+  const s = p.toString();
+  return s ? `?${s}` : "";
+};
+export const getTransferReport = (f: TransferReportFilters = {}) =>
+  clientGet<TransferReport>(`/transfer-report${atQs(f as Record<string, unknown>)}`);
+export const getTransferReportLogs = (f: TransferReportFilters & { page?: number; per_page?: number } = {}) =>
+  clientGet<{ rows: TransferLogRow[]; total: number; page: number; per_page: number }>(`/transfer-report/logs${atQs(f as Record<string, unknown>)}`);
 
 // ---- Visitor requests ----
 export interface VisitorType { id: number; name: string; color: string; sequence: number; enabled: number | boolean }

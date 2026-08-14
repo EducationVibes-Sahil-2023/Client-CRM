@@ -19,7 +19,9 @@ const numCls = "w-24 rounded-lg border border-slate-300 px-3 py-2 text-sm text-s
 const textCls = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/15";
 
 const AGE_UNITS: { value: AgeUnit; label: string }[] = [
+  { value: "clock_minutes", label: "clock minutes" },
   { value: "clock_hours", label: "clock hours" },
+  { value: "working_minutes", label: "working minutes" },
   { value: "working_hours", label: "working hours" },
   { value: "calendar_days", label: "calendar days" },
   { value: "working_days", label: "working days" },
@@ -34,7 +36,7 @@ const blankConfig = (): AutoTransferRuleConfig => ({
   status_ids: [], lead_type_ids: [], source_ids: [], exclude_mass_assigned: false,
   created_after: "", days_since_created: 0, max_calls: 0, count_connected_only: false, check_updates: false, max_updates: 0,
   assign_age_op: "gte", assign_age_value: 0, assign_age_unit: "calendar_days",
-  max_transfers: 3, include_staff_ids: [], exclude_staff_ids: [], target_staff_ids: [],
+  max_transfers: 3, new_status_id: 0, include_staff_ids: [], exclude_staff_ids: [], target_staff_ids: [],
 });
 const newDraft = (): Draft => ({ name: "", rule_type: "transfer", enabled: false, sequence: 0, ...blankConfig() });
 const ruleToDraft = (r: AutoTransferRule): Draft => ({ id: r.id, name: r.name, rule_type: r.rule_type, enabled: r.enabled, sequence: r.sequence, ...r.config });
@@ -162,6 +164,7 @@ function RuleCard({ rule, lk, busy, onEdit, onToggle, onDelete, onPreview, onRun
     if (c.max_calls > 0) rows.push({ label: "Call Count", value: `Less than ${c.max_calls}${c.count_connected_only ? " connected" : ""} calls` });
     if (c.assign_age_value > 0) rows.push({ label: "Assignment Age", value: `${c.assign_age_op === "lt" ? "Less than" : "At least"} ${c.assign_age_value} ${ageUnitLabel(c.assign_age_unit)}` });
     rows.push({ label: "Stop After", value: `${c.max_transfers} transfer(s)` });
+    if (c.new_status_id) rows.push({ label: "Set status", value: names([c.new_status_id], lk.statuses) });
     if (c.exclude_mass_assigned) rows.push({ label: "Exclude", value: "Mass-assigned leads" });
     if (c.include_staff_ids.length) rows.push({ label: "Only assigned to", value: `${c.include_staff_ids.length} staff` });
     if (c.exclude_staff_ids.length) rows.push({ label: "Never move from", value: `${c.exclude_staff_ids.length} staff` });
@@ -248,6 +251,12 @@ function RuleEditor({ initial, lk, saving, onClose, onSave }: { initial: Draft; 
               <p className="mt-1 text-xs text-slate-400">Working hours/days exclude nights, weekends &amp; holidays (per the assigned staff&apos;s shift).</p>
             </Field>
             <label className="flex items-center gap-2"><input type="checkbox" checked={d.exclude_mass_assigned} onChange={(e) => up({ exclude_mass_assigned: e.target.checked })} className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" /><span className="text-sm text-slate-700">Exclude mass-assigned leads (bulk-dumped batches)</span></label>
+            <Field title="Set status on transfer" hint="Optional — reset the lead's status for the new counsellor (e.g. Fresh Lead). The report shows Old → New status.">
+              <select value={d.new_status_id} onChange={(e) => up({ new_status_id: Number(e.target.value) })} className={textCls + " w-auto"}>
+                <option value={0}>Keep current status</option>
+                {lk.statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </Field>
             <div className="grid gap-6 sm:grid-cols-2">
               <Field title="Only leads assigned to" hint="Optional."><Chips options={lk.staff} selected={d.include_staff_ids} onToggle={(id) => up({ include_staff_ids: toggleId(d.include_staff_ids, id) })} empty="No staff." scroll /></Field>
               <Field title="Never move leads from" hint="Optional."><Chips options={lk.staff} selected={d.exclude_staff_ids} onToggle={(id) => up({ exclude_staff_ids: toggleId(d.exclude_staff_ids, id) })} empty="No staff." scroll /></Field>

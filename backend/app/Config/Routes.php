@@ -248,6 +248,8 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->post('lead-notifications', 'ClientController::saveLeadNotification');
         $routes->post('lead-notifications/(:num)/delete', 'ClientController::deleteLeadNotification/$1');
         $routes->post('lead-notifications-run', 'ClientController::runLeadNotificationsNow');
+        $routes->get('transfer-report', 'ClientController::transferReport');
+        $routes->get('transfer-report/logs', 'ClientController::transferReportLogs');
     });
 
     // Visitor requests — log + admin-defined types/statuses (the 'visitors' module).

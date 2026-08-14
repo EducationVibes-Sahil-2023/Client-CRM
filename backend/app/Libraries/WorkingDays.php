@@ -122,6 +122,12 @@ class WorkingDays
         $staffId = (int) ($lead['assigned_to'] ?? 0);
 
         switch ($unit) {
+            case 'clock_minutes':
+                return ($now->getTimestamp() - $assigned->getTimestamp()) / 60;
+            case 'working_minutes':
+                [$sch, $hol] = self::scheduleFor($ctx, $staffId);
+
+                return FirstResponseService::workingSeconds($sch, $hol, $assigned, $now) / 60;
             case 'clock_hours':
                 return ($now->getTimestamp() - $assigned->getTimestamp()) / 3600;
             case 'working_hours':

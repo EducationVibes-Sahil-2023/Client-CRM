@@ -4382,6 +4382,22 @@ class ClientController extends ApiController
         return ($l['name'] ?? '') !== '' ? $l['name'] : ($l['phone'] ?? "Lead #{$leadId}");
     }
 
+    /** A lead's "update count": activity entries logged after it was assigned. */
+    private function leadUpdateCount(int $cid, int $leadId, ?string $assignedDate): int
+    {
+        try {
+            $db = (new TenantManager())->forClient($cid);
+            $q  = $db->table('activity_logs')->where('entity_type', 'lead')->where('entity_id', $leadId);
+            if ($assignedDate) {
+                $q->where('created_at >', $assignedDate);
+            }
+
+            return $q->countAllResults();
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
     /** In-app + push notification to every client-admin of this client. */
     private function notifyClientAdmins(string $type, string $title, ?string $body, ?string $link): void
     {
@@ -4491,10 +4507,14 @@ class ClientController extends ApiController
         ];
 
         if ($mode === 'direct') {
-            $row['status']     = 'approved';
-            $row['decided_by'] = $this->actorId() ?: null;
-            $row['decided_at'] = date('Y-m-d H:i:s');
-            $id                = $model->insert($row);
+            $row['status']        = 'approved';
+            $row['decided_by']    = $this->actorId() ?: null;
+            $row['decided_at']    = date('Y-m-d H:i:s');
+            $row['old_status_id'] = (int) $lead['status_id'] ?: null;
+            $row['new_status_id'] = (int) $lead['status_id'] ?: null; // manual transfer keeps status
+            $row['source_id']     = (int) $lead['source_id'] ?: null;
+            $row['update_count']  = $this->leadUpdateCount($cid, $leadId, $lead['assigned_date'] ?? null);
+            $id                   = $model->insert($row);
 
             (new LeadModel())->update($leadId, ['assigned_to' => $toId, 'assigned_date' => date('Y-m-d H:i:s'), 'mass_assigned' => 0]);
             $this->logActivity('transferred', 'lead', $leadId, "Lead transferred to {$toName}");
@@ -4526,7 +4546,17 @@ class ClientController extends ApiController
         if (! $t || $t['status'] !== 'pending') {
             return $this->failNotFound('Pending transfer not found');
         }
-        $model->update($id, ['status' => 'approved', 'decided_by' => $this->actorId() ?: null, 'decided_at' => date('Y-m-d H:i:s'), 'decision_note' => trim((string) $this->input('note')) ?: null]);
+        $lead = (new LeadModel())->where('client_id', $cid)->find((int) $t['lead_id']);
+        $model->update($id, [
+            'status'        => 'approved',
+            'decided_by'    => $this->actorId() ?: null,
+            'decided_at'    => date('Y-m-d H:i:s'),
+            'decision_note' => trim((string) $this->input('note')) ?: null,
+            'old_status_id' => $lead ? ((int) $lead['status_id'] ?: null) : null,
+            'new_status_id' => $lead ? ((int) $lead['status_id'] ?: null) : null,
+            'source_id'     => $lead ? ((int) $lead['source_id'] ?: null) : null,
+            'update_count'  => $lead ? $this->leadUpdateCount($cid, (int) $t['lead_id'], $lead['assigned_date'] ?? null) : 0,
+        ]);
         (new LeadModel())->update((int) $t['lead_id'], ['assigned_to' => (int) $t['to_staff_id'], 'assigned_date' => date('Y-m-d H:i:s'), 'pending_transfer' => 0, 'mass_assigned' => 0]);
 
         $leadName = $this->leadLabel($cid, (int) $t['lead_id']);
@@ -4619,6 +4649,7 @@ class ClientController extends ApiController
             'assign_age_value'      => (int) $this->input('assign_age_value'),
             'assign_age_unit'       => (string) $this->input('assign_age_unit'),
             'max_transfers'         => (int) $this->input('max_transfers'),
+            'new_status_id'         => (int) $this->input('new_status_id'),
             'include_staff_ids'     => (array) $this->input('include_staff_ids'),
             'exclude_staff_ids'     => (array) $this->input('exclude_staff_ids'),
             'target_staff_ids'      => (array) $this->input('target_staff_ids'),
@@ -4917,6 +4948,168 @@ class ClientController extends ApiController
         }
 
         return $this->respond(['result' => $res, 'dry_run' => $dryRun]);
+    }
+
+    // ---------------------------------------------------- TRANSFER REPORT
+
+    /**
+     * A filtered `lead_transfers` query (approved only), joined to leads, honouring
+     * the report's tab + Advanced Filters. Returns a fresh builder each call.
+     */
+    private function transferReportBase(\CodeIgniter\Database\BaseConnection $db, int $cid)
+    {
+        $r   = $this->request;
+        $tab = (string) $r->getGet('tab') ?: 'all';
+
+        $q = $db->table('lead_transfers t')
+            ->join('leads l', 'l.id = t.lead_id', 'left')
+            ->where('t.client_id', $cid)
+            ->where('t.status', 'approved')
+            ->where('t.deleted_at IS NULL');
+
+        if ($tab === 'self') {
+            $q->where('t.rule_id IS NULL');
+        } elseif ($tab === 'auto') {
+            $q->where('t.rule_id IS NOT NULL');
+        } elseif (str_starts_with($tab, 'status:')) {
+            $q->where('t.old_status_id', (int) substr($tab, 7))->where('t.rule_id IS NOT NULL');
+        }
+
+        if ($c = (int) $r->getGet('counselor_id')) {
+            $q->where('t.to_staff_id', $c);
+        }
+        if ($s = (int) $r->getGet('source_id')) {
+            $q->where('t.source_id', $s);
+        }
+        if ($st = (int) $r->getGet('status_id')) {
+            $q->where('l.status_id', $st);
+        }
+        if ($from = (string) $r->getGet('date_from')) {
+            $q->where('DATE(t.created_at) >=', $from);
+        }
+        if ($to = (string) $r->getGet('date_to')) {
+            $q->where('DATE(t.created_at) <=', $to);
+        }
+        $uc = $r->getGet('update_count');
+        if ($uc !== null && $uc !== '') {
+            $uc === '5plus' ? $q->where('t.update_count >=', 5) : $q->where('t.update_count', (int) $uc);
+        }
+        if ($dep = (int) $r->getGet('department_id')) {
+            $q->join('client_staff cs', 'cs.id = t.to_staff_id', 'left')->where('cs.department_id', $dep);
+        }
+        if (($search = trim((string) $r->getGet('search'))) !== '') {
+            $q->groupStart()->like('l.name', $search)->orLike('l.phone', $search)->groupEnd();
+        }
+
+        return $q;
+    }
+
+    /**
+     * GET /client/transfer-report — cards, per-counsellor chart (transfer +
+     * assignation), source/counsellor rankings, tabs and Advanced-Filter options.
+     */
+    public function transferReport()
+    {
+        if ($resp = $this->requirePermission('lead_transfer')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+        $db  = (new TenantManager())->forClient($cid);
+
+        $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        $statusNames = $this->idNameMap((new LeadStatusModel())->where('client_id', $cid)->findAll());
+        $sourceNames = $this->idNameMap((new LeadSourceModel())->where('client_id', $cid)->findAll());
+
+        $total = $this->transferReportBase($db, $cid)->countAllResults();
+
+        // Transfers received per counsellor (chart + ranking).
+        $byCounsel = [];
+        foreach ($this->transferReportBase($db, $cid)->select('t.to_staff_id sid, COUNT(*) c')->groupBy('t.to_staff_id')->orderBy('c', 'DESC')->get()->getResultArray() as $row) {
+            $byCounsel[] = ['id' => (int) $row['sid'], 'name' => $staffNames[(int) $row['sid']] ?? 'Unknown', 'count' => (int) $row['c']];
+        }
+        // Transfers by source (ranking).
+        $bySource = [];
+        foreach ($this->transferReportBase($db, $cid)->select('t.source_id sid, COUNT(*) c')->groupBy('t.source_id')->orderBy('c', 'DESC')->get()->getResultArray() as $row) {
+            $bySource[] = ['id' => (int) $row['sid'], 'name' => $sourceNames[(int) $row['sid']] ?? '—', 'count' => (int) $row['c']];
+        }
+        // Leads currently assigned per counsellor (the "Lead Assignation" chart).
+        $byAssign = [];
+        foreach ($db->table('leads')->select('assigned_to sid, COUNT(*) c')->where('client_id', $cid)->where('deleted_at IS NULL')->where('assigned_to >', 0)->groupBy('assigned_to')->orderBy('c', 'DESC')->get()->getResultArray() as $row) {
+            $byAssign[] = ['id' => (int) $row['sid'], 'name' => $staffNames[(int) $row['sid']] ?? 'Unknown', 'count' => (int) $row['c']];
+        }
+
+        // Tabs: one per old-status of auto-transfers, plus Self Transfer (manual).
+        $tabs = [];
+        foreach ($db->table('lead_transfers')->select('old_status_id sid, COUNT(*) c')->where('client_id', $cid)->where('status', 'approved')->where('deleted_at IS NULL')->where('rule_id IS NOT NULL')->groupBy('old_status_id')->orderBy('c', 'DESC')->get()->getResultArray() as $row) {
+            $tabs[] = ['key' => 'status:' . (int) $row['sid'], 'label' => $statusNames[(int) $row['sid']] ?? 'Unknown', 'count' => (int) $row['c']];
+        }
+        $selfCount = $db->table('lead_transfers')->where('client_id', $cid)->where('status', 'approved')->where('deleted_at IS NULL')->where('rule_id IS NULL')->countAllResults();
+        if ($selfCount > 0) {
+            $tabs[] = ['key' => 'self', 'label' => 'Self Transfer', 'count' => $selfCount];
+        }
+        if (! $tabs) {
+            $tabs[] = ['key' => 'all', 'label' => 'All Transfers', 'count' => $total];
+        }
+
+        return $this->respond([
+            'summary' => [
+                'total'            => $total,
+                'active_counselors' => count($byCounsel),
+                'top_counselor'    => $byCounsel[0] ?? null,
+            ],
+            'chart'    => ['transfer' => $byCounsel, 'assignation' => $byAssign],
+            'ranking'  => ['sources' => array_slice($bySource, 0, 5), 'counselors' => array_slice($byCounsel, 0, 5)],
+            'tabs'     => $tabs,
+            'filters'  => [
+                'departments' => array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], (new DepartmentModel())->where('client_id', $cid)->orderBy('name', 'ASC')->findAll()),
+                'counselors'  => array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], (new ClientStaffModel())->where('client_id', $cid)->orderBy('name', 'ASC')->findAll()),
+                'sources'     => array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadSourceModel::class, $cid)),
+                'statuses'    => array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->lookupRows(LeadStatusModel::class, $cid)),
+            ],
+        ]);
+    }
+
+    /** GET /client/transfer-report/logs — the paginated transfer log table. */
+    public function transferReportLogs()
+    {
+        if ($resp = $this->requirePermission('lead_transfer')) {
+            return $resp;
+        }
+        $cid  = $this->clientId();
+        $db   = (new TenantManager())->forClient($cid);
+        $page = max(1, (int) $this->request->getGet('page'));
+        $per  = min(200, max(10, (int) $this->request->getGet('per_page') ?: 50));
+
+        $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
+        $statusNames = $this->idNameMap((new LeadStatusModel())->where('client_id', $cid)->findAll());
+        $sourceNames = $this->idNameMap((new LeadSourceModel())->where('client_id', $cid)->findAll());
+
+        $total = $this->transferReportBase($db, $cid)->countAllResults();
+        $rows  = $this->transferReportBase($db, $cid)
+            ->select('t.id, t.lead_id, t.from_staff_id, t.to_staff_id, t.old_status_id, t.new_status_id, t.source_id, t.update_count, t.rule_id, t.created_at, l.name, l.phone, l.status_id cur_status, l.sub_status_id')
+            ->orderBy('t.id', 'DESC')->limit($per, ($page - 1) * $per)->get()->getResultArray();
+
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id'             => (int) $r['id'],
+                'lead_id'        => (int) $r['lead_id'],
+                'name'           => (string) ($r['name'] ?? ''),
+                'phone'          => (string) ($r['phone'] ?? ''),
+                'source'         => $sourceNames[(int) $r['source_id']] ?? '—',
+                'update_count'   => (int) $r['update_count'],
+                'sub_status'     => $statusNames[(int) $r['sub_status_id']] ?? '—',
+                'old_status'     => $statusNames[(int) $r['old_status_id']] ?? '—',
+                'new_status'     => $statusNames[(int) $r['new_status_id']] ?? '—',
+                'current_status' => $statusNames[(int) $r['cur_status']] ?? '—',
+                'old_assigned'   => $r['from_staff_id'] ? ($staffNames[(int) $r['from_staff_id']] ?? '—') : 'Unassigned',
+                'new_assigned'   => $staffNames[(int) $r['to_staff_id']] ?? '—',
+                'auto'           => $r['rule_id'] !== null,
+                'date'           => (string) $r['created_at'],
+            ];
+        }
+
+        return $this->respond(['rows' => $out, 'total' => $total, 'page' => $page, 'per_page' => $per]);
     }
 
     // ============================================================ VISITORS

@@ -13,6 +13,8 @@ class LeadTransferModel extends TenantModel
     protected $allowedFields = [
         'client_id', 'lead_id', 'from_staff_id', 'to_staff_id', 'requested_by',
         'reason', 'status', 'decided_by', 'decided_at', 'decision_note',
+        // Snapshot at transfer time (for the Auto-Transfer report).
+        'rule_id', 'old_status_id', 'new_status_id', 'source_id', 'update_count',
     ];
 
     protected $useSoftDeletes = true;

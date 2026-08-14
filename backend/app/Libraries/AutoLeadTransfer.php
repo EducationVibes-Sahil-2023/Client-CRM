@@ -49,6 +49,7 @@ class AutoLeadTransfer
         'assign_age_value'      => 0,         // in the unit below (0 = ignore the age filter); may be fractional (e.g. 2.5)
         'assign_age_unit'       => 'calendar_days', // calendar_days | working_days | clock_hours | working_hours
         'max_transfers'         => 3,         // stop after this many transfers per lead
+        'new_status_id'         => 0,         // reset the lead's status on transfer (0 = keep as-is)
         'include_staff_ids'     => [],        // only leads currently assigned to these (empty = any)
         'exclude_staff_ids'     => [],        // never move leads assigned to these
         'target_staff_ids'      => [],        // pool to (re)assign among; empty = all active staff
@@ -82,6 +83,7 @@ class AutoLeadTransfer
             'assign_age_value'      => max(0, (float) ($c['assign_age_value'] ?? 0)),
             'assign_age_unit'       => $unit,
             'max_transfers'         => max(1, (int) ($c['max_transfers'] ?? 1)),
+            'new_status_id'         => max(0, (int) ($c['new_status_id'] ?? 0)),
             'include_staff_ids'     => $ids($c['include_staff_ids'] ?? []),
             'exclude_staff_ids'     => $ids($c['exclude_staff_ids'] ?? []),
             'target_staff_ids'      => $ids($c['target_staff_ids'] ?? []),
@@ -94,7 +96,7 @@ class AutoLeadTransfer
         $map  = ['calendar' => 'calendar_days', 'working' => 'working_days'];
         $unit = $map[(string) $raw] ?? (string) $raw;
 
-        return in_array($unit, ['calendar_days', 'working_days', 'clock_hours', 'working_hours'], true) ? $unit : 'calendar_days';
+        return in_array($unit, ['calendar_days', 'working_days', 'clock_hours', 'working_hours', 'clock_minutes', 'working_minutes'], true) ? $unit : 'calendar_days';
     }
 
     /** Decode + normalise a rule row's JSON config. */
@@ -323,7 +325,17 @@ class AutoLeadTransfer
                 continue;
             }
 
-            $leadM->skipValidation(true)->update($leadId, ['assigned_to' => $pick, 'assigned_date' => $now, 'mass_assigned' => 0]);
+            // Snapshot the pre-transfer state (before we re-stamp the lead).
+            $oldStatus   = (int) ($lead['status_id'] ?? 0) ?: null;
+            $newStatus   = ! $distribute && $cfg['new_status_id'] > 0 ? $cfg['new_status_id'] : $oldStatus;
+            $updateCount = self::updatesSince($db, $leadId, (string) ($lead['assigned_date'] ?? ''));
+
+            $leadData = ['assigned_to' => $pick, 'assigned_date' => $now, 'mass_assigned' => 0];
+            if (! $distribute && $cfg['new_status_id'] > 0) {
+                $leadData['status_id'] = $cfg['new_status_id']; // reset status for the new counsellor
+            }
+            $leadM->skipValidation(true)->update($leadId, $leadData);
+
             if ($distribute) {
                 self::logAction($db, $cid, $leadId, 'assigned', 'Auto-distributed to ' . ($ctx['names'][$pick] ?? "#{$pick}"));
                 self::notify($cid, $pick, $label, false);
@@ -338,6 +350,11 @@ class AutoLeadTransfer
                     'status'        => 'approved',
                     'decided_by'    => null,
                     'decided_at'    => $now,
+                    'rule_id'       => (int) $rule['id'],
+                    'old_status_id' => $oldStatus,
+                    'new_status_id' => $newStatus,
+                    'source_id'     => (int) ($lead['source_id'] ?? 0) ?: null,
+                    'update_count'  => $updateCount,
                 ]);
                 self::logAction($db, $cid, $leadId, 'transferred', 'Auto-transferred to ' . ($ctx['names'][$pick] ?? "#{$pick}"));
                 self::notify($cid, $pick, $label, true);
@@ -375,6 +392,17 @@ class AutoLeadTransfer
             ->where('call_start >=', $since);
         if ($connectedOnly) {
             $q->where('connected', 1);
+        }
+
+        return $q->countAllResults();
+    }
+
+    /** Activity entries logged on the lead after it was assigned (its "update count"). */
+    private static function updatesSince(ConnectionInterface $db, int $leadId, string $assignedDate): int
+    {
+        $q = $db->table('activity_logs')->where('entity_type', 'lead')->where('entity_id', $leadId);
+        if ($assignedDate !== '') {
+            $q->where('created_at >', $assignedDate);
         }
 
         return $q->countAllResults();
