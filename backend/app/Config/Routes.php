@@ -35,6 +35,11 @@ $routes->match(['get', 'post'], 'public/fb/webhook', static fn () => service('re
     ->setStatusCode(410)
     ->setBody('This Facebook webhook URL is per project. Use the URL shown on your Facebook integration page.'));
 
+// Secured web-cron trigger (sessionless; guarded by the `cron.key` secret). Point
+// a 5-minute scheduler (host cron / cron-job.com / Windows Task Scheduler) at this
+// URL to pull Facebook leads automatically, without server shell access.
+$routes->get('public/cron/fb-poll', 'Cron::fbPoll');
+
 // Authentication
 $routes->group('auth', static function (RouteCollection $routes) {
     $routes->post('login', 'Auth::login');
@@ -62,6 +67,8 @@ $routes->group('superadmin', ['filter' => 'auth:super_admin'], static function (
     $routes->get('clients/(:num)/features', 'SuperAdmin::clientFeatures/$1');
     $routes->post('clients/(:num)/features', 'SuperAdmin::saveClientFeatures/$1');
     $routes->post('clients/(:num)/login-as', 'SuperAdmin::loginAsClient/$1');
+    $routes->get('clients/(:num)/admins', 'SuperAdmin::clientAdmins/$1');
+    $routes->post('clients/(:num)/admin-password', 'SuperAdmin::changeAdminPassword/$1');
     $routes->post('clients/(:num)/status', 'SuperAdmin::updateClientStatus/$1');
     $routes->post('clients/(:num)/delete', 'SuperAdmin::deleteClient/$1');
     $routes->post('clients/(:num)', 'SuperAdmin::updateClient/$1');
@@ -229,6 +236,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
         $routes->get('reports/leads-by', 'ClientController::reportLeadsBy');
         $routes->get('reports/pipeline', 'ClientController::reportPipeline');
         $routes->get('reports/rep-performance', 'ClientController::reportRepPerformance');
+        $routes->get('reports/rep-breakdown', 'ClientController::reportRepBreakdown');
     });
 
     // Lead transfer — request/approve/reject/cancel + the admin transfer-mode.

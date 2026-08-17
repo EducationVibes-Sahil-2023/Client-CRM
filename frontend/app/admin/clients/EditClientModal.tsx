@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { updateClient, getClientFeatures, saveClientFeatures, type Client, type ClientFeatureItem } from "../../lib/admin";
+import { updateClient, getClientFeatures, saveClientFeatures, getClientAdmins, changeClientAdminPassword, type Client, type ClientFeatureItem } from "../../lib/admin";
 import { useToast } from "../../components/toast/ToastProvider";
 import { Drawer } from "../ui";
 import { FieldRow, inputCls, isEmail, isPhone } from "./formKit";
@@ -35,6 +35,10 @@ export default function EditClientModal({
   const [errors, setErrors] = useState<Partial<Record<keyof Form, string>>>({});
   const [saving, setSaving] = useState(false);
   const [features, setFeatures] = useState<ClientFeatureItem[]>([]);
+  const [admins, setAdmins] = useState<{ id: number; name: string; email: string }[]>([]);
+  const [adminId, setAdminId] = useState(0);
+  const [newPass, setNewPass] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
 
   /* eslint-disable react-hooks/set-state-in-effect -- intentional prop→state sync when the drawer opens */
   useEffect(() => {
@@ -50,10 +54,29 @@ export default function EditClientModal({
         plan_end: dateOnly(client.plan_end),
       });
       setErrors({});
+      setNewPass("");
       getClientFeatures(client.id).then((d) => setFeatures(d.features)).catch(() => setFeatures([]));
+      getClientAdmins(client.id).then((d) => { setAdmins(d.admins); setAdminId(d.admins[0]?.id ?? 0); }).catch(() => setAdmins([]));
     }
   }, [client]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  async function changePassword() {
+    if (newPass.length < 8) {
+      toast.warning("Password must be at least 8 characters.");
+      return;
+    }
+    setPwSaving(true);
+    try {
+      const res = await changeClientAdminPassword(client!.id, newPass, adminId || undefined);
+      toast.success(`Password updated for ${res.email}.`, { title: "Saved" });
+      setNewPass("");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not change password");
+    } finally {
+      setPwSaving(false);
+    }
+  }
 
   if (!client || !form) return null;
 
@@ -164,6 +187,34 @@ export default function EditClientModal({
               <input type="date" className={inputCls(errors.plan_end)} value={form.plan_end} min={form.plan_start || undefined} onChange={(e) => set("plan_end")(e.target.value)} />
             </FieldRow>
           </div>
+        </section>
+
+        <section>
+          <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Admin login &amp; password</h4>
+          {admins.length === 0 ? (
+            <p className="text-sm text-slate-400">This client has no admin account yet.</p>
+          ) : (
+            <div className="space-y-3 rounded-xl border border-slate-200 p-3">
+              {admins.length > 1 && (
+                <FieldRow label="Admin account" full>
+                  <select className={inputCls()} value={adminId} onChange={(e) => setAdminId(Number(e.target.value))}>
+                    {admins.map((a) => <option key={a.id} value={a.id}>{a.email}{a.name ? ` — ${a.name}` : ""}</option>)}
+                  </select>
+                </FieldRow>
+              )}
+              {admins.length === 1 && (
+                <p className="text-sm text-slate-500">Admin: <span className="font-medium text-slate-700">{admins[0].email}</span></p>
+              )}
+              <div className="flex items-end gap-2">
+                <FieldRow label="New password" hint="Min 8 characters. The admin can sign in with this immediately." full>
+                  <input type="text" className={inputCls()} placeholder="New password" value={newPass} onChange={(e) => setNewPass(e.target.value)} />
+                </FieldRow>
+                <button onClick={changePassword} disabled={pwSaving || newPass.length < 8} className="mb-0.5 flex-shrink-0 rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-50">
+                  {pwSaving ? "Setting…" : "Set password"}
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <section>

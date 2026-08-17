@@ -348,6 +348,53 @@ class SuperAdmin extends ApiController
         return $this->respond(['message' => 'Client updated', 'client' => $clientModel->find($clientId)]);
     }
 
+    /** GET /superadmin/clients/{id}/admins — the client_admin logins for this tenant. */
+    public function clientAdmins(int $clientId)
+    {
+        if (! (new ClientModel())->find($clientId)) {
+            return $this->failNotFound('Client not found');
+        }
+        $admins = array_map(
+            static fn ($u) => ['id' => (int) $u['id'], 'name' => (string) ($u['name'] ?? ''), 'email' => (string) ($u['email'] ?? '')],
+            (new UserModel())->where('role', 'client_admin')->where('client_id', $clientId)->orderBy('id', 'ASC')->findAll(),
+        );
+
+        return $this->respond(['admins' => $admins]);
+    }
+
+    /**
+     * POST /superadmin/clients/{id}/admin-password — set a client admin's password.
+     * Body: { password, user_id? }. Without user_id, targets the tenant's first admin.
+     */
+    public function changeAdminPassword(int $clientId)
+    {
+        if (! (new ClientModel())->find($clientId)) {
+            return $this->failNotFound('Client not found');
+        }
+        $password = (string) $this->input('password');
+        $userId   = (int) $this->input('user_id');
+        if (strlen($password) < 8) {
+            return $this->failValidationErrors(['password' => 'Password must be at least 8 characters.']);
+        }
+
+        $userModel = new UserModel();
+        $q         = $userModel->where('role', 'client_admin')->where('client_id', $clientId);
+        if ($userId > 0) {
+            $q->where('id', $userId);
+        }
+        $admin = $q->orderBy('id', 'ASC')->first();
+        if (! $admin) {
+            return $this->failNotFound('No admin account found for this client');
+        }
+
+        // UserModel::hashPassword hashes it on update; skip validation so the
+        // password-only update isn't blocked by the email/role rules.
+        $userModel->skipValidation(true)->update((int) $admin['id'], ['password' => $password]);
+        $this->logActivity('updated', 'admin', (int) $admin['id'], 'Reset password for client admin ' . ($admin['email'] ?? '') . ' (client #' . $clientId . ')', $clientId);
+
+        return $this->respond(['message' => 'Password changed', 'email' => (string) ($admin['email'] ?? '')]);
+    }
+
     /**
      * POST /superadmin/upload — generic image upload (multipart, field "file").
      * Returns the stored URL so the client knows where to point an avatar/logo.

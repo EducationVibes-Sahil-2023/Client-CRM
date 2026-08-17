@@ -146,6 +146,14 @@ export const deleteClient = (id: number) =>
 export const loginAsClient = (id: number) =>
   adminPost<{ ok: boolean }>(`/clients/${id}/login-as`);
 
+/** The client_admin logins for a tenant (super-admin). */
+export const getClientAdmins = (id: number) =>
+  adminGet<{ admins: { id: number; name: string; email: string }[] }>(`/clients/${id}/admins`);
+
+/** Set a client admin's password (super-admin). Omit userId to target the first admin. */
+export const changeClientAdminPassword = (id: number, password: string, userId?: number) =>
+  adminPost<{ message: string; email: string }>(`/clients/${id}/admin-password`, { password, ...(userId ? { user_id: userId } : {}) });
+
 // ---- per-client feature entitlements (checkboxes + numeric quotas) ----
 export interface ClientFeatureItem {
   key: string;

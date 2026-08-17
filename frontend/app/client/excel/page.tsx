@@ -22,6 +22,35 @@ const ENTITIES: { key: ImportEntity; label: string; assignable: boolean }[] = [
   { key: "team", label: "Team", assignable: false },
 ];
 
+/**
+ * The lead EXPORT column set — richer than the importable columns: it includes the
+ * resolved names + system fields (assignment date & time, created/follow dates,
+ * last activity) that you view/report on but don't map on import. Custom fields
+ * are appended after these at export time.
+ */
+const LEAD_EXPORT_COLS: { key: string; label: string }[] = [
+  { key: "id", label: "ID" },
+  { key: "name", label: "Name" },
+  { key: "phone", label: "Phone" },
+  { key: "alt_phone", label: "Alternative Phone" },
+  { key: "email", label: "Email" },
+  { key: "status", label: "Status" },
+  { key: "sub_status", label: "Sub Status" },
+  { key: "source", label: "Lead Source" },
+  { key: "lead_type", label: "Lead Type" },
+  { key: "reference_name", label: "Reference" },
+  { key: "assigned_to_name", label: "Assigned To" },
+  { key: "assigned_date", label: "Assigned Date & Time" },
+  { key: "follow_date", label: "Follow-up Date" },
+  { key: "created_date", label: "Created Date" },
+  { key: "first_response_seconds", label: "First Response (sec)" },
+  { key: "city", label: "City" },
+  { key: "state", label: "State" },
+  { key: "last_call_at", label: "Last Call" },
+  { key: "last_reminder_at", label: "Last Reminder" },
+  { key: "description", label: "Description" },
+];
+
 export default function ExcelHubPage() {
   const { can, permissionsLoaded } = useClient();
   const [tab, setTab] = useState<ImportEntity>("lead");
@@ -154,19 +183,25 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
     if (entity === "task") return (await getTasks()).tasks as unknown as Record<string, unknown>[];
     return (await getStaff()).staff as unknown as Record<string, unknown>[];
   }
-  function cell(row: Record<string, unknown>, col: ImportColumn): string {
-    if (col.custom) {
-      const cf = (row.custom_fields ?? {}) as Record<string, unknown>;
-      return String(cf[col.key] ?? "");
-    }
-    return String(row[col.key] ?? "");
-  }
+  const cellVal = (row: Record<string, unknown>, c: { key: string; custom?: boolean }): string =>
+    c.custom
+      ? String(((row.custom_fields ?? {}) as Record<string, unknown>)[c.key] ?? "")
+      : String(row[c.key] ?? "");
+  // Export uses a full read-only column set for leads (all table fields, incl. the
+  // assignment date/time); tasks/team export their configured columns. Custom
+  // fields are appended in both cases.
+  const exportColumns = (): { key: string; label: string; custom?: boolean }[] => {
+    const custom = columns.filter((c) => c.custom).map((c) => ({ key: c.key, label: c.label, custom: true }));
+    if (entity === "lead") return [...LEAD_EXPORT_COLS, ...custom];
+    return columns.map((c) => ({ key: c.key, label: c.label, custom: c.custom }));
+  };
   async function doExport(kind: "xlsx" | "csv") {
     setExporting(true);
     try {
       const data = await fetchRows();
-      const headers = columns.map((c) => c.label);
-      const grid = data.map((row) => columns.map((c) => cell(row, c)));
+      const cols = exportColumns();
+      const headers = cols.map((c) => c.label);
+      const grid = data.map((row) => cols.map((c) => cellVal(row, c)));
       const name = `${entity === "team" ? "team" : entity + "s"}-export`;
       if (kind === "xlsx") await exportXlsx(name, headers, grid, ENTITIES.find((e) => e.key === entity)?.label);
       else exportCsvGrid(name, headers, grid);

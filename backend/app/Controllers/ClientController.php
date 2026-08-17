@@ -4356,6 +4356,118 @@ class ClientController extends ApiController
         return $this->respond(['win_pct' => $maxPct, 'rows' => $rows]);
     }
 
+    /**
+     * GET /client/reports/rep-breakdown — the detailed "Leads by Rep" report: each
+     * rep's total leads + conversion, plus a per-rep breakdown of their leads BY
+     * STATUS and BY TYPE (drives the expandable rows in the UI). Same filters +
+     * visibility scope as the other reports.
+     */
+    public function reportRepBreakdown()
+    {
+        if ($resp = $this->requirePermission('reports')) {
+            return $resp;
+        }
+        $cid = $this->clientId();
+
+        // "Won" = statuses in the highest win-% conversion stage(s) (as rep-performance).
+        $stages = $this->decorateConversions($cid);
+        $maxPct = 0;
+        foreach ($stages as $stage) {
+            $maxPct = max($maxPct, (int) $stage['percentage']);
+        }
+        $wonIds = [];
+        if ($maxPct > 0) {
+            foreach ($stages as $stage) {
+                if ((int) $stage['percentage'] === $maxPct) {
+                    $wonIds = array_merge($wonIds, $stage['lead_status_ids']);
+                }
+            }
+        }
+        $wonIds = array_values(array_unique(array_map('intval', $wonIds)));
+
+        // Label + colour lookups for the breakdown categories.
+        $statusMeta = [];
+        foreach ($this->lookupRows(LeadStatusModel::class, $cid) as $s) {
+            $statusMeta[(int) $s['id']] = ['label' => $s['name'], 'color' => $s['color'] ?: 'slate'];
+        }
+        $typeMeta = [];
+        foreach ($this->lookupRows(LeadTypeModel::class, $cid) as $t) {
+            $typeMeta[(int) $t['id']] = ['label' => $t['name'], 'color' => $t['color'] ?: 'slate'];
+        }
+
+        // Aggregations grouped by rep (each a fresh, scope + filter aware query).
+        $totals = [];
+        foreach ($this->reportLeadQuery($cid)->select('assigned_to AS k, COUNT(*) AS c')->groupBy('assigned_to')->get()->getResultArray() as $r) {
+            $totals[(int) $r['k']] = (int) $r['c'];
+        }
+        $wons = [];
+        if ($wonIds) {
+            foreach ($this->reportLeadQuery($cid)->select('assigned_to AS k, COUNT(*) AS c')->whereIn('status_id', $wonIds)->groupBy('assigned_to')->get()->getResultArray() as $r) {
+                $wons[(int) $r['k']] = (int) $r['c'];
+            }
+        }
+        $byStatus = []; // rep id → [status id => count]
+        foreach ($this->reportLeadQuery($cid)->select('assigned_to AS k, status_id AS s, COUNT(*) AS c')->groupBy('assigned_to')->groupBy('status_id')->get()->getResultArray() as $r) {
+            $byStatus[(int) $r['k']][(int) $r['s']] = (int) $r['c'];
+        }
+        $byType = []; // rep id → [type id => count]
+        foreach ($this->reportLeadQuery($cid)->select('assigned_to AS k, lead_type_id AS t, COUNT(*) AS c')->groupBy('assigned_to')->groupBy('lead_type_id')->get()->getResultArray() as $r) {
+            $byType[(int) $r['k']][(int) $r['t']] = (int) $r['c'];
+        }
+
+        $grandTotal = array_sum($totals);
+
+        // Turn a {id => count} map into sorted [{label, color, count}] rows.
+        $breakdown = static function (array $counts, array $meta): array {
+            $out = [];
+            foreach ($counts as $id => $c) {
+                if ((int) $id === 0) {
+                    $out[] = ['label' => 'Unspecified', 'color' => 'slate', 'count' => (int) $c];
+                } else {
+                    $m     = $meta[(int) $id] ?? null;
+                    $out[] = ['label' => $m['label'] ?? "#{$id}", 'color' => $m['color'] ?? 'slate', 'count' => (int) $c];
+                }
+            }
+            usort($out, static fn ($a, $b) => $b['count'] <=> $a['count']);
+
+            return $out;
+        };
+
+        $mkRow = static function (int $sid, string $name) use (&$totals, &$wons, &$byStatus, &$byType, $statusMeta, $typeMeta, $grandTotal, $breakdown): array {
+            $total = $totals[$sid] ?? 0;
+            $won   = $wons[$sid] ?? 0;
+
+            return [
+                'id'      => $sid,
+                'name'    => $name,
+                'total'   => $total,
+                'won'     => $won,
+                'won_pct' => $total > 0 ? round($won / $total * 100, 1) : 0,
+                'pct'     => $grandTotal > 0 ? round($total / $grandTotal * 100, 1) : 0,
+                'status'  => $breakdown($byStatus[$sid] ?? [], $statusMeta),
+                'type'    => $breakdown($byType[$sid] ?? [], $typeMeta),
+            ];
+        };
+
+        // Reference "agents" see all reps within their scoped leads; other staff are
+        // limited to themselves + their reports (mirrors rep-performance).
+        $scope  = $this->currentReferenceName() !== null ? null : $this->visibleStaffIds();
+        $staffQ = (new ClientStaffModel())->where('client_id', $cid);
+        if ($scope !== null) {
+            $staffQ->whereIn('id', $scope ?: [0]);
+        }
+        $rows = [];
+        foreach ($staffQ->orderBy('name', 'ASC')->findAll() as $st) {
+            $rows[] = $mkRow((int) $st['id'], $st['name']);
+        }
+        if (($totals[0] ?? 0) > 0) {
+            $rows[] = $mkRow(0, 'Unassigned');
+        }
+        usort($rows, static fn ($a, $b) => $b['total'] <=> $a['total']);
+
+        return $this->respond(['total' => $grandTotal, 'win_pct' => $maxPct, 'rows' => $rows]);
+    }
+
     // ============================================================ LEAD TRANSFER
     //
     // A rep hands a lead to another rep. The client's `lead_transfer_mode` setting

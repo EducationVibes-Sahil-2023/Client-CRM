@@ -2,11 +2,7 @@
 
 namespace App\Commands;
 
-use App\Controllers\FacebookController;
-use App\Libraries\TenantManager;
-use App\Models\ClientModel;
-use App\Models\FbFormModel;
-use App\Models\FbPageModel;
+use App\Libraries\FbPollRunner;
 use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 
@@ -16,8 +12,13 @@ use CodeIgniter\CLI\CLI;
  *
  *   php spark fb:poll
  *
- * Add to crontab to run every few minutes, e.g.:
- *   * /5 * * * *  cd /var/www/crm/backend && php spark fb:poll >> writable/logs/fb-poll.log 2>&1
+ * Run automatically every ~5 minutes. Two options:
+ *   • Server crontab:
+ *       * /5 * * * *  cd /var/www/crm/backend && php spark fb:poll >> writable/logs/fb-poll.log 2>&1
+ *   • Or, when you can only ping a URL (shared hosting / cron-job.com / Windows
+ *     Task Scheduler), hit the secured web endpoint every 5 min instead:
+ *       GET /public/cron/fb-poll?key=<cron.key>   ({@see \App\Controllers\Cron::fbPoll})
+ * Both share the same logic ({@see FbPollRunner}).
  */
 class FbPoll extends BaseCommand
 {
@@ -27,51 +28,10 @@ class FbPoll extends BaseCommand
 
     public function run(array $params)
     {
-        $clients = (new ClientModel())->findAll();
-        $manager = new TenantManager();
-        $totalIn = 0;
-        $forms   = 0;
-
-        foreach ($clients as $c) {
-            $cid = (int) $c['id'];
-            if (! ClientModel::statusAllowsAccess($c['status'] ?? null)) {
-                continue;
-            }
-            try {
-                $db = $manager->forClient($c);
-            } catch (\Throwable $e) {
-                CLI::error('  ✗ client #' . $cid . ' DB: ' . $e->getMessage());
-                continue;
-            }
-
-            $fbForms = (new FbFormModel($db))->where('client_id', $cid)->where('enabled', 1)->findAll();
-            if (! $fbForms) {
-                continue;
-            }
-            // Page token lookup for this client.
-            $tokenByPage = [];
-            foreach ((new FbPageModel($db))->where('client_id', $cid)->findAll() as $p) {
-                $tokenByPage[(string) $p['page_id']] = (string) $p['access_token'];
-            }
-
-            foreach ($fbForms as $form) {
-                $token = $tokenByPage[(string) $form['page_id']] ?? '';
-                if ($token === '') {
-                    continue;
-                }
-                $forms++;
-                try {
-                    $res = FacebookController::pullForm($cid, $db, $form, $token);
-                    $totalIn += $res['inserted'];
-                    if ($res['inserted']) {
-                        CLI::write("  ✓ client #{$cid} form {$form['form_name']}: +{$res['inserted']}", 'green');
-                    }
-                } catch (\Throwable $e) {
-                    CLI::error("  ✗ client #{$cid} form {$form['form_id']}: " . $e->getMessage());
-                }
-            }
+        $r = FbPollRunner::run();
+        foreach ($r['errors'] as $e) {
+            CLI::error('  ✗ ' . $e);
         }
-
-        CLI::write("Facebook poll done — {$totalIn} new lead(s) across {$forms} form(s).", 'cyan');
+        CLI::write("Facebook poll done — {$r['leads']} new lead(s) across {$r['forms']} form(s), {$r['clients']} client(s).", 'cyan');
     }
 }

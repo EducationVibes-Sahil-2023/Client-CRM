@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getLeadsSetup, getStaff,
-  getReportLeadsBy, getReportPipeline, getReportRepPerformance,
-  type LeadStatus, type LeadSource, type LeadType, type Staff,
+  getReportLeadsBy, getReportPipeline, getReportRepPerformance, getReportRepBreakdown,
+  type LeadStatus, type LeadSource, type LeadType, type Staff, type RepBreakdownRow, type BreakdownSlice,
 } from "../../lib/client";
 import { exportCsv } from "../../lib/export";
 import { useToast } from "../../components/toast/ToastProvider";
@@ -36,16 +36,24 @@ const isSubStatus = (s: LeadStatus) => (s.parent_ids?.length ?? 0) > 0 || !!s.pa
 type Row = Record<string, string | number>;
 interface ReportView { columns: Column<Row>[]; rows: Row[]; kpis: { label: string; value: string }[]; csv: { headers: string[]; rows: (string | number)[][] }; filename: string }
 
-// Each report in the Sales & Leads pack. `cat` groups them on the landing grid.
+// Each report in the Sales & Leads pack. `desc` is the card subtitle; `help` is
+// the "what this shows / how to read it" explainer shown above the table.
 type ReportKey = "leads_source" | "leads_status" | "leads_type" | "leads_rep" | "leads_month" | "pipeline" | "rep_performance";
-const REPORTS: { key: ReportKey; label: string; desc: string }[] = [
-  { key: "leads_source", label: "Leads by Source", desc: "Volume & share per lead source / marketing channel." },
-  { key: "leads_status", label: "Leads by Status", desc: "How leads are distributed across pipeline statuses." },
-  { key: "leads_type", label: "Leads by Type", desc: "Volume per lead type (e.g. Buyer, Seller)." },
-  { key: "leads_rep", label: "Leads by Rep", desc: "Leads assigned per team member." },
-  { key: "leads_month", label: "Lead Volume Trend", desc: "New leads created per month." },
-  { key: "pipeline", label: "Sales Pipeline", desc: "Leads per conversion stage, win % and weighted value." },
-  { key: "rep_performance", label: "Rep Performance", desc: "Total leads, won and conversion rate per team member." },
+const REPORTS: { key: ReportKey; label: string; desc: string; help: string }[] = [
+  { key: "leads_source", label: "Leads by Source", desc: "Volume & share per lead source / marketing channel.",
+    help: "Counts every lead grouped by the source / marketing channel it came from. Use it to see which channels drive the most volume. Share is each source's percentage of all leads in the current filter." },
+  { key: "leads_status", label: "Leads by Status", desc: "How leads are distributed across pipeline statuses.",
+    help: "Shows how many leads currently sit in each pipeline status — where leads are piling up or stalling. Share is each status's percentage of the total." },
+  { key: "leads_type", label: "Leads by Type", desc: "Volume per lead type (e.g. Buyer, Seller).",
+    help: "Volume of leads per lead type (e.g. Buyer, Seller, Walk-in). Share is each type's percentage of the total, so you can see your mix at a glance." },
+  { key: "leads_rep", label: "Leads by Rep", desc: "Per-rep leads, conversion, and a status + type breakdown.",
+    help: "Each team member's total leads and conversion rate. Click a rep to expand and see exactly how their leads split by status and by type. Rows are ranked by total leads; 'Unassigned' collects leads with no owner." },
+  { key: "leads_month", label: "Lead Volume Trend", desc: "New leads created per month.",
+    help: "New leads created each month — your volume trend over time. Use it to spot growth, seasonality or dips in lead flow." },
+  { key: "pipeline", label: "Sales Pipeline", desc: "Leads per conversion stage, win % and weighted value.",
+    help: "Maps leads onto your configured conversion stages. Win % is the stage's set probability; Weighted = leads × win %, an estimate of how much of the pipeline is likely to convert." },
+  { key: "rep_performance", label: "Rep Performance", desc: "Total leads, won and conversion rate per team member.",
+    help: "Per rep: total leads, 'won' leads (those in your highest-probability conversion stage) and the resulting conversion rate. Ranks the team by volume." },
 ];
 // Coming in later passes — shown as disabled cards so the roadmap is visible.
 const COMING_SOON = ["Assets", "Calls & Follow-ups", "Team & Tasks"];
@@ -61,6 +69,77 @@ function pctCell(p: number) {
       </span>
       <span className="tabular-nums text-slate-600">{p}%</span>
     </span>
+  );
+}
+
+/** A breakdown list (status or type) with a proportional mini-bar per category. */
+function SliceList({ slices, total, empty }: { slices: BreakdownSlice[]; total: number; empty: string }) {
+  if (!slices.length) return <p className="text-xs text-slate-400">{empty}</p>;
+  const max = Math.max(...slices.map((s) => s.count), 1);
+  return (
+    <ul className="space-y-1.5">
+      {slices.map((s) => (
+        <li key={s.label} className="flex items-center gap-2 text-xs">
+          {dot(s.color)}
+          <span className="w-28 shrink-0 truncate text-slate-600" title={s.label}>{s.label}</span>
+          <span className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+            <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${(s.count / max) * 100}%`, background: toHex(s.color) }} />
+          </span>
+          <span className="w-10 shrink-0 text-right font-medium tabular-nums text-slate-700">{nf(s.count)}</span>
+          <span className="w-9 shrink-0 text-right tabular-nums text-slate-400">{total > 0 ? Math.round((s.count / total) * 100) : 0}%</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The detailed "Leads by Rep" report: a rep list where each row expands to reveal
+ *  that rep's leads split by status and by type. Manages its own expand state. */
+function RepBreakdown({ rows }: { rows: RepBreakdownRow[] }) {
+  const [open, setOpen] = useState<Set<number>>(new Set());
+  const maxTotal = Math.max(...rows.map((r) => r.total), 1);
+  const toggle = (id: number) => setOpen((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  return (
+    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="grid grid-cols-[1.25rem_1fr_5rem_10rem] items-center gap-3 border-b border-slate-100 bg-slate-50/50 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        <span />
+        <span>Team member</span>
+        <span className="text-right">Leads</span>
+        <span className="text-right">Conversion</span>
+      </div>
+      <ul className="divide-y divide-slate-100">
+        {rows.map((r) => {
+          const isOpen = open.has(r.id);
+          return (
+            <li key={r.id}>
+              <button onClick={() => toggle(r.id)} className="grid w-full grid-cols-[1.25rem_1fr_5rem_10rem] items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50">
+                <svg className={`h-4 w-4 text-slate-400 transition-transform ${isOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-medium text-slate-800">{r.name}</span>
+                  <span className="relative mt-1 block h-1.5 w-full max-w-[220px] overflow-hidden rounded-full bg-slate-100">
+                    <span className="absolute inset-y-0 left-0 rounded-full bg-indigo-400" style={{ width: `${(r.total / maxTotal) * 100}%` }} />
+                  </span>
+                </span>
+                <span className="text-right"><span className="tabular-nums text-base font-bold text-slate-800">{nf(r.total)}</span><span className="ml-1 text-[11px] text-slate-400">{r.pct}%</span></span>
+                <span className="flex justify-end">{pctCell(r.won_pct)}</span>
+              </button>
+              {isOpen && (
+                <div className="grid gap-6 border-t border-dashed border-slate-200 bg-slate-50/60 px-4 py-4 pl-11 sm:grid-cols-2">
+                  <div>
+                    <h5 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">By status</h5>
+                    <SliceList slices={r.status} total={r.total} empty="No leads in range." />
+                  </div>
+                  <div>
+                    <h5 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">By type</h5>
+                    <SliceList slices={r.type} total={r.total} empty="No lead type set." />
+                  </div>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
@@ -80,6 +159,8 @@ export default function ReportsPage() {
   const [report, setReport] = useState<ReportKey | null>(null);
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<ReportView | null>(null);
+  // Rows for the expandable "Leads by Rep" report (rendered outside the DataTable path).
+  const [repRows, setRepRows] = useState<RepBreakdownRow[] | null>(null);
 
   // Draft (in the rail) vs applied (what's fetched).
   const [draft, setDraft] = useState<Filters>(BLANK);
@@ -113,6 +194,7 @@ export default function ReportsPage() {
   // Build the table for the active report from the API response.
   const load = useCallback(async (key: ReportKey) => {
     setLoading(true);
+    if (key !== "leads_rep") setRepRows(null);
     try {
       const def = REPORTS.find((r) => r.key === key)!;
       if (key === "pipeline") {
@@ -151,15 +233,44 @@ export default function ReportsPage() {
           rows: d.rows as unknown as Row[],
           csv: { headers: ["Team member", "Total leads", "Won", "Conversion %"], rows: d.rows.map((r) => [r.name, r.total, r.won, r.won_pct]) },
         });
+      } else if (key === "leads_rep") {
+        const d = await getReportRepBreakdown(params);
+        setRepRows(d.rows);
+        const teamCount = d.rows.filter((r) => r.id !== 0).length;
+        const totalWon = d.rows.reduce((n, r) => n + r.won, 0);
+        setView({
+          filename: "leads-by-rep",
+          kpis: [
+            { label: "Total leads", value: nf(d.total) },
+            { label: "Team members", value: nf(teamCount) },
+            { label: "Overall conversion", value: `${d.total > 0 ? Math.round(totalWon / d.total * 100) : 0}%` },
+          ],
+          // Rendered by <RepBreakdown/>, not DataTable — columns unused.
+          columns: [],
+          rows: d.rows as unknown as Row[],
+          // Long-format CSV: rep summary + one row per status/type slice, so the
+          // breakdown survives export (pivot-friendly).
+          csv: {
+            headers: ["Team member", "Total leads", "Won", "Conversion %", "Breakdown", "Category", "Count"],
+            rows: d.rows.flatMap((r) => {
+              const base: (string | number)[] = [r.name, r.total, r.won, r.won_pct];
+              const slices: (string | number)[][] = [
+                ...r.status.map((s) => ["Status", s.label, s.count] as (string | number)[]),
+                ...r.type.map((s) => ["Type", s.label, s.count] as (string | number)[]),
+              ];
+              return slices.length ? slices.map((s) => [...base, ...s]) : [[...base, "", "", ""]];
+            }),
+          },
+        });
       } else {
-        const group = { leads_source: "source", leads_status: "status", leads_type: "type", leads_rep: "assigned", leads_month: "month" }[key];
+        const group = { leads_source: "source", leads_status: "status", leads_type: "type", leads_month: "month" }[key];
         const d = await getReportLeadsBy(group, params);
-        const firstHeader = key === "leads_rep" ? "Team member" : key === "leads_month" ? "Month" : def.label.replace("Leads by ", "");
+        const firstHeader = key === "leads_month" ? "Month" : def.label.replace("Leads by ", "");
         setView({
           filename: def.label.toLowerCase().replace(/\s+/g, "-"),
           kpis: [{ label: "Total leads", value: nf(d.total) }, { label: key === "leads_month" ? "Months" : "Groups", value: nf(d.rows.length) }],
           columns: [
-            { key: "label", header: firstHeader, width: 220, render: (r) => <span className="inline-flex items-center gap-2 font-medium text-slate-800">{key === "leads_month" || key === "leads_rep" ? null : dot(String(r.color))}{r.label}</span> },
+            { key: "label", header: firstHeader, width: 220, render: (r) => <span className="inline-flex items-center gap-2 font-medium text-slate-800">{key === "leads_month" ? null : dot(String(r.color))}{r.label}</span> },
             { key: "count", header: "Leads", width: 110, align: "right", render: (r) => <span className="tabular-nums font-semibold text-slate-700">{nf(Number(r.count))}</span> },
             { key: "pct", header: "Share", width: 200, render: (r) => pctCell(Number(r.pct)) },
           ],
@@ -247,6 +358,12 @@ export default function ReportsPage() {
         }
       />
 
+      {/* What this report shows / how to read it. */}
+      <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm text-slate-600">
+        <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 16v-4m0-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        <p className="leading-relaxed">{def.help}</p>
+      </div>
+
       {loading && !view ? (
         <div className="space-y-4"><SkeletonStats count={3} /><SkeletonBlock className="h-80" /></div>
       ) : (
@@ -262,7 +379,13 @@ export default function ReportsPage() {
             </div>
           )}
 
-          {view && view.rows.length === 0 ? (
+          {report === "leads_rep" ? (
+            repRows && repRows.length === 0 ? (
+              <EmptyState title="No data" hint="No records match the current filters. Try widening the date range or clearing filters." />
+            ) : (
+              <RepBreakdown rows={repRows ?? []} />
+            )
+          ) : view && view.rows.length === 0 ? (
             <EmptyState title="No data" hint="No records match the current filters. Try widening the date range or clearing filters." />
           ) : (
             <DataTable

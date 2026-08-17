@@ -709,6 +709,13 @@ export interface ReportParams {
 export interface LeadByRow { id: number | string; label: string; color: string; count: number; pct: number }
 export interface PipelineRow { id: number; label: string; color: string; statuses: string; count: number; pct: number; win_pct: number; weighted: number }
 export interface RepPerfRow { id: number; name: string; total: number; won: number; won_pct: number }
+/** A single {category, colour, count} slice of a rep's status/type breakdown. */
+export interface BreakdownSlice { label: string; color: string; count: number }
+/** One rep row in the detailed "Leads by Rep" report (expandable status/type breakdown). */
+export interface RepBreakdownRow {
+  id: number; name: string; total: number; won: number; won_pct: number; pct: number;
+  status: BreakdownSlice[]; type: BreakdownSlice[];
+}
 
 const reportQs = (params: Record<string, string | undefined>) =>
   Object.entries(params).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v as string)}`).join("&");
@@ -719,6 +726,8 @@ export const getReportPipeline = (params: ReportParams = {}) =>
   clientGet<{ total: number; weighted_total: number; rows: PipelineRow[] }>(`/reports/pipeline${reportQs(params) ? `?${reportQs(params)}` : ""}`);
 export const getReportRepPerformance = (params: ReportParams = {}) =>
   clientGet<{ win_pct: number; rows: RepPerfRow[] }>(`/reports/rep-performance${reportQs(params) ? `?${reportQs(params)}` : ""}`);
+export const getReportRepBreakdown = (params: ReportParams = {}) =>
+  clientGet<{ total: number; win_pct: number; rows: RepBreakdownRow[] }>(`/reports/rep-breakdown${reportQs(params) ? `?${reportQs(params)}` : ""}`);
 
 // ---- Lead transfer ----
 export type TransferStatus = "pending" | "approved" | "rejected" | "cancelled";
