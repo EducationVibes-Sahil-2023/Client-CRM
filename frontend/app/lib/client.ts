@@ -1575,6 +1575,8 @@ export interface FbForm {
   notify_type: string;
   notify_staff: number[];
   submission_count: number;
+  last_synced_at: string | null;
+  last_lead_time: string | null;
   enabled: number;
 }
 export interface FbPage { id: number; page_id: string; page_name: string; enabled: number; forms: FbForm[] }

@@ -16,7 +16,7 @@ class FbFormModel extends TenantModel
         'source_id', 'status_id', 'lead_type_id', 'assigned_to',
         'auto_assignee', 'auto_assign_state_wise', 'state_assignee_map', 'state_cursors', 'assign_cursor',
         'allow_duplicate', 'prevent_duplicate_field', 'prevent_duplicate_field2', 'create_duplicate_as_task',
-        'notify_on_import', 'notify_type', 'notify_staff', 'submission_count', 'last_lead_time', 'enabled',
+        'notify_on_import', 'notify_type', 'notify_staff', 'submission_count', 'last_lead_time', 'last_synced_at', 'enabled',
     ];
 
     protected $useSoftDeletes = true;

@@ -5931,6 +5931,9 @@ class ClientController extends ApiController
                 'assigned_date'  => $assignTo ? $now : null,
                 'city'           => trim((string) ($row['city'] ?? '')) ?: null,
                 'state'          => trim((string) ($row['state'] ?? '')) ?: null,
+                'description'    => trim((string) ($row['description'] ?? '')) ?: null,
+                'follow_date'    => $this->normalizeDate($row['follow_date'] ?? '') ?: null,
+                'created_date'   => $this->normalizeDate($row['created_date'] ?? '') ?: date('Y-m-d'),
                 'created_by'     => $this->actorId() ?: null,
                 'custom_fields'  => json_encode($custom),
             ];
@@ -5981,6 +5984,9 @@ class ClientController extends ApiController
         'reference_name' => 'Reference name',
         'city'           => 'City',
         'state'          => 'State',
+        'description'    => 'Description / notes',
+        'follow_date'    => 'Follow-up date (YYYY-MM-DD)',
+        'created_date'   => 'Created date (YYYY-MM-DD)',
     ];
 
     /**

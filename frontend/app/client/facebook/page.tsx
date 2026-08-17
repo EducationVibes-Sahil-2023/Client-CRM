@@ -311,7 +311,11 @@ function PageCard({ page, onAdd, onEdit, onSync, onDelete }: {
             <div key={f.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
               <div>
                 <p className="text-sm font-medium text-slate-700">{f.form_name || f.form_id}</p>
-                <p className="text-xs text-slate-400">{f.submission_count} lead(s) · {f.enabled ? "active" : "paused"}</p>
+                <p className="text-xs text-slate-400">
+                  {f.submission_count} lead(s) · {f.enabled ? "active" : "paused"}
+                  {" · "}Last synced: <span className="font-medium text-slate-500">{f.last_synced_at ? f.last_synced_at.slice(0, 16) : "never"}</span>
+                  {f.last_lead_time ? <> · Last lead: {f.last_lead_time.slice(0, 16)}</> : null}
+                </p>
               </div>
               <div className="flex gap-2">
                 <button onClick={() => onSync(f)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">Sync now</button>

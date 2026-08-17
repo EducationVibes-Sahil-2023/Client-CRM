@@ -430,10 +430,13 @@ class FacebookController extends ApiController
                 $maxTime = $t;
             }
         }
+        // Stamp the sync time on EVERY run (even 0 new), and advance the lead cursor
+        // only when a newer lead was actually seen.
+        $set = ['last_synced_at' => date('Y-m-d H:i:s')];
         if ($maxTime > $since) {
-            (new FbFormModel($db))->where('client_id', $cid)->where('id', (int) $form['id'])
-                ->set(['last_lead_time' => date('Y-m-d H:i:s', $maxTime)])->update();
+            $set['last_lead_time'] = date('Y-m-d H:i:s', $maxTime);
         }
+        (new FbFormModel($db))->where('client_id', $cid)->where('id', (int) $form['id'])->set($set)->update();
 
         return ['inserted' => $inserted, 'skipped' => $skipped];
     }
@@ -531,6 +534,8 @@ class FacebookController extends ApiController
             'notify_type'              => $f['notify_type'] ?: 'responsible',
             'notify_staff'             => array_map('intval', $arr($f['notify_staff'])),
             'submission_count'         => (int) $f['submission_count'],
+            'last_synced_at'           => $f['last_synced_at'] ?? null,
+            'last_lead_time'           => $f['last_lead_time'] ?? null,
             'enabled'                  => (int) $f['enabled'],
         ];
     }
