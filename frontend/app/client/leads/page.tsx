@@ -1629,7 +1629,7 @@ export default function ClientLeads() {
 
   async function runImport() {
     if (!importRows.length) return;
-    if (!iStatus) { toast.warning("Pick a status to apply to the imported leads."); return; }
+    // Status is optional — rows without one default to Fresh Lead on the server.
     if (iMode === "robin" && iAssignees.length < 2) { toast.warning("Round-robin needs at least 2 members."); return; }
     setImporting(true); setImportResult(null);
     try {
@@ -2915,8 +2915,8 @@ export default function ClientLeads() {
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Status <span className="text-red-500">*</span></span>
-                  <SearchSelect ariaLabel="Status" value={iStatus} onChange={(v) => { setIStatus(v); setISub(""); }} options={statusFilterOptions} placeholder="— Select —" searchPlaceholder="Search status…" /></label>
+                <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Status</span>
+                  <SearchSelect ariaLabel="Status" value={iStatus} onChange={(v) => { setIStatus(v); setISub(""); }} options={statusFilterOptions} placeholder="— Fresh Lead (default) —" searchPlaceholder="Search status…" /></label>
                 <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Sub status</span>
                   <SearchSelect ariaLabel="Sub status" value={iSub} onChange={setISub} options={[{ value: "", label: "— None —" }, ...importSubOptions]} placeholder={iStatus ? "— None —" : "Pick a status first"} searchPlaceholder="Search…" /></label>
                 <label className="block text-sm"><span className="mb-1 block font-medium text-slate-600">Source</span>
@@ -2973,7 +2973,7 @@ export default function ClientLeads() {
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={closeImport} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Close</button>
             {!importResult && (
-              <button onClick={runImport} disabled={importing || !readyCount || !iStatus} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">
+              <button onClick={runImport} disabled={importing || !readyCount} className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60">
                 {importing ? "Importing…" : `Import ${readyCount || ""} lead${readyCount === 1 ? "" : "s"}`.trim()}
               </button>
             )}
