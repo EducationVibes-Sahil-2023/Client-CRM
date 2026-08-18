@@ -346,10 +346,12 @@ class LeadsImportLegacy extends BaseCommand
             }
         }
 
-        // Default status = first parent status (the lead model requires a status).
-        $defRow = $db->table('lead_statuses')->where('client_id', $cid)
-            ->groupStart()->where('parent_id', null)->orWhere('parent_id', 0)->groupEnd()
-            ->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->get()->getRowArray();
+        // Default status when a lead has no (or an unmatched) status: prefer a
+        // parent status named "Fresh" (Fresh Lead), else the first parent status.
+        $parents = static fn () => $db->table('lead_statuses')->where('client_id', $cid)
+            ->groupStart()->where('parent_id', null)->orWhere('parent_id', 0)->groupEnd();
+        $defRow = $parents()->like('name', 'Fresh')->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->get()->getRowArray()
+            ?: $parents()->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->get()->getRowArray();
         $defaultStatus = $defRow ? (int) $defRow['id'] : 0;
         if (! $defaultStatus) {
             CLI::error('  Client has no lead statuses — cannot import (status is required).');

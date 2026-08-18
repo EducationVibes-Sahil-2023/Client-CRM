@@ -149,7 +149,7 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
 
   async function runImport() {
     if (!rows.length) return;
-    if (entity === "lead" && !statusId) { toast.warning("Pick a status to apply to the imported leads."); return; }
+    // Status is optional — rows without one default to Fresh Lead on the server.
     if (mode === "robin" && assignees.length < 2) { toast.warning("Round-robin needs at least 2 members."); return; }
     setImporting(true); setResult(null);
     try {
@@ -244,7 +244,7 @@ function EntityPanel({ entity, statuses, sources, types, staff }: {
 
             {entity === "lead" && (
               <div className="grid grid-cols-2 gap-3">
-                <div><label className={lbl}>Status <span className="text-rose-500">*</span></label><SearchSelect value={statusId} onChange={setStatusId} options={idOpts(statuses.filter((s) => !s.parent_id), "— Select —")} /></div>
+                <div><label className={lbl}>Status</label><SearchSelect value={statusId} onChange={setStatusId} options={idOpts(statuses.filter((s) => !s.parent_id), "— Fresh Lead (default) —")} /></div>
                 <div><label className={lbl}>Source</label><SearchSelect value={sourceId} onChange={setSourceId} options={idOpts(sources, "— None —")} /></div>
                 <div><label className={lbl}>Lead type</label><SearchSelect value={typeId} onChange={setTypeId} options={idOpts(types, "— None —")} /></div>
               </div>

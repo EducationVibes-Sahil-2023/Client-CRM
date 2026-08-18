@@ -5817,10 +5817,25 @@ class ClientController extends ApiController
     }
 
     /**
+     * The default lead status for imports when none is picked/provided: a parent
+     * status named "Fresh" (e.g. Fresh Lead), else the first parent status. 0 only
+     * when the client has no statuses at all.
+     */
+    private function defaultImportStatusId(int $cid): int
+    {
+        $parents = static fn () => (new LeadStatusModel())->where('client_id', $cid)
+            ->groupStart()->where('parent_id', null)->orWhere('parent_id', 0)->groupEnd();
+        $row = $parents()->like('name', 'Fresh')->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->first()
+            ?: $parents()->orderBy('sequence', 'ASC')->orderBy('id', 'ASC')->first();
+
+        return $row ? (int) $row['id'] : 0;
+    }
+
+    /**
      * POST /client/leads/import — bulk-create leads from parsed CSV rows.
      * Body: { rows: [{ name, phone, status, ... }] }. Each row is validated
-     * independently (phone 10 digits, status resolvable, email valid); valid
-     * rows are inserted and the rest reported back by line number.
+     * independently (phone 10 digits, email valid); status is optional and
+     * defaults to Fresh Lead. Valid rows are inserted and the rest reported back.
      */
     public function importLeads()
     {
@@ -5846,13 +5861,12 @@ class ClientController extends ApiController
         $opt      = (array) ($this->input('options') ?? []);
         $statusId = (int) ($opt['status_id'] ?? 0);
         $status   = $statusId ? (new LeadStatusModel())->where('client_id', $cid)->find($statusId) : null;
-        // A status must resolve per row — from the batch picker OR (when the Status
-        // column is enabled) the row's own value. Only hard-fail upfront when
-        // neither source can supply one.
-        if (! $status && empty($included['status'])) {
-            return $this->failValidationErrors(['status_id' => 'Pick a status to apply to the imported leads.']);
-        }
         $statusId = $status ? $statusId : 0;
+        // Status is OPTIONAL at import time (non-mandatory). Any row that doesn't
+        // carry its own status — because the picker was left blank AND the Status
+        // column is empty/absent — falls back to the default: a status named
+        // "Fresh" (Fresh Lead), else the first parent status.
+        $defaultStatusId = $statusId ?: $this->defaultImportStatusId($cid);
         $validId  = function (string $modelClass, int $id) use ($cid): ?int {
             return $id > 0 && (new $modelClass())->where('client_id', $cid)->find($id) ? $id : null;
         };
@@ -5974,7 +5988,7 @@ class ClientController extends ApiController
 
             // Per-row lookup columns (name → id): a non-empty unmatched value fails
             // the row; a blank falls back to the batch pick above.
-            $rowStatus = $statusId;
+            $rowStatus = $statusId ?: $defaultStatusId;
             $rowSub    = $subId;
             $rowSource = $sourceId;
             $rowType   = $typeId;
@@ -6006,7 +6020,8 @@ class ClientController extends ApiController
                 continue;
             }
             if (! $rowStatus) {
-                $errors[] = ['row' => $line, 'message' => 'Status is required.'];
+                // Only reachable when the client has NO statuses at all.
+                $errors[] = ['row' => $line, 'message' => 'No lead status exists to assign — create a status first.'];
 
                 continue;
             }
