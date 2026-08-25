@@ -135,20 +135,33 @@ class LeadsResyncRunner
         if (! $db->tableExists('leads')) {
             return 0;
         }
-        $floor = "'1000-01-01 00:00:00'";
-        $joins = '';
-        $terms = ["COALESCE(l.updated_at, l.created_at, {$floor})"];
+        $floor   = "'1000-01-01 00:00:00'";
+        $hasAlt  = $db->fieldExists('alt_phone', 'leads');
+        $joins   = '';
+        $terms   = ["COALESCE(l.updated_at, l.created_at, {$floor})"];
 
+        // Notes / reminders: take the latest of created_at OR updated_at, so an
+        // *edit* to an existing note/reminder also counts as recent activity.
         if ($db->tableExists('lead_notes')) {
-            $joins   .= ' LEFT JOIN (SELECT lead_id, MAX(created_at) m FROM `lead_notes` WHERE deleted_at IS NULL GROUP BY lead_id) n ON n.lead_id = l.id';
+            $joins   .= ' LEFT JOIN (SELECT lead_id, MAX(GREATEST(COALESCE(created_at, ' . $floor . '), COALESCE(updated_at, ' . $floor . '))) m FROM `lead_notes` WHERE deleted_at IS NULL GROUP BY lead_id) n ON n.lead_id = l.id';
             $terms[] = "COALESCE(n.m, {$floor})";
         }
         if ($db->tableExists('lead_reminders')) {
-            $joins   .= ' LEFT JOIN (SELECT lead_id, MAX(created_at) m FROM `lead_reminders` WHERE deleted_at IS NULL GROUP BY lead_id) r ON r.lead_id = l.id';
+            $joins   .= ' LEFT JOIN (SELECT lead_id, MAX(GREATEST(COALESCE(created_at, ' . $floor . '), COALESCE(updated_at, ' . $floor . '))) m FROM `lead_reminders` WHERE deleted_at IS NULL GROUP BY lead_id) r ON r.lead_id = l.id';
             $terms[] = "COALESCE(r.m, {$floor})";
         }
+        // Calls: match by the linked lead_id OR either phone number, so calls to a
+        // lead's alt_phone (and calls whose contact was normalised differently than
+        // the stored phone) still count. Undated calls fall back to created_at.
         if ($db->tableExists('calls')) {
-            $joins   .= " LEFT JOIN (SELECT contact, MAX(call_start) m FROM `calls` WHERE deleted_at IS NULL AND contact IS NOT NULL AND TRIM(contact) <> '' GROUP BY contact) c ON c.contact = l.phone";
+            $callMatch = 'c2.lead_id = l2.id OR c2.contact = l2.phone' . ($hasAlt ? ' OR c2.contact = l2.alt_phone' : '');
+            $joins   .= " LEFT JOIN (
+                SELECT l2.id AS lead_id, MAX(COALESCE(c2.call_start, c2.created_at)) m
+                FROM `calls` c2
+                JOIN `leads` l2 ON ({$callMatch})
+                WHERE c2.deleted_at IS NULL AND l2.deleted_at IS NULL
+                GROUP BY l2.id
+            ) c ON c.lead_id = l.id";
             $terms[] = "COALESCE(c.m, {$floor})";
         }
 
