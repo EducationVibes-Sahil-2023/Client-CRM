@@ -19,6 +19,7 @@ Client **#1** = `crm_education_vibes`. Most commands take `--client=ID` to scope
 | `php spark fb:poll` | Pull new Facebook Lead Ads leads for every client and ingest them. Backfill/safety-net alongside the real-time webhook (idempotent on `leadgen_id`). | `*/5 * * * *` |
 | `php spark sheets:sync` | Sync every client's connected Google Sheets into leads (create/update + write back "CRM Status"). | `*/5 * * * *` |
 | `php spark backup:run [--force] [--main-only]` | Run scheduled DB backups to `writable/backups` when due. `--force` ignores the schedule; `--main-only` skips tenant DBs. | `0 2 * * *` |
+| `php spark reminders:notify` | Deliver **due lead reminders** (in-app notification + web push) to the user who set each, **server-side** — so they arrive even when that user's browser is closed (the in-app poll only fires while the app is open). Idempotent (stamps `notified_at`). **Required for web-push reminders to work.** | `* * * * *` |
 | `php spark leadtransfer:auto [--client=ID] [--dry-run]` | Apply each client's enabled **transfer rules** AND send their **lead notifications** (Auto Lead Transfer page). Transfer rules reassign/distribute matching leads; notification rules send templated in-app + web-push reminders to the assigned rep and/or their team leader once a lead sits unworked past an hour/day threshold. Criteria: status/type/source, created date/age, call count, assignment age (clock/working hours or calendar/working days), activity count, etc. Idempotent per assignment cycle. Run **every 15 min** for hour-based rules. | `0,15,30,45 * * * *` |
 
 Example crontab lines:
@@ -27,6 +28,7 @@ Example crontab lines:
 */5 * * * *  cd /var/www/crm/backend && php spark fb:poll          >> writable/logs/fb-poll.log 2>&1
 */5 * * * *  cd /var/www/crm/backend && php spark sheets:sync       >> writable/logs/sheets-sync.log 2>&1
 0   2 * * *  cd /var/www/crm/backend && php spark backup:run        >> writable/logs/backup.log 2>&1
+* * * * *  cd /var/www/crm/backend && php spark reminders:notify   >> writable/logs/reminders.log 2>&1
 0,15,30,45 * * * *  cd /var/www/crm/backend && php spark leadtransfer:auto >> writable/logs/lead-automation.log 2>&1
 ```
 
@@ -67,6 +69,7 @@ Fixes, per client:
 | `php spark db:setup [--fresh] [--force]` | First-time / local setup only | Creates + loads schema + migrates + seeds main DB and syncs tenants. **NEVER run `--fresh` on production — it wipes data.** |
 | `php spark push:keys` | Once, when enabling Web Push | Generate the VAPID public/private key pair. |
 | `php spark secondary:check` | Diagnostics | Check the read-only Applicant/secondary DB (config, connection, tables). |
+| `php spark push:test --client ID [--user ID\|--staff ID]` | Diagnostics | Send a TEST web push to a client's subscribed browsers and report delivery (checks VAPID keys + `web_push` feature + subscriptions). Use space-form options. |
 
 ---
 

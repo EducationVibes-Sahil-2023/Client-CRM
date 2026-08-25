@@ -57,6 +57,8 @@ export interface Branding {
   table_header_bg: string;
   /** Data-table highlight accent — hover, selected row, sort, links (default indigo). */
   table_accent: string;
+  /** "1" = column headers wrap onto multiple lines across every table; "0" = single line. */
+  table_header_wrap: string;
 }
 
 /** The surface-colour keys (Branding fields that map to a `--var`). Kept in one
@@ -159,6 +161,7 @@ export const DEFAULT_BRANDING: Branding = {
   sidebar_icon: "#94a3b8",
   table_header_bg: "#f8fafc",
   table_accent: "#6366f1",
+  table_header_wrap: "0",
 };
 
 // The Tailwind shade stops we generate. The picked colour anchors 600 (the

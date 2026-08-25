@@ -152,7 +152,7 @@ export default function TransferReportPage() {
   const chartData = report ? report.chart[chartMode] : [];
 
   return (
-    <div className="mx-auto max-w-7xl space-y-5 p-4 sm:p-6">
+    <div className="w-full space-y-5">
       {/* Tabs */}
       <div className="flex flex-wrap gap-2">
         {(report?.tabs ?? []).map((t) => (

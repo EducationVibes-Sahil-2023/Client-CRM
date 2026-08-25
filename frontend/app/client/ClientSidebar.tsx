@@ -37,6 +37,7 @@ export const icons: Record<string, string> = {
   googlesheets: "M5 3h9l5 5v13a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1zm9 0v5h5M8 12h8M8 15h8M8 18h5",
   autotransfer: "M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4",
   transferreport: "M3 3v18h18M8 17V9m5 8V5m5 12v-7",
+  columns: "M4 4h16v16H4zM10 4v16M16 4v16",
 };
 
 export interface NavItem {
@@ -100,6 +101,7 @@ export const setupNav: NavItem[] = [
   { key: "transfer-report", href: "/client/transfer-report", label: "Transfer Report", icon: "transferreport", module: "lead_transfer", adminOnly: true },
   { key: "email-config", href: "/client/email-config", label: "Email Setup", icon: "email", feature: "email_config", adminOnly: true },
   { key: "appearance", href: "/client/appearance", label: "Appearance", icon: "palette", adminOnly: true },
+  { key: "table-layouts", href: "/client/table-layouts", label: "Table Layouts", icon: "columns", adminOnly: true },
   { key: "settings", href: "/client/settings", label: "Dashboard Config", icon: "config", adminOnly: true },
 ];
 

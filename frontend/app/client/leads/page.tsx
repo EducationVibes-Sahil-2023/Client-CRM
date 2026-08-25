@@ -50,7 +50,7 @@ interface LeadFilters {
   created: DateRange;
   assignedDate: DateRange;
   follow: DateRange;
-  updated: DateRange;     // "Updated date" = filter by call date (call_start)
+  updated: DateRange;     // "Updated date" = filter by the ASSIGNED rep's call date (call_start where staff_id = assigned_to)
   connected: DateRange;   // "Connected date" = leads with a connected call in range
   noConnectAfter: string; // leads NOT connected after this date (stale)
   noUpdateAfter: string;  // leads NOT updated after this date (stale)
@@ -2084,7 +2084,7 @@ export default function ClientLeads() {
 
           {!filterPrefs.isHidden("updated") && (
             <label className="flex flex-col gap-1">
-              <FilterLabel>Updated date <span className="font-normal normal-case text-slate-400">· by call date</span></FilterLabel>
+              <FilterLabel>Updated date <span className="font-normal normal-case text-slate-400">· assigned rep&apos;s call date</span></FilterLabel>
               <DateRangeFilter ariaLabel="Updated date" value={filters.updated} onChange={(v) => setFilter("updated", v)} />
             </label>
           )}
@@ -2343,6 +2343,7 @@ export default function ClientLeads() {
           </div>
         }
         nowrap
+        stickyHeader
         selectable
         selectedKeys={selectedIds}
         onSelectionChange={setSelectedIds}

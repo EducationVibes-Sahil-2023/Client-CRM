@@ -292,7 +292,7 @@ function AnnouncementBell() {
 function Topbar() {
   const { toggleCollapsed, setMobileOpen, user } = useClient();
   return (
-    <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-slate-200 px-4 sm:px-6" style={{ background: "var(--surface-bg)" }}>
+    <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-slate-200 px-3 sm:px-4" style={{ background: "var(--surface-bg)" }}>
       <button onClick={toggleCollapsed} className="hidden h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 lg:flex" aria-label="Toggle sidebar">
         <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" /></svg>
       </button>
@@ -353,7 +353,7 @@ function RouteGuard({ children }: { children: React.ReactNode }) {
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
-  const { collapsed, contentFull, branding, hasFeature, can, impersonation, exitImpersonation } = useClient();
+  const { collapsed, branding, hasFeature, can, impersonation, exitImpersonation } = useClient();
   // The floating chat launcher follows the same gate as the Chat nav item:
   // the chat plan-feature must be on AND the user granted the chat permission.
   const showChat = hasFeature("chat") && can("chat");
@@ -431,7 +431,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className={`client-shell min-h-screen ${dark ? "dark" : ""}`}
+      className={`client-shell min-h-screen ${dark ? "dark" : ""} ${branding.table_header_wrap === "1" ? "dt-wrap-headers" : ""}`}
       data-density={branding.density}
       data-sidebar={branding.sidebar_style}
       style={style}
@@ -453,7 +453,10 @@ function Shell({ children }: { children: React.ReactNode }) {
           </div>
         )}
         <Topbar />
-        <main className={`mx-auto p-4 transition-[max-width] duration-200 sm:p-6 ${contentFull ? "max-w-none" : "max-w-7xl"}`}><RouteGuard>{children}</RouteGuard></main>
+        {/* Full-width content (no centered max-width cap) with tight padding so
+            every page uses the whole area right of the (collapsible) sidebar. The
+            filter rail, when open, still reserves its space via filterRailPad. */}
+        <main className="w-full p-3 transition-[padding] duration-200 sm:p-4"><RouteGuard>{children}</RouteGuard></main>
       </div>
       {showChat && <ChatLauncher area="client" />}
     </div>

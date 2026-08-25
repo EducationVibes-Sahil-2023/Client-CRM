@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
   getNotifications,
@@ -52,7 +52,7 @@ const POLL_MS = 15_000;
  * client (and staff) areas. Each area is scoped to its own recipient by the
  * backend, so everyone only ever sees their own notifications.
  */
-export default function NotificationsView({ area }: { area: ChatArea }) {
+export default function NotificationsView({ area, headerExtra }: { area: ChatArea; headerExtra?: ReactNode }) {
   const router = useRouter();
   const theme = THEME[area];
 
@@ -192,14 +192,17 @@ export default function NotificationsView({ area }: { area: ChatArea }) {
         title="Notifications"
         subtitle="Stay up to date with your latest alerts and messages."
         action={
-          <button
-            onClick={markAll}
-            disabled={unread === 0}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M5 13l3 3 6-7M11 16l3 3 6-7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            Mark all as read
-          </button>
+          <div className="flex items-center gap-2">
+            {headerExtra}
+            <button
+              onClick={markAll}
+              disabled={unread === 0}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M5 13l3 3 6-7M11 16l3 3 6-7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              Mark all as read
+            </button>
+          </div>
         }
       />
 

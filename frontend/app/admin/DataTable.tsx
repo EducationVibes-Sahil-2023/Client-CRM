@@ -143,6 +143,12 @@ interface DataTableProps<T> {
   sharedConfig?: boolean;
   /** When true, the Columns menu lets the user rename column headers (client admin). */
   canRenameColumns?: boolean;
+  /** Pin the header row so it stays visible while scrolling the table vertically.
+   *  The table body then scrolls inside `maxBodyHeight` instead of the page. */
+  stickyHeader?: boolean;
+  /** Max height of the scroll area when `stickyHeader` is on (any CSS length).
+   *  Defaults to a viewport-relative height so the table fills the screen. */
+  maxBodyHeight?: string;
 }
 
 const EMPTY_SELECTION: Set<string | number> = new Set();
@@ -186,6 +192,8 @@ export function DataTable<T>({
   canRenameColumns,
   frozenCols = 0,
   sharedConfig = false,
+  stickyHeader = false,
+  maxBodyHeight = "calc(100vh - 15rem)",
 }: DataTableProps<T>) {
   const [internalView, setInternalView] = useState<DataView>(defaultView);
   const [query, setQuery] = useState(initialSearch);
@@ -376,6 +384,19 @@ export function DataTable<T>({
       ? { position: "sticky", left: frozenLefts[ci], zIndex: header ? 21 : 11, background: header ? "var(--table-header-bg)" : "var(--surface-bg)", boxShadow: ci === frozen - 1 ? "8px 0 8px -8px rgba(15,23,42,0.12)" : undefined }
       : undefined;
 
+  // When stickyHeader is on the body scrolls inside a bounded area (both axes) and
+  // the header row pins to its top. The wrapper switches from x-only to both-axis
+  // scroll; each header cell must carry its own background + a z-index above the
+  // body so rows don't bleed through. Frozen (pinned) header cells stick to the
+  // top-left/right corner (top + left/right together).
+  const scrollWrapClass = stickyHeader ? "overflow-auto" : "overflow-x-auto";
+  const scrollWrapStyle: React.CSSProperties | undefined = stickyHeader ? { maxHeight: maxBodyHeight } : undefined;
+  const headCellSticky = (fz: React.CSSProperties | undefined): React.CSSProperties => {
+    if (!stickyHeader) return fz ?? {};
+    if (fz) return { ...fz, top: 0 };
+    return { position: "sticky", top: 0, zIndex: 15, background: "var(--table-header-bg)" };
+  };
+
   const activeView: DataView = card ? view : "list";
   const showToolbar = !isControlled && !!(card || searchKeys || toolbar);
   const shell = "overflow-hidden rounded-2xl border border-slate-200 dt-surface shadow-sm";
@@ -410,13 +431,13 @@ export function DataTable<T>({
       </div>
     ) : (
       <div className={shell}>
-        <div className="overflow-x-auto">
+        <div className={scrollWrapClass} style={scrollWrapStyle}>
           <table className="w-full text-[13px]">
             <thead>
               <tr className="dt-head border-b border-slate-100 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 {selectable && <th className="w-11 px-4 py-2.5" />}
                 {cols.map((c) => (
-                  <th key={c.key} className={`px-4 py-2.5 ${c.className ?? ""}`}><span className="truncate">{c.header}</span></th>
+                  <th key={c.key} className={`dt-head-cell px-4 py-2.5 ${c.className ?? ""}`}><span className="dt-head-text truncate">{c.header}</span></th>
                 ))}
                 {hasActionsCol && <th className="px-4 py-2.5 text-right">Actions</th>}
               </tr>
@@ -463,7 +484,7 @@ export function DataTable<T>({
   } else {
     body = (
       <div className={shell}>
-        <div className="overflow-x-auto">
+        <div className={scrollWrapClass} style={scrollWrapStyle}>
           <table className={`w-full text-[13px] ${customize && !nowrap ? "table-fixed" : ""}`}>
             {customize && (
               <colgroup>
@@ -475,7 +496,7 @@ export function DataTable<T>({
             <thead>
               <tr className="dt-head border-b border-slate-100 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 {selectable && (
-                  <th className="dt-sticky-head sticky left-0 z-20 w-11 px-4 py-2.5">
+                  <th className={`dt-sticky-head sticky left-0 z-20 w-11 px-4 py-2.5 ${stickyHeader ? "top-0" : ""}`}>
                     <input
                       type="checkbox"
                       aria-label="Select all on this page"
@@ -496,30 +517,30 @@ export function DataTable<T>({
                     <th
                       key={c.key}
                       ref={(el) => { headCellRefs.current[ci] = el; }}
-                      style={{ ...(customize ? { textAlign: c.resolvedAlign } : {}), ...fz }}
+                      style={{ ...(customize ? { textAlign: c.resolvedAlign } : {}), ...headCellSticky(fz) }}
                       draggable={customize && resizingKey === null}
                       onDragStart={customize ? () => setDragCol(c.key) : undefined}
                       onDragOver={customize ? (e) => { if (dragCol && dragCol !== c.key) { e.preventDefault(); setOverCol(c.key); } } : undefined}
                       onDragLeave={customize ? () => setOverCol((o) => (o === c.key ? null : o)) : undefined}
                       onDrop={customize ? () => { if (dragCol) tc.moveBefore(dragCol, c.key); setDragCol(null); setOverCol(null); } : undefined}
                       onDragEnd={customize ? () => { setDragCol(null); setOverCol(null); } : undefined}
-                      className={`relative select-none px-4 py-2.5 ${cellNowrap} ${c.className ?? ""} ${customize ? "cursor-grab active:cursor-grabbing" : ""} ${dragCol === c.key ? "opacity-40" : ""} ${isOver ? "bg-indigo-50" : ""}`}
+                      className={`dt-head-cell relative select-none px-4 py-2.5 ${cellNowrap} ${c.className ?? ""} ${customize ? "cursor-grab active:cursor-grabbing" : ""} ${dragCol === c.key ? "opacity-40" : ""} ${isOver ? "bg-indigo-50" : ""}`}
                     >
                       {sortableHere ? (
                         <button
                           onClick={() => handleSort(c.key)}
                           onMouseDown={(e) => e.stopPropagation()}
                           draggable={false}
-                          className="inline-flex items-center gap-1 transition hover:text-slate-600"
+                          className="inline-flex items-center gap-1 text-left transition hover:text-slate-600"
                         >
-                          {c.header}
+                          <span className="dt-head-text">{c.header}</span>
                           <span className="flex flex-col -space-y-1">
                             <svg className="h-2 w-2 text-slate-300" style={isSorted && effectiveSort?.dir === "asc" ? { color: "var(--table-accent)" } : undefined} fill="currentColor" viewBox="0 0 20 20"><path d="M10 4l5 6H5z" /></svg>
                             <svg className="h-2 w-2 text-slate-300" style={isSorted && effectiveSort?.dir === "desc" ? { color: "var(--table-accent)" } : undefined} fill="currentColor" viewBox="0 0 20 20"><path d="M10 16l-5-6h10z" /></svg>
                           </span>
                         </button>
                       ) : (
-                        <span className="truncate">{c.header}</span>
+                        <span className="dt-head-text truncate">{c.header}</span>
                       )}
                       {customize && (
                         <span
@@ -536,7 +557,7 @@ export function DataTable<T>({
                   );
                 })}
                 {(rowActions || quickActions) && (
-                  <th className="dt-sticky-head sticky right-0 z-20 whitespace-nowrap px-4 py-2.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.12)]">Actions</th>
+                  <th className={`dt-sticky-head sticky right-0 z-20 whitespace-nowrap px-4 py-2.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.12)] ${stickyHeader ? "top-0" : ""}`}>Actions</th>
                 )}
               </tr>
             </thead>

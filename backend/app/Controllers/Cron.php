@@ -3,6 +3,7 @@
 namespace App\Controllers;
 
 use App\Libraries\FbPollRunner;
+use App\Libraries\LeadsResyncRunner;
 
 /**
  * PUBLIC (sessionless) cron trigger endpoints, guarded by a shared secret so any
@@ -43,6 +44,26 @@ class Cron extends ApiController
         ignore_user_abort(true);
 
         $r = FbPollRunner::run();
+
+        return $this->respond(['ok' => true] + $r);
+    }
+
+    /**
+     * GET /public/cron/leads-resync?key=… — recompute derived lead fields
+     * (follow_date, reference_id, calls.lead_id, updated_at, first-response) for
+     * every client. Point a scheduler at this so leads/reminders/notes/calls
+     * inserted via raw SQL are picked up automatically. Recompute-only + safe to
+     * run repeatedly (only touches rows that need it).
+     */
+    public function leadsResync()
+    {
+        if ($resp = $this->guard()) {
+            return $resp;
+        }
+        @set_time_limit(600);
+        ignore_user_abort(true);
+
+        $r = LeadsResyncRunner::run();
 
         return $this->respond(['ok' => true] + $r);
     }

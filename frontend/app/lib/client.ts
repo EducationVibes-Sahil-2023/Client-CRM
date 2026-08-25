@@ -1785,7 +1785,14 @@ export interface TableConfig {
   placement?: "right" | "left" | "top";
 }
 export const getTableConfig = (tableKey: string, shared = false) =>
-  clientGet<{ config: TableConfig | null }>(`/table-prefs/${tableKey}${shared ? "?shared=1" : ""}`);
+  clientGet<{ config: TableConfig | null; source?: "own" | "team" | "default" }>(`/table-prefs/${tableKey}${shared ? "?shared=1" : ""}`);
+
+// ---- admin: publish a table's column layout as the team default (per table) ----
+export interface TableLayoutDefault { key: string; label: string; active: boolean }
+export const getTableLayoutDefaults = () =>
+  clientGet<{ tables: TableLayoutDefault[] }>(`/table-layout-defaults`);
+export const saveTableLayoutDefault = (tableKey: string, active: boolean) =>
+  clientPost<{ message: string; active: boolean }>(`/table-layout-defaults/${tableKey}`, { active });
 export const saveTableConfig = (tableKey: string, config: TableConfig, shared = false) =>
   clientPost<{ message: string; config: TableConfig }>(`/table-prefs/${tableKey}${shared ? "?shared=1" : ""}`, { config } as Record<string, unknown>);
 
@@ -1822,6 +1829,9 @@ export const savePushSubscription = (subscription: { endpoint: string; keys: { p
   clientPost<{ message: string }>("/push/subscribe", { subscription } as Record<string, unknown>);
 export const deletePushSubscription = (endpoint: string) =>
   clientPost<{ message: string }>("/push/unsubscribe", { endpoint });
+/** Send a test web push (+ in-app notification) to my own browsers; reports state. */
+export interface PushTestResult { vapid: boolean; feature: boolean; enabled: boolean; subscriptions: number; sent: number }
+export const sendTestPush = () => clientPost<PushTestResult>("/push/test", {});
 
 // ---- billing ----
 export interface PlanCatalogItem {

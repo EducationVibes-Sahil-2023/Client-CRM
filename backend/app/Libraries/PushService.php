@@ -46,20 +46,22 @@ class PushService
     }
 
     /**
-     * Push a notification to every browser the recipient has subscribed.
-     * No-op (logged) on any failure, missing keys, or a client without the feature.
+     * Push a notification to every browser the recipient has subscribed. No-op
+     * (logged) on any failure, missing keys, or a client without the feature.
+     * Returns the number of browsers the push was successfully delivered to
+     * (0 when disabled / unsubscribed / all sends failed) — handy for a test.
      */
-    public static function sendToRecipient(int $clientId, string $recipientType, int $recipientId, string $title, ?string $body, ?string $link): void
+    public static function sendToRecipient(int $clientId, string $recipientType, int $recipientId, string $title, ?string $body, ?string $link): int
     {
         try {
             if ($recipientId <= 0 || ! self::enabledFor($clientId)) {
-                return;
+                return 0;
             }
 
             $model = new PushSubscriptionModel();
             $subs  = $model->forRecipient($clientId, $recipientType, $recipientId);
             if (! $subs) {
-                return;
+                return 0;
             }
 
             $webPush = new WebPush(self::vapid());
@@ -82,14 +84,23 @@ class PushService
                 );
             }
 
+            $ok = 0;
             foreach ($webPush->flush() as $report) {
                 $endpoint = $report->getEndpoint();
-                if (! $report->isSuccess() && $report->isSubscriptionExpired() && isset($byEndpoint[$endpoint])) {
-                    $model->delete($byEndpoint[$endpoint]);
+                if ($report->isSuccess()) {
+                    $ok++;
+                } elseif ($report->isSubscriptionExpired() && isset($byEndpoint[$endpoint])) {
+                    $model->delete($byEndpoint[$endpoint]); // prune dead subscription
+                } else {
+                    log_message('error', 'Web push rejected (' . $endpoint . '): ' . $report->getReason());
                 }
             }
+
+            return $ok;
         } catch (\Throwable $e) {
             log_message('error', 'Web push send failed: ' . $e->getMessage());
+
+            return 0;
         }
     }
 }

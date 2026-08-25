@@ -59,6 +59,23 @@
    into the solid surface colour rather than using a translucent tint. */
 .dt-surface { background: var(--surface-bg); }
 .dt-head { background: var(--table-header-bg); }
+/* Admin "wrap table headers" (branding.table_header_wrap): let column-header text
+   flow onto multiple lines across every table, overriding the default nowrap +
+   truncate. Only the HEADER cells are affected; body cells keep their behaviour. */
+.dt-wrap-headers .dt-head-cell { white-space: normal; vertical-align: bottom; }
+/* WORD wrap only: a multi-word header folds at its spaces (never mid-word into
+   single characters). A max-width caps the one-line width so long labels like
+   "TOTAL CALL DURATION" fold to a few short lines and the column stays narrow;
+   `overflow-wrap: normal` keeps whole words intact. Body cells are untouched. */
+.dt-wrap-headers .dt-head-text {
+  display: inline-block;
+  max-width: 6.5rem;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: normal;
+  word-break: normal;
+}
 .dt-row { transition: background-color 0.15s; }
 .dt-row:hover { background: var(--table-accent-soft); }
 .dt-row-selected { background: var(--table-accent-soft); }

@@ -39,6 +39,9 @@ $routes->match(['get', 'post'], 'public/fb/webhook', static fn () => service('re
 // a 5-minute scheduler (host cron / cron-job.com / Windows Task Scheduler) at this
 // URL to pull Facebook leads automatically, without server shell access.
 $routes->get('public/cron/fb-poll', 'Cron::fbPoll');
+// Recompute derived lead fields after raw-SQL/manual inserts (follow_date,
+// reference_id, calls.lead_id, updated_at, first-response). Schedule every few min.
+$routes->get('public/cron/leads-resync', 'Cron::leadsResync');
 
 // Authentication
 $routes->group('auth', static function (RouteCollection $routes) {
@@ -183,6 +186,9 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     // Per-user table layout (visible columns, order, widths, alignment).
     $routes->get('table-prefs/(:segment)', 'ClientController::tablePrefs/$1');
     $routes->post('table-prefs/(:segment)', 'ClientController::saveTablePrefs/$1');
+    // Admin: publish a table's column layout as the team default (per table).
+    $routes->get('table-layout-defaults', 'ClientController::tableLayoutDefaults');
+    $routes->post('table-layout-defaults/(:segment)', 'ClientController::saveTableLayoutDefault/$1');
     // Client-wide custom column names (read by all; write by client admin only).
     $routes->get('table-labels/(:segment)', 'ClientController::tableLabels/$1');
     $routes->post('table-labels/(:segment)', 'ClientController::saveTableLabels/$1');
@@ -193,6 +199,7 @@ $routes->group('client', ['filter' => 'auth:client_admin,staff'], static functio
     $routes->get('push/public-key', 'ClientController::pushPublicKey');
     $routes->post('push/subscribe', 'ClientController::pushSubscribe');
     $routes->post('push/unsubscribe', 'ClientController::pushUnsubscribe');
+    $routes->post('push/test', 'ClientController::pushTest');
     $routes->get('dashboard', 'ClientController::dashboard');
     $routes->get('settings', 'ClientController::settings');
     $routes->post('settings', 'ClientController::saveSettings');

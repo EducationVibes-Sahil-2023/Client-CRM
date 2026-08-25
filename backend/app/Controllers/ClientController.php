@@ -105,6 +105,7 @@ class ClientController extends ApiController
         'sidebar_icon'    => '#94a3b8',    // sidebar menu icon colour (inactive)
         'table_header_bg' => '#f8fafc',    // data-table header row
         'table_accent'    => '#6366f1',    // table hover / selection / sort / links
+        'table_header_wrap' => '0',        // 1 = column headers wrap to multiple lines; 0 = single line
     ];
 
     /** Allowed loading-animation styles for the loader_style setting. */
@@ -941,6 +942,53 @@ class ClientController extends ApiController
         return $this->respond(['message' => 'Push notifications disabled.']);
     }
 
+    /**
+     * POST /client/push/test — send a test web push (and an in-app notification)
+     * to the signed-in user's own subscribed browsers, and report the state so
+     * the UI can explain WHY nothing arrived (feature off, no keys, not
+     * subscribed on this browser, or all sends rejected).
+     */
+    public function pushTest()
+    {
+        $cid         = $this->clientId();
+        [$type, $id] = $this->pushRecipient();
+        $enabled     = PushService::enabledFor($cid);
+        $subs        = $id > 0 ? (new PushSubscriptionModel())->forRecipient($cid, $type, $id) : [];
+        $count       = count($subs);
+
+        // Always drop an in-app notification too, so the bell reflects the test.
+        if ($id > 0) {
+            (new AppNotificationModel())->insert([
+                'recipient_type' => $type,
+                'recipient_id'   => $id,
+                'type'           => 'test',
+                'title'          => 'Test notification',
+                'body'           => 'This is a test — your notifications are working.',
+                'link'           => '/client/notifications',
+            ]);
+        }
+
+        $sent = 0;
+        if ($enabled && $count > 0) {
+            $sent = PushService::sendToRecipient(
+                $cid,
+                $type,
+                $id,
+                'Test notification 🔔',
+                'Web push is working. If you can see this, you are all set.',
+                '/client/notifications',
+            );
+        }
+
+        return $this->respond([
+            'vapid'         => PushService::publicKey() !== '',
+            'feature'       => (new \App\Libraries\FeatureService())->isEnabled($cid, 'web_push'),
+            'enabled'       => $enabled,        // vapid + feature
+            'subscriptions' => $count,          // browsers subscribed for this user
+            'sent'          => $sent,           // pushes actually delivered just now
+        ]);
+    }
+
     /** Logical tables a user may save a layout for. Guards the table_key param. */
     private const TABLE_PREF_KEYS = [
         'leads', 'leads_filters', 'calls',
@@ -951,6 +999,22 @@ class ClientController extends ApiController
         'followups_filters', 'calls_filters', 'calls_log_filters', 'tasks_filters', 'team_filters',
         'assets_filters', 'reports_filters', 'announcements_filters',
         'visitors_filters', 'transfers_filters', 'applicant_filters',
+    ];
+
+    /**
+     * Tables whose COLUMN layout an admin can publish as the team default (key →
+     * label). When active, a user who hasn't customised that table sees the
+     * admin's layout; they can still override it themselves (own prefs win).
+     */
+    private const LAYOUT_DEFAULT_KEYS = [
+        'leads'             => 'Leads',
+        'calls'             => 'Call Tracking',
+        'followups'         => 'Follow Up Tracker',
+        'team'              => 'Team',
+        'assets'            => 'Assets',
+        'office_locations'  => 'Office Locations',
+        'billing'           => 'Billing',
+        'applicant-tracker' => 'Applicant Tracker',
     ];
 
     /** The signed-in user's own auth id — the per-user key for saved layouts. */
@@ -970,13 +1034,106 @@ class ClientController extends ApiController
             return $this->failNotFound('Unknown table.');
         }
 
-        // shared=1 → the CLIENT-WIDE layout (stored under user 0), so the admin's
-        // arrangement applies to everyone; otherwise the caller's own layout.
-        $uid    = $this->request->getGet('shared') === '1' ? 0 : $this->userId();
-        $row    = (new UserTablePrefModel())->forUser($this->clientId(), $uid, $key);
-        $config = $row ? json_decode((string) $row['config'], true) : null;
+        $model = new UserTablePrefModel();
+        $cid   = $this->clientId();
 
-        return $this->respond(['config' => is_array($config) ? $config : null]);
+        // shared=1 → the CLIENT-WIDE layout (stored under user 0), for admins who
+        // read/write the shared bucket directly (filter layout etc.).
+        if ($this->request->getGet('shared') === '1') {
+            $row    = $model->forUser($cid, 0, $key);
+            $config = $row ? json_decode((string) $row['config'], true) : null;
+
+            return $this->respond(['config' => is_array($config) ? $config : null]);
+        }
+
+        // The caller's OWN saved layout always wins.
+        $own = $model->forUser($cid, $this->userId(), $key);
+        if ($own) {
+            $config = json_decode((string) $own['config'], true);
+
+            return $this->respond(['config' => is_array($config) ? $config : null, 'source' => 'own']);
+        }
+
+        // No own layout: fall back to the admin's team default for this table, but
+        // only when the admin has published it (config.active) — the user can still
+        // customise on top (that then saves to their own bucket).
+        if (isset(self::LAYOUT_DEFAULT_KEYS[$key])) {
+            $shared = $model->forUser($cid, 0, $key);
+            $scfg   = $shared ? json_decode((string) $shared['config'], true) : null;
+            if (is_array($scfg) && ! empty($scfg['active'])) {
+                unset($scfg['active']);
+
+                return $this->respond(['config' => $scfg, 'source' => 'team']);
+            }
+        }
+
+        return $this->respond(['config' => null, 'source' => 'default']);
+    }
+
+    /**
+     * GET /client/table-layout-defaults — admin list of column-layout tables and
+     * whether each has an active team default (published from the admin's layout).
+     */
+    public function tableLayoutDefaults()
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only the client admin can manage team table layouts.');
+        }
+        $cid   = $this->clientId();
+        $model = new UserTablePrefModel();
+        $tables = [];
+        foreach (self::LAYOUT_DEFAULT_KEYS as $key => $label) {
+            $row = $model->forUser($cid, 0, $key);
+            $cfg = $row ? json_decode((string) $row['config'], true) : null;
+            $tables[] = [
+                'key'    => $key,
+                'label'  => $label,
+                'active' => is_array($cfg) && ! empty($cfg['active']),
+            ];
+        }
+
+        return $this->respond(['tables' => $tables]);
+    }
+
+    /**
+     * POST /client/table-layout-defaults/(:segment) {active} — turn the team
+     * default on/off for one table. Turning it ON snapshots the admin's CURRENT
+     * own layout for that table into the shared (user 0) bucket and marks it
+     * active; OFF just clears the active flag (the layout snapshot is kept).
+     */
+    public function saveTableLayoutDefault(string $key)
+    {
+        if (! $this->isAdmin()) {
+            return $this->failForbidden('Only the client admin can manage team table layouts.');
+        }
+        if (! isset(self::LAYOUT_DEFAULT_KEYS[$key])) {
+            return $this->failNotFound('Unknown table.');
+        }
+        $active = (bool) $this->input('active');
+        $cid    = $this->clientId();
+        $model  = new UserTablePrefModel();
+
+        if ($active) {
+            // Snapshot the admin's current layout as the team default.
+            $own = $model->forUser($cid, $this->userId(), $key);
+            $cfg = $own ? (json_decode((string) $own['config'], true) ?: []) : [];
+        } else {
+            // Keep whatever snapshot exists; just deactivate it.
+            $shared = $model->forUser($cid, 0, $key);
+            $cfg    = $shared ? (json_decode((string) $shared['config'], true) ?: []) : [];
+        }
+        $cfg           = is_array($cfg) ? $cfg : [];
+        $cfg['active'] = $active;
+
+        $existing = $model->forUser($cid, 0, $key);
+        $json     = json_encode($cfg);
+        if ($existing) {
+            $model->skipValidation(true)->update($existing['id'], ['config' => $json]);
+        } else {
+            $model->skipValidation(true)->insert(['client_id' => $cid, 'user_id' => 0, 'table_key' => $key, 'config' => $json]);
+        }
+
+        return $this->respond(['message' => $active ? 'Applied as team default.' : 'Team default turned off.', 'active' => $active]);
     }
 
     /**
@@ -1297,6 +1454,8 @@ class ClientController extends ApiController
                 $value = (string) (in_array($n, self::PAGE_SIZE_OPTIONS, true) ? $n : self::BRANDING_DEFAULTS['default_page_size']);
             } elseif ($key === 'loader_style') {
                 $value = in_array($value, self::LOADER_STYLES, true) ? (string) $value : self::BRANDING_DEFAULTS['loader_style'];
+            } elseif ($key === 'table_header_wrap') {
+                $value = in_array((string) $value, ['1', 'true'], true) ? '1' : '0';
             } else {
                 $value = mb_substr(trim((string) $value), 0, 255);
             }
@@ -2220,13 +2379,16 @@ class ClientController extends ApiController
         if (($f = $get('follow_to')) !== '') {
             $q->where('follow_date <=', $f);
         }
-        // "Updated date" = by CALL date: keep leads that have at least one call
-        // (matched by contact = phone/alt_phone) whose call_start is in range.
+        // "Updated date" = by CALL date, restricted to the lead's ASSIGNED rep:
+        // keep leads whose ASSIGNED counsellor made a call (matched by contact =
+        // phone/alt_phone AND staff_id = assigned_to) with call_start in range. A
+        // call by a different counsellor does NOT count, and unassigned leads never
+        // match (they have no assigned rep to have called).
         $isDate = static fn (string $s): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $s);
         $uFrom  = $get('updated_from');
         $uTo    = $get('updated_to');
         if (($uFrom !== '' && $isDate($uFrom)) || ($uTo !== '' && $isDate($uTo))) {
-            $cw = 'c.deleted_at IS NULL AND (c.contact = leads.phone OR c.contact = leads.alt_phone)';
+            $cw = 'c.deleted_at IS NULL AND c.staff_id = leads.assigned_to AND (c.contact = leads.phone OR c.contact = leads.alt_phone)';
             if ($uFrom !== '' && $isDate($uFrom)) {
                 $cw .= " AND c.call_start >= '{$uFrom} 00:00:00'";
             }
