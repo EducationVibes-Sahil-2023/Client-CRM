@@ -196,6 +196,20 @@ export function MultiSelect({
       : value.length === 1 ? (options.find((o) => o.value === value[0])?.label ?? "1 selected")
         : `${value.length} selected`;
 
+  // Select-all / deselect-all operate on the CURRENTLY VISIBLE options, so with a
+  // search active they scope to the matches; with no search they cover everything.
+  const searching = query.trim() !== "";
+  const selectAll = () => onChange([...new Set([...value, ...filtered.map((o) => o.value)])]);
+  const deselectAll = () => {
+    if (searching) {
+      const fset = new Set(filtered.map((o) => o.value));
+      onChange(value.filter((v) => !fset.has(v)));
+    } else {
+      onChange([]);
+    }
+  };
+  const allShownSelected = filtered.length > 0 && filtered.every((o) => selectedSet.has(o.value));
+
   return (
     <div ref={ref} className="relative">
       <button
@@ -225,10 +239,15 @@ export function MultiSelect({
               />
             </div>
           </div>
-          {value.length > 0 && (
-            <div className="flex items-center justify-between border-b border-slate-100 px-3 py-1.5">
-              <span className="text-[11px] font-medium text-slate-500">{value.length} selected</span>
-              <button type="button" onClick={() => onChange([])} className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700">Clear</button>
+          {filtered.length > 0 && (
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-1.5 text-[11px] font-medium">
+              <button type="button" onClick={selectAll} disabled={allShownSelected} className="text-indigo-600 hover:text-indigo-700 disabled:opacity-40">
+                Select all{searching ? " matches" : ""}
+              </button>
+              <span className="text-slate-400">{value.length} selected</span>
+              <button type="button" onClick={deselectAll} disabled={value.length === 0} className="text-indigo-600 hover:text-indigo-700 disabled:opacity-40">
+                Deselect all
+              </button>
             </div>
           )}
           <ul className="max-h-60 overflow-y-auto py-1">

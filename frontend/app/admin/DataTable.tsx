@@ -517,7 +517,9 @@ export function DataTable<T>({
                     <th
                       key={c.key}
                       ref={(el) => { headCellRefs.current[ci] = el; }}
-                      style={{ ...(customize ? { textAlign: c.resolvedAlign } : {}), ...headCellSticky(fz) }}
+                      // Header text is always left-aligned (inherits the row's
+                      // text-left), independent of the column's cell alignment.
+                      style={{ ...headCellSticky(fz) }}
                       draggable={customize && resizingKey === null}
                       onDragStart={customize ? () => setDragCol(c.key) : undefined}
                       onDragOver={customize ? (e) => { if (dragCol && dragCol !== c.key) { e.preventDefault(); setOverCol(c.key); } } : undefined}

@@ -6227,6 +6227,16 @@ class ClientController extends ApiController
                 'custom_fields'  => json_encode($custom),
             ];
 
+            // When the CSV carries a Created date (optionally WITH a time),
+            // backdate created_at to it so the lead's "Created" column shows the
+            // real creation date + time, not the import time. Date-only → midnight
+            // (rendered as just the date). No value → leave created_at unset so the
+            // model stamps "now".
+            $importedCreated = $this->normalizeDateTime($row['created_date'] ?? '');
+            if ($importedCreated !== null) {
+                $data['created_at'] = $importedCreated;
+            }
+
             if ($model->insert($data) === false) {
                 $first    = $model->errors();
                 $errors[] = ['row' => $line, 'message' => $first ? reset($first) : 'Could not save row.'];
@@ -6275,7 +6285,7 @@ class ClientController extends ApiController
         'state'          => 'State',
         'description'    => 'Description / notes',
         'follow_date'    => 'Follow-up date (YYYY-MM-DD)',
-        'created_date'   => 'Created date (YYYY-MM-DD)',
+        'created_date'   => 'Created date/time (YYYY-MM-DD or with HH:MM)',
     ];
 
     /**
@@ -6777,6 +6787,29 @@ class ClientController extends ApiController
         return $ts ? date('Y-m-d', $ts) : null;
     }
 
+    /**
+     * Normalise a date-or-datetime cell to 'Y-m-d H:i:s' (or null). Accepts
+     * 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM', 'YYYY-MM-DD HH:MM:SS' and ISO 'T'
+     * separators; a date with no time becomes midnight (rendered as date-only).
+     */
+    private function normalizeDateTime($value): ?string
+    {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+        if (preg_match('/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/', $value, $m)) {
+            if (isset($m[2])) {
+                return sprintf('%s %02d:%s:%s', $m[1], (int) $m[2], $m[3], $m[4] ?? '00');
+            }
+
+            return $m[1] . ' 00:00:00';
+        }
+        $ts = strtotime($value);
+
+        return $ts ? date('Y-m-d H:i:s', $ts) : null;
+    }
+
     // -------------------------------------------- LEAD REMINDERS / NOTES / LOG
     //
     // A lead carries timed reminders, free-text notes, and an activity timeline
@@ -6862,6 +6895,32 @@ class ClientController extends ApiController
                 $c['connected']  = (bool) $c['connected'];
             }
             unset($c);
+
+            // Collapse re-posted duplicates. The same physical call can reach us
+            // more than once with slightly different *volatile* metadata — e.g. the
+            // realtime webhook posts it with a blank staff_contact/SIM and a later
+            // batch re-post fills them in (or vice-versa). Because ingest keys its
+            // dedup on those volatile fields, both rows survive and the Calls tab
+            // shows the call twice. A call's *stable* identity is who was called
+            // (contact), when (call_start), how long they talked (duration) and the
+            // direction (type); rows agreeing on all of those are the same call, so
+            // keep one — preferring the copy that resolved a staff member.
+            if (count($calls) > 1) {
+                $byKey = [];
+                foreach ($calls as $c) {
+                    $key = ($c['contact'] ?? '') . '|' . ($c['call_start'] ?? '')
+                        . '|' . (int) ($c['duration'] ?? 0) . '|' . ($c['type'] ?? '');
+                    if (! isset($byKey[$key])) {
+                        $byKey[$key] = $c;
+                    } elseif (empty($byKey[$key]['staff_id']) && ! empty($c['staff_id'])) {
+                        $byKey[$key] = $c; // prefer the richer (staff-resolved) copy
+                    }
+                }
+                $calls = array_values($byKey);
+                // Restore newest-first ordering after the associative rebuild.
+                usort($calls, static fn ($a, $b) => [$b['call_start'] ?? '', (int) ($b['id'] ?? 0)]
+                    <=> [$a['call_start'] ?? '', (int) ($a['id'] ?? 0)]);
+            }
         }
 
         return $this->respond([
