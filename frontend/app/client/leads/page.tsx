@@ -2324,6 +2324,8 @@ export default function ClientLeads() {
         rows={pageRows}
         getKey={(l) => l.id}
         loading={loading || applying}
+        exportName="leads"
+        onExportAll={async () => (await getLeads({ per_page: 100000, page: 1, sort: tableSort?.key ?? null, dir: tableSort?.dir ?? null, ...filterQuery })).leads}
         toolbar={
           <div className="flex w-full max-w-md items-center gap-2">
             <div className="relative flex-1">

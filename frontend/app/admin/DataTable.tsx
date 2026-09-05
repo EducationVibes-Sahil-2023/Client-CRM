@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Skeleton, SkeletonCard, EmptyState } from "./ui";
 import { useTableConfig, ColumnSettings } from "./tableConfig";
 import { PAGE_SIZE_OPTIONS } from "../lib/theme";
+import { exportXlsx, exportCsvGrid } from "../lib/xlsxExport";
 
 export type DataView = "list" | "grid";
 
@@ -55,6 +56,12 @@ export interface Column<T> {
    * data (e.g. a joined name or a different field than its key).
    */
   sortAccessor?: (row: T) => string | number | boolean | null | undefined;
+  /**
+   * Plain-text value for this column when the table is exported. Defaults to
+   * `sortAccessor` then the raw `key` field. Set it when the cell renders a
+   * React node (badge, formatted date) whose plain text differs from the field.
+   */
+  exportValue?: (row: T) => string | number | boolean | null | undefined;
 }
 
 export interface RowAction<T> {
@@ -149,6 +156,16 @@ interface DataTableProps<T> {
   /** Max height of the scroll area when `stickyHeader` is on (any CSS length).
    *  Defaults to a viewport-relative height so the table fills the screen. */
   maxBodyHeight?: string;
+  /** Base filename for the built-in Export control (defaults to "export"). */
+  exportName?: string;
+  /** Hide the built-in Export control for this table (it is shown by default). */
+  noExport?: boolean;
+  /**
+   * Fetch the FULL dataset for a "without limit" export. Required for
+   * server-paginated tables (where `rows` is only the current page) so
+   * "Export all" pulls every row; client-side tables export their in-memory set.
+   */
+  onExportAll?: () => Promise<T[]>;
 }
 
 const EMPTY_SELECTION: Set<string | number> = new Set();
@@ -194,9 +211,21 @@ export function DataTable<T>({
   sharedConfig = false,
   stickyHeader = false,
   maxBodyHeight = "calc(100vh - 15rem)",
+  exportName,
+  noExport,
+  onExportAll,
 }: DataTableProps<T>) {
   const [internalView, setInternalView] = useState<DataView>(defaultView);
   const [query, setQuery] = useState(initialSearch);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const exportRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const h = (e: MouseEvent) => { if (exportRef.current && !exportRef.current.contains(e.target as Node)) setExportOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [exportOpen]);
   const isControlled = controlledView !== undefined;
   const view = isControlled ? controlledView : internalView;
   const setView = setInternalView;
@@ -396,6 +425,65 @@ export function DataTable<T>({
     if (fz) return { ...fz, top: 0 };
     return { position: "sticky", top: 0, zIndex: 15, background: "var(--table-header-bg)" };
   };
+
+  // ---- Built-in export (shown on every table unless `noExport`) --------------
+  // Plain-text value for a cell: exportValue → sortAccessor → the raw key field.
+  const colByKey = useMemo(() => new Map(columns.map((c) => [c.key, c] as const)), [columns]);
+  const exportText = (row: T, key: string): string => {
+    const c = colByKey.get(key);
+    const v = c?.exportValue ? c.exportValue(row) : c?.sortAccessor ? c.sortAccessor(row) : (row as Record<string, unknown>)[key];
+    return v === null || v === undefined ? "" : String(v);
+  };
+  // "Without limit" needs the full set: a server-paginated table (external onPage)
+  // must supply onExportAll; a client table already holds everything in `visible`.
+  const canExportAll = !!onExportAll || !onPage;
+  async function runExport(scope: "page" | "all", kind: "xlsx" | "csv") {
+    setExportOpen(false);
+    setExporting(true);
+    try {
+      const data: T[] = scope === "all" ? (onExportAll ? await onExportAll() : visible) : displayRows;
+      const headers = cols.map((c) => c.header);
+      const grid = data.map((row) => cols.map((c) => exportText(row, c.key)));
+      const fname = exportName ?? "export";
+      if (kind === "xlsx") await exportXlsx(fname, headers, grid, exportName);
+      else exportCsvGrid(fname, headers, grid);
+    } catch {
+      /* export is best-effort; ignore failures */
+    } finally {
+      setExporting(false);
+    }
+  }
+  const exportItem = "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-slate-700 transition hover:bg-slate-50";
+  const exportControl = noExport ? null : (
+    <div ref={exportRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setExportOpen((o) => !o)}
+        disabled={exporting}
+        className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+      >
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        {exporting ? "Exporting…" : "Export"}
+        <svg className={`h-3.5 w-3.5 transition ${exportOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      </button>
+      {exportOpen && (
+        <div className="animate-fade-up absolute right-0 z-30 mt-1 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl">
+          <p className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">This page ({displayRows.length})</p>
+          <button type="button" onClick={() => runExport("page", "xlsx")} className={exportItem}>Excel (.xlsx)</button>
+          <button type="button" onClick={() => runExport("page", "csv")} className={exportItem}>CSV</button>
+          <p className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Without limit (all rows)</p>
+          {canExportAll ? (
+            <>
+              <button type="button" onClick={() => runExport("all", "xlsx")} className={exportItem}>Excel (.xlsx)</button>
+              <button type="button" onClick={() => runExport("all", "csv")} className={exportItem}>CSV</button>
+            </>
+          ) : (
+            <p className="px-3 py-1.5 text-[12px] text-slate-400">Not available for this table.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   const activeView: DataView = card ? view : "list";
   const showToolbar = !isControlled && !!(card || searchKeys || toolbar);
@@ -621,10 +709,17 @@ export function DataTable<T>({
   // A table with a tableKey gets a slim bar holding the "Columns" gear, even
   // when it has no other toolbar (search / view toggle).
   if (!showToolbar) {
-    if (!customize) return <>{body}</>;
+    if (!customize) {
+      return exportControl ? (
+        <div className="space-y-3">
+          <div className="flex justify-end">{exportControl}</div>
+          {body}
+        </div>
+      ) : <>{body}</>;
+    }
     return (
       <div className="space-y-3">
-        <div className="flex justify-end"><ColumnSettings api={tc} /></div>
+        <div className="flex justify-end gap-2">{exportControl}<ColumnSettings api={tc} /></div>
         {body}
       </div>
     );
@@ -648,6 +743,7 @@ export function DataTable<T>({
           {toolbar}
         </div>
         <div className="flex items-center gap-2">
+          {exportControl}
           {customize && <ColumnSettings api={tc} />}
           {card && <ViewToggle view={activeView} onChange={setView} />}
         </div>

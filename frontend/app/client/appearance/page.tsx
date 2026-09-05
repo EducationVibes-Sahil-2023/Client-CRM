@@ -455,9 +455,9 @@ function ColorField({ label, hint, value, fallback, onChange }: {
 
 function SegRow({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: [string, string][] }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex flex-wrap items-center justify-between gap-3">
       <span className="text-sm font-medium text-slate-600">{label}</span>
-      <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+      <div className="flex flex-wrap justify-end rounded-lg border border-slate-200 bg-slate-50 p-0.5">
         {options.map(([v, l]) => (
           <button key={v} onClick={() => onChange(v)} className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${value === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{l}</button>
         ))}

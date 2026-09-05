@@ -128,7 +128,7 @@ export function resolveLogoSize(width: string | number | undefined, height: stri
 }
 
 /** Allowed "rows per page" values, shared by the picker and table page-size menus. */
-export const PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100] as const;
+export const PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100, 500, 1000] as const;
 
 /** Parse a stored default_page_size into a valid number, falling back to 15. */
 export function resolvePageSize(value: string | number | null | undefined): number {

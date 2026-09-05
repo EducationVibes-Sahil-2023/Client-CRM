@@ -33,6 +33,7 @@ class Cors extends BaseConfig
          * the "*" wildcard is not allowed together with credentials.
          */
         'allowedOrigins' => [
+            'http://localhost:3000',
             'http://localhost:3001',
             'https://client.educationvibes.in',
         ],

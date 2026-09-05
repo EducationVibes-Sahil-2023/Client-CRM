@@ -122,7 +122,7 @@ class ClientController extends ApiController
     public const BRANDING_BLANK_ALLOWED = ['app_name', 'app_tagline'];
 
     /** Allowed "rows per page" values for the default_page_size setting. */
-    public const PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100];
+    public const PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100, 500, 1000];
 
     /** Subscription plans the client can be on, with monthly pricing (INR). */
     public const PLAN_CATALOG = [
@@ -2166,7 +2166,7 @@ class ClientController extends ApiController
         }
 
         // Page window.
-        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $perPage = max(1, min(1000, (int) ($this->request->getGet('per_page') ?: 50)));
         $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
         $rows    = $q->findAll($perPage, ($page - 1) * $perPage);
 
@@ -2818,7 +2818,7 @@ class ClientController extends ApiController
             return $this->fail('No applicant database is configured. Add your secondary DB credentials in the Applicant section settings.', 503);
         }
 
-        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $perPage = max(1, min(1000, (int) ($this->request->getGet('per_page') ?: 50)));
         $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
         $offset  = ($page - 1) * $perPage;
         $q       = trim((string) ($this->request->getGet('q') ?? ''));
@@ -3297,7 +3297,7 @@ class ClientController extends ApiController
             return $this->fail('No applicant database is configured. Add your secondary DB credentials in the Applicant section settings.', 503);
         }
 
-        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $perPage = max(1, min(1000, (int) ($this->request->getGet('per_page') ?: 50)));
         $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
         $offset  = ($page - 1) * $perPage;
         $q       = trim((string) ($this->request->getGet('q') ?? ''));
@@ -3809,7 +3809,7 @@ class ClientController extends ApiController
             return $this->fail('Only the client admin can view applicants.', 403);
         }
         $cols    = $this->applicantColumnDefs();
-        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $perPage = max(1, min(1000, (int) ($this->request->getGet('per_page') ?: 50)));
         $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
         $q       = trim((string) ($this->request->getGet('q') ?? ''));
 
@@ -5380,7 +5380,7 @@ class ClientController extends ApiController
         $cid  = $this->clientId();
         $db   = (new TenantManager())->forClient($cid);
         $page = max(1, (int) $this->request->getGet('page'));
-        $per  = min(200, max(10, (int) $this->request->getGet('per_page') ?: 50));
+        $per  = min(1000, max(10, (int) $this->request->getGet('per_page') ?: 50));
 
         $staffNames  = $this->idNameMap((new ClientStaffModel())->where('client_id', $cid)->findAll());
         $statusNames = $this->idNameMap((new LeadStatusModel())->where('client_id', $cid)->findAll());
@@ -7073,7 +7073,7 @@ class ClientController extends ApiController
         $this->applyCallFilters($q, $cid);
 
         $total   = $q->countAllResults(false);
-        $perPage = max(1, min(200, (int) ($this->request->getGet('per_page') ?: 50)));
+        $perPage = max(1, min(1000, (int) ($this->request->getGet('per_page') ?: 50)));
         $page    = max(1, (int) ($this->request->getGet('page') ?: 1));
         $rows    = $q->orderBy('call_start', 'DESC')->orderBy('id', 'DESC')->findAll($perPage, ($page - 1) * $perPage);
 
